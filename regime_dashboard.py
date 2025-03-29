@@ -17,7 +17,7 @@ engine = create_engine(db_uri)
 
 # --- UI Setup ---
 st.set_option('deprecation.showPyplotGlobalUse', False)
-st.title("Rolling Hurst Exponent Dashboard")
+st.title("Rolling Factor Dashboard")
 
 # --- Fetch token list from DB ---
 @st.cache_data
