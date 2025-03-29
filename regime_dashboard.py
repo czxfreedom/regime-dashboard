@@ -30,6 +30,13 @@ timeframe = st.selectbox("Timeframe", ["30s", "15min", "30min", "1h", "6h"], ind
 lookback_days = st.slider("Lookback (Days)", 1, 30, 2)
 rolling_window = st.slider("Rolling Window (Bars)", 20, 100, 20)
 
+# --- Determine Bars per Hour ---
+bars_per_hour = {"30s": 120, "15min": 4, "30min": 2, "1h": 1, "6h": 1/6}[timeframe]
+expected_bars = lookback_days * 24 * bars_per_hour
+
+if expected_bars < rolling_window + 10:
+    st.warning("⚠️ Not enough data for this rolling window. Increase lookback or reduce window.")
+
 # --- Fetch Oracle Price Data ---
 end_time = datetime.utcnow()
 start_time = end_time - timedelta(days=lookback_days)
@@ -85,23 +92,30 @@ def classify_regime(hurst):
     else:
         return "NOISE"
 
-# --- Debug Display: Sample Input Series ---
-st.subheader(f"Rolling tHurst for {selected_token} ({timeframe})")
-st.caption("Sample Close Prices (first 20 rows):")
-st.write(ohlc['close'].head(20).tolist())
-
 # --- Compute Rolling tHurst and Regime ---
 ohlc['tHurst'] = ohlc['close'].rolling(rolling_window).apply(compute_hurst)
 ohlc['regime'] = ohlc['tHurst'].apply(classify_regime)
 
-# --- Plot ---
+# --- Chart Output ---
+st.subheader(f"Rolling tHurst for {selected_token} ({timeframe})")
 if ohlc['tHurst'].dropna().empty:
-    st.warning("⚠️ No valid tHurst values computed. Price may be too flat or lookback too short.")
+    st.warning("⚠️ No valid tHurst values computed. Price may be too flat or data too sparse.")
 else:
-    fig = px.line(ohlc.reset_index(), x='timestamp', y='tHurst',
-                  title=f"Rolling tHurst for {selected_token} ({timeframe})")
-    fig.update_layout(yaxis_title="tHurst Exponent", xaxis_title="Time")
+    fig = px.line(
+        ohlc.reset_index(),
+        x='timestamp',
+        y='tHurst',
+        title=f"Rolling tHurst for {selected_token} ({timeframe})",
+        markers=True
+    )
+    fig.update_layout(
+        yaxis_title="tHurst Exponent",
+        xaxis_title="Time",
+        yaxis_range=[0, 1],
+        height=400
+    )
     st.plotly_chart(fig, use_container_width=True)
 
-# --- Show table (latest 100 rows, most recent first) ---
+# --- Table Display ---
+st.markdown("### Regime Table (Most Recent 100 Bars)")
 st.dataframe(ohlc.sort_index(ascending=False).head(100))
