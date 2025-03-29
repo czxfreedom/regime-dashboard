@@ -74,14 +74,25 @@ def compute_hurst(ts):
     except:
         return np.nan
 
+# --- Regime Classification ---
+def classify_regime(hurst):
+    if pd.isna(hurst):
+        return "UNKNOWN"
+    elif hurst < 0.4:
+        return "MEAN-REVERT"
+    elif hurst > 0.6:
+        return "TREND"
+    else:
+        return "NOISE"
 
 # --- Debug Display: Sample Input Series ---
 st.subheader(f"Rolling tHurst for {selected_token} ({timeframe})")
 st.caption("Sample Close Prices (first 20 rows):")
 st.write(ohlc['close'].head(20).tolist())
 
-# --- Compute Rolling tHurst ---
+# --- Compute Rolling tHurst and Regime ---
 ohlc['tHurst'] = ohlc['close'].rolling(rolling_window).apply(compute_hurst)
+ohlc['regime'] = ohlc['tHurst'].apply(classify_regime)
 
 # --- Plot ---
 if ohlc['tHurst'].dropna().empty:
@@ -92,5 +103,5 @@ else:
     fig.update_layout(yaxis_title="tHurst Exponent", xaxis_title="Time")
     st.plotly_chart(fig, use_container_width=True)
 
-# --- Optional: Show table ---
-st.dataframe(ohlc.tail(50))
+# --- Show table (latest 100 rows, most recent first) ---
+st.dataframe(ohlc.sort_index(ascending=False).head(100))
