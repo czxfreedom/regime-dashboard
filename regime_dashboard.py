@@ -502,12 +502,73 @@ st.subheader(f"Rolling Hurst for {selected_token} ({timeframe})")
 fig = go.Figure()
 # Add this line to define df_plot:
 df_plot = ohlc.reset_index()
-# Replace the current price chart code with this improved version:
+# First chart - Hurst values
+fig = go.Figure()
 
-# Plot 2: Price chart with clearer regime background
+# Add Hurst values
+fig.add_trace(go.Scatter(
+    x=df_plot['timestamp'],
+    y=df_plot['Hurst'],
+    mode='lines+markers',
+    name='Hurst',
+    line=dict(color='blue'),
+    marker=dict(
+        color=df_plot['Hurst'].apply(lambda h: 
+            'red' if h < 0.4 else 
+            'green' if h > 0.6 else 
+            'gray'
+        )
+    )
+))
+
+# Add horizontal line at 0.5
+fig.add_trace(go.Scatter(
+    x=[df_plot['timestamp'].iloc[0], df_plot['timestamp'].iloc[-1]] if not df_plot.empty else [],
+    y=[0.5, 0.5],
+    mode='lines',
+    line=dict(color='black', dash='dash'),
+    showlegend=False
+))
+
+# Add horizontal lines at 0.4 and 0.6
+fig.add_trace(go.Scatter(
+    x=[df_plot['timestamp'].iloc[0], df_plot['timestamp'].iloc[-1]] if not df_plot.empty else [],
+    y=[0.4, 0.4],
+    mode='lines',
+    line=dict(color='red', dash='dash'),
+    showlegend=False
+))
+
+fig.add_trace(go.Scatter(
+    x=[df_plot['timestamp'].iloc[0], df_plot['timestamp'].iloc[-1]] if not df_plot.empty else [],
+    y=[0.6, 0.6],
+    mode='lines',
+    line=dict(color='green', dash='dash'),
+    showlegend=False
+))
+
+# Update layout with colored backgrounds
+fig.update_layout(
+    title=f"Rolling Hurst for {selected_token} ({timeframe})",
+    xaxis_title="Time",
+    yaxis_title="Hurst Exponent",
+    yaxis=dict(range=[0, 1]),
+    height=400,
+    # Use plain annotations instead of complex shapes
+    annotations=[
+        dict(x=0.1, y=0.2, xref="paper", yref="y", text="Mean-Reverting Zone", 
+             showarrow=False, font=dict(color="red")),
+        dict(x=0.1, y=0.5, xref="paper", yref="y", text="Random Walk Zone", 
+             showarrow=False, font=dict(color="gray")),
+        dict(x=0.1, y=0.8, xref="paper", yref="y", text="Trending Zone", 
+             showarrow=False, font=dict(color="green"))
+    ]
+)
+
+# Second chart - Price with simple regime indicators
 fig2 = go.Figure()
 
-# Create candlestick chart
+# Add candlestick chart
 fig2.add_trace(go.Candlestick(
     x=df_plot['timestamp'],
     open=df_plot['open'],
@@ -517,207 +578,24 @@ fig2.add_trace(go.Candlestick(
     name="Price"
 ))
 
-# Add colored background for different regimes with more visibility
-for i in range(1, len(df_plot)):
-    if not pd.isna(df_plot['regime'].iloc[i-1]):
-        regime = df_plot['regime'].iloc[i-1]
-        intensity = df_plot['intensity'].iloc[i-1]
-        desc = df_plot['regime_desc'].iloc[i-1]
-        
-        # More saturated colors
-        if regime == "MEAN-REVERT":
-            color = "rgba(255, 0, 0, 0.3)"  # Stronger red
-        elif regime == "TREND":
-            color = "rgba(0, 255, 0, 0.3)"  # Stronger green
-        else:
-            color = "rgba(128, 128, 128, 0.2)"  # Gray for noise
-        
-        # Add vertical rectangles with improved visibility
-        fig2.add_vrect(
-            x0=df_plot['timestamp'].iloc[i-1],
-            x1=df_plot['timestamp'].iloc[i],
-            fillcolor=color,
-            opacity=0.4,  # Higher opacity
-            layer="below",
-            line_width=0
-        )
-        
-        # Add text labels for regime changes
-        if i > 1 and df_plot['regime'].iloc[i-2] != regime:
-            fig2.add_annotation(
-                x=df_plot['timestamp'].iloc[i-1],
-                y=df_plot['high'].iloc[i-1] * 1.01,  # Slightly above price
-                text=desc,
-                showarrow=True,
-                arrowhead=1,
-                arrowsize=1,
-                arrowwidth=1,
-                arrowcolor="black",
-                font=dict(size=10, color="black"),
-                bgcolor=color,
-                bordercolor="black",
-                borderwidth=1
-            )
-
-# Add a second y-axis to show Hurst values alongside price
+# Add simple Hurst overlay without secondary axis
 fig2.add_trace(go.Scatter(
     x=df_plot['timestamp'],
-    y=df_plot['Hurst'],
+    y=(df_plot['Hurst'] * (df_plot['high'].max() - df_plot['low'].min()) * 0.1) + df_plot['low'].min(),
     mode='lines',
-    name='Hurst',
-    line=dict(color='blue', width=1, dash='dot'),
-    yaxis='y2'  # Use secondary y-axis
+    name='Hurst Trend',
+    line=dict(color='blue', width=1)
 ))
 
-# With these safer alternatives:
-if not df_plot.empty:
-    x0 = df_plot['timestamp'].iloc[0] if len(df_plot) > 0 else None
-    x1 = df_plot['timestamp'].iloc[-1] if len(df_plot) > 0 else None
-    
-    if x0 is not None and x1 is not None:
-        # Convert timestamps to strings if needed
-        if isinstance(x0, pd.Timestamp):
-            x0 = x0.strftime('%Y-%m-%d %H:%M:%S')
-        if isinstance(x1, pd.Timestamp):
-            x1 = x1.strftime('%Y-%m-%d %H:%M:%S')
-            
-        # Add horizontal lines safely
-        fig2.add_shape(type="line", x0=x0, y0=0.4, 
-                      x1=x1, y1=0.4,
-                      line=dict(color="red", width=1, dash="dash"), yaxis='y2')
-        fig2.add_shape(type="line", x0=x0, y0=0.6, 
-                      x1=x1, y1=0.6,
-                      line=dict(color="green", width=1, dash="dash"), yaxis='y2')
-
-# Update layout to include the secondary y-axis
+# Simplify layout
 fig2.update_layout(
+    title=f"Price Chart for {selected_token} ({timeframe})",
+    xaxis_title="Time",
     yaxis_title="Price",
-    xaxis_title="Time",
-    height=500,  # Taller plot
-    title=f"Price Chart with Regime Overlay for {selected_token} ({timeframe})",
-    legend=dict(
-        orientation="h",
-        yanchor="bottom",
-        y=1.02,
-        xanchor="right",
-        x=1
-    ),
-    yaxis2=dict(
-        title="Hurst",
-        titlefont=dict(color="blue"),
-        tickfont=dict(color="blue"),
-        anchor="x",
-        overlaying="y",
-        side="right",
-        range=[0, 1]  # Fixed range for Hurst
-    ),
-    # Add a legend for regime colors
-    shapes=[
-        # Legend boxes
-        dict(type="rect", x0=0.8, y0=1.05, x1=0.85, y1=1.08, xref="paper", yref="paper", 
-             fillcolor="rgba(255, 0, 0, 0.3)", line_width=1, line_color="black"),
-        dict(type="rect", x0=0.8, y0=1.10, x1=0.85, y1=1.13, xref="paper", yref="paper", 
-             fillcolor="rgba(128, 128, 128, 0.2)", line_width=1, line_color="black"),
-        dict(type="rect", x0=0.8, y0=1.15, x1=0.85, y1=1.18, xref="paper", yref="paper", 
-             fillcolor="rgba(0, 255, 0, 0.3)", line_width=1, line_color="black"),
-    ],
-    annotations=[
-        # Legend text
-        dict(x=0.86, y=1.065, xref="paper", yref="paper", text="Mean-Reverting", 
-             showarrow=False, font=dict(size=10)),
-        dict(x=0.86, y=1.115, xref="paper", yref="paper", text="Random/Noise", 
-             showarrow=False, font=dict(size=10)),
-        dict(x=0.86, y=1.165, xref="paper", yref="paper", text="Trending", 
-             showarrow=False, font=dict(size=10)),
-    ]
-)
-# The code ends with the fig2 layout, so let's add the code to display both charts:
-
-# First, complete the Hurst chart (fig)
-df_plot = ohlc.reset_index()
-
-# Generate colors for each point based on regime
-colors = []
-for _, row in df_plot.iterrows():
-    if pd.isna(row['Hurst']) or pd.isna(row['regime']) or pd.isna(row['intensity']):
-        colors.append('#EEEEEE')  # Default color for missing data
-    else:
-        if row['regime'] == "MEAN-REVERT":
-            intensity = row['intensity']
-            colors.append(['#FFCCCC', '#FF9999', '#FF6666', '#FF0000'][intensity])  # Red shades
-        elif row['regime'] == "TREND":
-            intensity = row['intensity']
-            colors.append(['#CCFFCC', '#99FF99', '#66FF66', '#00FF00'][intensity])  # Green shades
-        else:  # NOISE
-            intensity = row['intensity']
-            if intensity == 0:
-                colors.append('#CCCCCC')  # Pure random - gray
-            else:
-                colors.append('#DDDDDD')  # Slight bias - light gray
-
-# Create safe opacity values with no NaNs
-opacity_values = df_plot['confidence'].fillna(50)/100
-opacity_values = opacity_values.clip(0.2, 1.0)  # Ensure values are between 0.2 and 1.0
-
-# Add Hurst exponent trace to fig
-fig.add_trace(go.Scatter(
-    x=df_plot['timestamp'], 
-    y=df_plot['Hurst'],
-    mode='lines+markers', 
-    name='Hurst',
-    line=dict(color='blue'),
-    marker=dict(
-        size=6,
-        color=colors,
-        opacity=opacity_values
-    ),
-    text=df_plot['regime_desc'],
-    hovertemplate="<b>%{text}</b><br>Hurst: %{y:.3f}<br>Time: %{x}<extra></extra>"
-))
-
-# Add colored bands to Hurst chart
-fig.add_hrect(y0=0, y1=0.2, fillcolor="red", opacity=0.3, layer="below", line_width=0)
-fig.add_annotation(x=df_plot['timestamp'].iloc[0], y=0.1, text="Strong Mean-Reversion", showarrow=False, 
-                  font=dict(color="black", size=10), bgcolor="rgba(255,0,0,0.3)")
-
-fig.add_hrect(y0=0.2, y1=0.3, fillcolor="red", opacity=0.2, layer="below", line_width=0)
-fig.add_annotation(x=df_plot['timestamp'].iloc[0], y=0.25, text="Moderate Mean-Reversion", showarrow=False, 
-                  font=dict(color="black", size=10), bgcolor="rgba(255,0,0,0.2)")
-
-fig.add_hrect(y0=0.3, y1=0.4, fillcolor="red", opacity=0.1, layer="below", line_width=0)
-fig.add_annotation(x=df_plot['timestamp'].iloc[0], y=0.35, text="Mild Mean-Reversion", showarrow=False, 
-                  font=dict(color="black", size=10), bgcolor="rgba(255,0,0,0.1)")
-
-fig.add_hrect(y0=0.4, y1=0.6, fillcolor="gray", opacity=0.1, layer="below", line_width=0)
-fig.add_annotation(x=df_plot['timestamp'].iloc[0], y=0.5, text="Random/Noise", showarrow=False, 
-                  font=dict(color="black", size=10), bgcolor="rgba(128,128,128,0.1)")
-
-fig.add_hrect(y0=0.6, y1=0.7, fillcolor="green", opacity=0.1, layer="below", line_width=0)
-fig.add_annotation(x=df_plot['timestamp'].iloc[0], y=0.65, text="Mild Trending", showarrow=False, 
-                  font=dict(color="black", size=10), bgcolor="rgba(0,255,0,0.1)")
-
-fig.add_hrect(y0=0.7, y1=0.8, fillcolor="green", opacity=0.2, layer="below", line_width=0)
-fig.add_annotation(x=df_plot['timestamp'].iloc[0], y=0.75, text="Moderate Trending", showarrow=False, 
-                  font=dict(color="black", size=10), bgcolor="rgba(0,255,0,0.2)")
-
-fig.add_hrect(y0=0.8, y1=1, fillcolor="green", opacity=0.3, layer="below", line_width=0)
-fig.add_annotation(x=df_plot['timestamp'].iloc[0], y=0.9, text="Strong Trending", showarrow=False, 
-                  font=dict(color="black", size=10), bgcolor="rgba(0,255,0,0.3)")
-
-# Add horizontal line at 0.5 to highlight the random walk threshold
-fig.add_shape(type="line", x0=df_plot['timestamp'].iloc[0], y0=0.5, 
-             x1=df_plot['timestamp'].iloc[-1], y1=0.5,
-             line=dict(color="black", width=1, dash="dash"))
-
-fig.update_layout(
-    yaxis_title="Hurst Exponent",
-    xaxis_title="Time",
-    height=400,
-    title=f"Rolling Hurst for {selected_token} ({timeframe})",
-    yaxis=dict(range=[0, 1])
+    height=400
 )
 
-# Now display both charts
+# Display charts
 st.plotly_chart(fig, use_container_width=True)
 st.plotly_chart(fig2, use_container_width=True)
 
