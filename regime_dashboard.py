@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 from sqlalchemy import create_engine
 from datetime import datetime, timedelta
 
@@ -84,7 +85,6 @@ def compute_hurst(ts):
     except:
         return np.nan
 
-
 # --- Regime Classification ---
 def classify_regime(hurst):
     if pd.isna(hurst):
@@ -100,25 +100,39 @@ def classify_regime(hurst):
 ohlc['tHurst'] = ohlc['close'].rolling(rolling_window).apply(compute_hurst)
 ohlc['regime'] = ohlc['tHurst'].apply(classify_regime)
 
-# --- Chart Output ---
+# --- Plot ---
 st.subheader(f"Rolling tHurst for {selected_token} ({timeframe})")
+
 if ohlc['tHurst'].dropna().empty:
     st.warning("⚠️ No valid tHurst values computed. Price may be too flat or data too sparse.")
 else:
-    fig = px.line(
-        ohlc.reset_index(),
-        x='timestamp',
-        y='tHurst',
-        title=f"Rolling tHurst for {selected_token} ({timeframe})",
-        markers=True
-    )
+    fig = go.Figure()
+    df_plot = ohlc.reset_index()
+
+    fig.add_trace(go.Scatter(
+        x=df_plot['timestamp'], y=df_plot['tHurst'],
+        mode='lines+markers', name='tHurst',
+        line=dict(color='blue')
+    ))
+
+    # Add regime bands
+    fig.add_hrect(y0=0, y1=0.4, fillcolor="red", opacity=0.2, layer="below", line_width=0, annotation_text="Mean-Reverting")
+    fig.add_hrect(y0=0.4, y1=0.6, fillcolor="gray", opacity=0.1, layer="below", line_width=0, annotation_text="Noise")
+    fig.add_hrect(y0=0.6, y1=1, fillcolor="green", opacity=0.2, layer="below", line_width=0, annotation_text="Trending")
+
     fig.update_layout(
         yaxis_title="tHurst Exponent",
         xaxis_title="Time",
-        yaxis_range=[0, 1],
-        height=400
+        height=450,
+        title=f"Rolling tHurst for {selected_token} ({timeframe})"
     )
     st.plotly_chart(fig, use_container_width=True)
+
+# --- Show Validity Coverage ---
+valid_pct = round(ohlc['tHurst'].notna().mean() * 100, 1)
+st.markdown(f"**✅ Valid tHurst Coverage:** {valid_pct}%")
+if valid_pct < 20:
+    st.warning("⚠️ Low Hurst coverage — increase lookback or reduce rolling window.")
 
 # --- Table Display ---
 st.markdown("### Regime Table (Most Recent 100 Bars)")
