@@ -500,44 +500,152 @@ st.subheader(f"Rolling Hurst for {selected_token} ({timeframe})")
 
 # Create two plots - one for price, one for Hurst
 fig = go.Figure()
+# Replace the current price chart code with this improved version:
+
+# Plot 2: Price chart with clearer regime background
 fig2 = go.Figure()
+
+# Create candlestick chart
+fig2.add_trace(go.Candlestick(
+    x=df_plot['timestamp'],
+    open=df_plot['open'],
+    high=df_plot['high'],
+    low=df_plot['low'],
+    close=df_plot['close'],
+    name="Price"
+))
+
+# Add colored background for different regimes with more visibility
+for i in range(1, len(df_plot)):
+    if not pd.isna(df_plot['regime'].iloc[i-1]):
+        regime = df_plot['regime'].iloc[i-1]
+        intensity = df_plot['intensity'].iloc[i-1]
+        desc = df_plot['regime_desc'].iloc[i-1]
+        
+        # More saturated colors
+        if regime == "MEAN-REVERT":
+            color = "rgba(255, 0, 0, 0.3)"  # Stronger red
+        elif regime == "TREND":
+            color = "rgba(0, 255, 0, 0.3)"  # Stronger green
+        else:
+            color = "rgba(128, 128, 128, 0.2)"  # Gray for noise
+        
+        # Add vertical rectangles with improved visibility
+        fig2.add_vrect(
+            x0=df_plot['timestamp'].iloc[i-1],
+            x1=df_plot['timestamp'].iloc[i],
+            fillcolor=color,
+            opacity=0.4,  # Higher opacity
+            layer="below",
+            line_width=0
+        )
+        
+        # Add text labels for regime changes
+        if i > 1 and df_plot['regime'].iloc[i-2] != regime:
+            fig2.add_annotation(
+                x=df_plot['timestamp'].iloc[i-1],
+                y=df_plot['high'].iloc[i-1] * 1.01,  # Slightly above price
+                text=desc,
+                showarrow=True,
+                arrowhead=1,
+                arrowsize=1,
+                arrowwidth=1,
+                arrowcolor="black",
+                font=dict(size=10, color="black"),
+                bgcolor=color,
+                bordercolor="black",
+                borderwidth=1
+            )
+
+# Add a second y-axis to show Hurst values alongside price
+fig2.add_trace(go.Scatter(
+    x=df_plot['timestamp'],
+    y=df_plot['Hurst'],
+    mode='lines',
+    name='Hurst',
+    line=dict(color='blue', width=1, dash='dot'),
+    yaxis='y2'  # Use secondary y-axis
+))
+
+# Add horizontal lines for Hurst regime boundaries on secondary axis
+fig2.add_shape(type="line", x0=df_plot['timestamp'].iloc[0], y0=0.4, 
+               x1=df_plot['timestamp'].iloc[-1], y1=0.4,
+               line=dict(color="red", width=1, dash="dash"), yaxis='y2')
+fig2.add_shape(type="line", x0=df_plot['timestamp'].iloc[0], y0=0.6, 
+               x1=df_plot['timestamp'].iloc[-1], y1=0.6,
+               line=dict(color="green", width=1, dash="dash"), yaxis='y2')
+
+# Update layout to include the secondary y-axis
+fig2.update_layout(
+    yaxis_title="Price",
+    xaxis_title="Time",
+    height=500,  # Taller plot
+    title=f"Price Chart with Regime Overlay for {selected_token} ({timeframe})",
+    legend=dict(
+        orientation="h",
+        yanchor="bottom",
+        y=1.02,
+        xanchor="right",
+        x=1
+    ),
+    yaxis2=dict(
+        title="Hurst",
+        titlefont=dict(color="blue"),
+        tickfont=dict(color="blue"),
+        anchor="x",
+        overlaying="y",
+        side="right",
+        range=[0, 1]  # Fixed range for Hurst
+    ),
+    # Add a legend for regime colors
+    shapes=[
+        # Legend boxes
+        dict(type="rect", x0=0.8, y0=1.05, x1=0.85, y1=1.08, xref="paper", yref="paper", 
+             fillcolor="rgba(255, 0, 0, 0.3)", line_width=1, line_color="black"),
+        dict(type="rect", x0=0.8, y0=1.10, x1=0.85, y1=1.13, xref="paper", yref="paper", 
+             fillcolor="rgba(128, 128, 128, 0.2)", line_width=1, line_color="black"),
+        dict(type="rect", x0=0.8, y0=1.15, x1=0.85, y1=1.18, xref="paper", yref="paper", 
+             fillcolor="rgba(0, 255, 0, 0.3)", line_width=1, line_color="black"),
+    ],
+    annotations=[
+        # Legend text
+        dict(x=0.86, y=1.065, xref="paper", yref="paper", text="Mean-Reverting", 
+             showarrow=False, font=dict(size=10)),
+        dict(x=0.86, y=1.115, xref="paper", yref="paper", text="Random/Noise", 
+             showarrow=False, font=dict(size=10)),
+        dict(x=0.86, y=1.165, xref="paper", yref="paper", text="Trending", 
+             showarrow=False, font=dict(size=10)),
+    ]
+)
+# The code ends with the fig2 layout, so let's add the code to display both charts:
+
+# First, complete the Hurst chart (fig)
 df_plot = ohlc.reset_index()
 
-# Define color map for regimes with intensity
-def get_regime_color(regime, intensity):
-    """Generate colors based on regime and intensity level"""
-    if regime == "MEAN-REVERT":
-        # Red colors of increasing intensity
-        colors = ['#FFCCCC', '#FF9999', '#FF6666', '#FF0000']
-        return colors[intensity]
-    elif regime == "TREND":
-        # Green colors of increasing intensity
-        colors = ['#CCFFCC', '#99FF99', '#66FF66', '#00FF00']
-        return colors[intensity]
-    elif regime == "NOISE":
-        # Gray with slight color bias based on intensity
-        if intensity == 0:  # Pure random
-            return '#CCCCCC'
-        elif intensity > 0:  # Trending bias
-            return '#CCFFEE'
-        else:  # Mean-reversion bias
-            return '#FFCCEE'
-    else:
-        return '#EEEEEE'  # Unknown
-
-# Generate colors for each point in the dataframe (handle NaNs safely)
+# Generate colors for each point based on regime
 colors = []
 for _, row in df_plot.iterrows():
     if pd.isna(row['Hurst']) or pd.isna(row['regime']) or pd.isna(row['intensity']):
         colors.append('#EEEEEE')  # Default color for missing data
     else:
-        colors.append(get_regime_color(row['regime'], row['intensity']))
+        if row['regime'] == "MEAN-REVERT":
+            intensity = row['intensity']
+            colors.append(['#FFCCCC', '#FF9999', '#FF6666', '#FF0000'][intensity])  # Red shades
+        elif row['regime'] == "TREND":
+            intensity = row['intensity']
+            colors.append(['#CCFFCC', '#99FF99', '#66FF66', '#00FF00'][intensity])  # Green shades
+        else:  # NOISE
+            intensity = row['intensity']
+            if intensity == 0:
+                colors.append('#CCCCCC')  # Pure random - gray
+            else:
+                colors.append('#DDDDDD')  # Slight bias - light gray
 
 # Create safe opacity values with no NaNs
 opacity_values = df_plot['confidence'].fillna(50)/100
 opacity_values = opacity_values.clip(0.2, 1.0)  # Ensure values are between 0.2 and 1.0
 
-# Plot 1: Hurst exponent with confidence
+# Add Hurst exponent trace to fig
 fig.add_trace(go.Scatter(
     x=df_plot['timestamp'], 
     y=df_plot['Hurst'],
@@ -549,11 +657,11 @@ fig.add_trace(go.Scatter(
         color=colors,
         opacity=opacity_values
     ),
-    text=df_plot['regime_desc'],  # Add hover text with regime description
+    text=df_plot['regime_desc'],
     hovertemplate="<b>%{text}</b><br>Hurst: %{y:.3f}<br>Time: %{x}<extra></extra>"
 ))
 
-# Add regime bands with improved annotations
+# Add colored bands to Hurst chart
 fig.add_hrect(y0=0, y1=0.2, fillcolor="red", opacity=0.3, layer="below", line_width=0)
 fig.add_annotation(x=df_plot['timestamp'].iloc[0], y=0.1, text="Strong Mean-Reversion", showarrow=False, 
                   font=dict(color="black", size=10), bgcolor="rgba(255,0,0,0.3)")
@@ -592,59 +700,14 @@ fig.update_layout(
     xaxis_title="Time",
     height=400,
     title=f"Rolling Hurst for {selected_token} ({timeframe})",
-    legend=dict(
-        orientation="h",
-        yanchor="bottom",
-        y=1.02,
-        xanchor="right",
-        x=1
-    )
+    yaxis=dict(range=[0, 1])
 )
 
-# Plot 2: Price chart with regime background
-# Create candlestick chart
-fig2.add_trace(go.Candlestick(
-    x=df_plot['timestamp'],
-    open=df_plot['open'],
-    high=df_plot['high'],
-    low=df_plot['low'],
-    close=df_plot['close'],
-    name="Price"
-))
-
-# Add colored background for different regimes
-for i in range(1, len(df_plot)):
-    if not pd.isna(df_plot['regime'].iloc[i-1]):
-        regime = df_plot['regime'].iloc[i-1]
-        intensity = df_plot['intensity'].iloc[i-1]
-        color = get_regime_color(regime, intensity)
-        fig2.add_vrect(
-            x0=df_plot['timestamp'].iloc[i-1],
-            x1=df_plot['timestamp'].iloc[i],
-            fillcolor=color,
-            opacity=0.2,
-            layer="below",
-            line_width=0
-        )
-
-fig2.update_layout(
-    yaxis_title="Price",
-    xaxis_title="Time",
-    height=400,
-    title=f"Price Chart with Regime Overlay",
-    legend=dict(
-        orientation="h",
-        yanchor="bottom",
-        y=1.02,
-        xanchor="right",
-        x=1
-    )
-)
-
-# Render plots
+# Now display both charts
 st.plotly_chart(fig, use_container_width=True)
 st.plotly_chart(fig2, use_container_width=True)
 
+# --- Continue with the rest of your dashboard (metrics, table, etc.) ---
 # --- Show Confidence Metrics ---
 col1, col2, col3, col4 = st.columns(4)
 
@@ -665,65 +728,6 @@ window_data_ratio = round(rolling_window / actual_bars * 100, 1) if actual_bars 
 col4.metric("⚖️ Window/Data Ratio", f"{window_data_ratio}%", 
            delta="Good" if 10 <= window_data_ratio <= 50 else "Adjust",
            delta_color="normal" if 10 <= window_data_ratio <= 50 else "off")
-
-if window_data_ratio > 50:
-    st.warning("⚠️ Rolling window is too large relative to data size. Consider reducing window size.")
-elif window_data_ratio < 10:
-    st.warning("⚠️ Rolling window may be too small for reliable Hurst estimation. Consider increasing window size.")
-
-if valid_pct < 20:
-    st.warning("⚠️ Low Hurst coverage — increase lookback or reduce rolling window.")
-
-# --- Regime Distribution Analysis ---
-with st.expander("Regime Distribution Analysis"):
-    # Count occurrences of each regime description
-    regime_counts = ohlc['regime_desc'].value_counts().reset_index()
-    regime_counts.columns = ['Regime', 'Count']
-    
-    # Calculate percentages
-    total = regime_counts['Count'].sum()
-    regime_counts['Percentage'] = (regime_counts['Count'] / total * 100).round(1)
-    
-    # Create horizontal bar chart
-    fig_dist = px.bar(
-        regime_counts, 
-        y='Regime', 
-        x='Percentage',
-        orientation='h',
-        color='Regime',
-        text='Percentage',
-        labels={'Percentage': 'Percentage of Time (%)'},
-        color_discrete_map={
-            'Strong mean-reversion': '#FF0000',
-            'Moderate mean-reversion': '#FF6666',
-            'Mild mean-reversion': '#FF9999',
-            'Slight mean-reversion bias': '#FFCCEE',
-            'Pure random walk': '#CCCCCC',
-            'Slight trending bias': '#CCFFEE', 
-            'Mild trending': '#99FF99',
-            'Moderate trending': '#66FF66',
-            'Strong trending': '#00FF00',
-            'Insufficient data': '#EEEEEE'
-        }
-    )
-    
-    fig_dist.update_traces(texttemplate='%{text}%', textposition='outside')
-    fig_dist.update_layout(title="Distribution of Regime Types")
-    st.plotly_chart(fig_dist, use_container_width=True)
-    
-    # Dominant regime
-    if not regime_counts.empty:
-        dominant_regime = regime_counts.iloc[0]['Regime']
-        dominant_pct = regime_counts.iloc[0]['Percentage']
-        st.info(f"📊 Dominant Regime: **{dominant_regime}** ({dominant_pct}% of the time)")
-        
-        # Trading suggestion based on dominant regime
-        if "Strong mean-reversion" in dominant_regime or "Moderate mean-reversion" in dominant_regime:
-            st.success("💡 Trading Suggestion: Consider mean-reversion strategies (buy low, sell high)")
-        elif "Strong trending" in dominant_regime or "Moderate trending" in dominant_regime:
-            st.success("💡 Trading Suggestion: Consider trend-following strategies (follow the trend direction)")
-        elif "Pure random walk" in dominant_regime or "Noise" in dominant_regime:
-            st.warning("💡 Trading Suggestion: Market appears mostly random. Consider reducing position size or using other indicators.")
 
 # --- Table Display ---
 st.markdown("### Regime Table (Most Recent 100 Bars)")
@@ -766,24 +770,10 @@ with st.expander("Understanding Hurst Exponent and Dashboard"):
         
         **Charts:**
         - **Hurst Chart**: Shows Hurst values over time with colored bands indicating regimes
-        - **Price Chart**: Shows price with background colored by regime
+        - **Price Chart**: Shows price with colored backgrounds and a secondary Hurst axis
         
         **Metrics:**
         - **Valid Coverage**: Percentage of time with valid Hurst values
         - **Avg Confidence**: Average reliability of calculations
         - **Window/Data Ratio**: Rolling window size relative to data size
         """)
-    
-    st.markdown("""
-    ### Trading Applications
-    
-    - **Mean-Reverting Regimes**: Look for overbought/oversold conditions, use oscillators like RSI
-    - **Trending Regimes**: Use trend-following indicators like moving averages, MACD
-    - **Random/Noisy Regimes**: Reduce position sizes, look for clearer setups
-    
-    ### Optimal Parameters
-    
-    - **Rolling Window**: 20-30 bars for short-term, 50-100 for long-term regime detection
-    - **Lookback**: At least 3-5x the rolling window size for sufficient data
-    - **Window/Data Ratio**: Aim for 20-30% for balanced sensitivity/reliability
-    """)
