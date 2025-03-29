@@ -63,23 +63,27 @@ ohlc = df['final_price'].resample(timeframe).ohlc().dropna()
 # --- More Robust Hurst Calculation ---
 def compute_hurst(ts):
     ts = np.array(ts)
-    if len(ts) < 10 or np.std(ts) == 0:
+    if len(ts) < 10 or np.std(ts) < 1e-8:
         return np.nan
-    lags = range(2, min(len(ts) - 1, 20))
+    lags = range(2, min(len(ts) - 1, 10))
     tau = []
     for lag in lags:
         diff = ts[lag:] - ts[:-lag]
-        if len(diff) == 0 or np.std(diff) == 0:
-            return np.nan
-        tau.append(np.std(diff))
+        std_diff = np.std(diff)
+        if std_diff < 1e-8:
+            continue
+        tau.append(std_diff)
+    if len(tau) < 4:
+        return np.nan
     try:
-        poly = np.polyfit(np.log(list(lags)), np.log(tau), 1)
+        poly = np.polyfit(np.log(list(lags[:len(tau)])), np.log(tau), 1)
         hurst = poly[0]
-        if hurst < 0 or hurst > 1.5:
+        if hurst < -1 or hurst > 2:
             return np.nan
         return hurst
     except:
         return np.nan
+
 
 # --- Regime Classification ---
 def classify_regime(hurst):
