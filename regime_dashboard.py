@@ -28,7 +28,7 @@ token_list = fetch_token_list()
 selected_token = st.selectbox("Select Token", token_list, index=0)
 timeframe = st.selectbox("Timeframe", ["30s", "15min", "30min", "1h", "6h"], index=2)
 lookback_days = st.slider("Lookback (Days)", 1, 30, 2)
-rolling_window = st.slider("Rolling Window (Bars)", 5, 50, 11)
+rolling_window = st.slider("Rolling Window (Bars)", 20, 100, 20)
 
 # --- Fetch Oracle Price Data ---
 end_time = datetime.utcnow()
@@ -56,9 +56,9 @@ ohlc = df['final_price'].resample(timeframe).ohlc().dropna()
 # --- More Robust Hurst Calculation ---
 def compute_hurst(ts):
     ts = np.array(ts)
-    if len(ts) < 20 or np.std(ts) == 0:
+    if len(ts) < 10 or np.std(ts) == 0:
         return np.nan
-    lags = range(2, 20)
+    lags = range(2, min(len(ts) - 1, 20))
     tau = []
     for lag in lags:
         diff = ts[lag:] - ts[:-lag]
@@ -68,7 +68,7 @@ def compute_hurst(ts):
     if len(tau) == 0 or any(t == 0 for t in tau):
         return np.nan
     try:
-        poly = np.polyfit(np.log(lags), np.log(tau), 1)
+        poly = np.polyfit(np.log(list(lags)), np.log(tau), 1)
         return poly[0]
     except:
         return np.nan
