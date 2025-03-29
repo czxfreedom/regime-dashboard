@@ -18,11 +18,12 @@ from datetime import datetime, timedelta
 # --- DB CONFIG (from Streamlit Secrets) ---
 db_config = st.secrets["database"]
 
-}
-engine = create_engine(
-    f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}@"
-    f"{db_config['host']}:{db_config['port']}/{db_config['database']}"
+db_uri = (
+    f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
+    f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
 )
+
+engine = create_engine(db_uri)
 
 # --- UI Sidebar ---
 st.title("Rolling tHurst Exponent Dashboard")
