@@ -65,13 +65,15 @@ def compute_hurst(ts):
         if len(diff) == 0 or np.std(diff) == 0:
             return np.nan
         tau.append(np.std(diff))
-    if len(tau) == 0 or any(t == 0 for t in tau):
-        return np.nan
     try:
         poly = np.polyfit(np.log(list(lags)), np.log(tau), 1)
-        return poly[0]
+        hurst = poly[0]
+        if hurst < 0 or hurst > 1.5:
+            return np.nan
+        return hurst
     except:
         return np.nan
+
 
 # --- Debug Display: Sample Input Series ---
 st.subheader(f"Rolling tHurst for {selected_token} ({timeframe})")
