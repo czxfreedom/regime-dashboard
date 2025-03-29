@@ -569,13 +569,25 @@ fig2.add_trace(go.Scatter(
     yaxis='y2'  # Use secondary y-axis
 ))
 
-# Add horizontal lines for Hurst regime boundaries on secondary axis
-fig2.add_shape(type="line", x0=df_plot['timestamp'].iloc[0], y0=0.4, 
-               x1=df_plot['timestamp'].iloc[-1], y1=0.4,
-               line=dict(color="red", width=1, dash="dash"), yaxis='y2')
-fig2.add_shape(type="line", x0=df_plot['timestamp'].iloc[0], y0=0.6, 
-               x1=df_plot['timestamp'].iloc[-1], y1=0.6,
-               line=dict(color="green", width=1, dash="dash"), yaxis='y2')
+# With these safer alternatives:
+if not df_plot.empty:
+    x0 = df_plot['timestamp'].iloc[0] if len(df_plot) > 0 else None
+    x1 = df_plot['timestamp'].iloc[-1] if len(df_plot) > 0 else None
+    
+    if x0 is not None and x1 is not None:
+        # Convert timestamps to strings if needed
+        if isinstance(x0, pd.Timestamp):
+            x0 = x0.strftime('%Y-%m-%d %H:%M:%S')
+        if isinstance(x1, pd.Timestamp):
+            x1 = x1.strftime('%Y-%m-%d %H:%M:%S')
+            
+        # Add horizontal lines safely
+        fig2.add_shape(type="line", x0=x0, y0=0.4, 
+                      x1=x1, y1=0.4,
+                      line=dict(color="red", width=1, dash="dash"), yaxis='y2')
+        fig2.add_shape(type="line", x0=x0, y0=0.6, 
+                      x1=x1, y1=0.6,
+                      line=dict(color="green", width=1, dash="dash"), yaxis='y2')
 
 # Update layout to include the secondary y-axis
 fig2.update_layout(
