@@ -500,6 +500,8 @@ st.subheader(f"Rolling Hurst for {selected_token} ({timeframe})")
 
 # Create two plots - one for price, one for Hurst
 fig = go.Figure()
+# Add this line to define df_plot:
+df_plot = ohlc.reset_index()
 # Replace the current price chart code with this improved version:
 
 # Plot 2: Price chart with clearer regime background
