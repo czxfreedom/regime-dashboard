@@ -1174,7 +1174,8 @@ with tab4:
             
                         else:
                             return ''
-    
+                    return styled_df.style.set_table_styles(styles).applymap(color_regimes)
+
     # Apply the styling
     return styled_df.style.set_table_styles(styles).applymap(color_regimes)
 
