@@ -554,7 +554,7 @@ with tab3:
     # Button to run the filter
     if st.button("Find Matching Pairs"):
     # Show a spinner while processing
-    with st.spinner("Analyzing all currency pairs..."):
+     with st.spinner("Analyzing all currency pairs..."):
         # Existing code...
 
         # If "All Regimes" is selected or no specific regimes are chosen, show all pairs
