@@ -979,102 +979,87 @@ with tab4:
         global_timeframes = st.multiselect(
             "Select Timeframes", 
             timeframes, 
-            default=["15min"],
-            key="global_timeframes_select"  # Add a unique key here
+            default=["15min"],  # Default to 15min timeframe
+            key="global_timeframes_select"
         )
     
     with col2:
         global_lookback = st.slider(
             "Lookback (Days)", 
-            1, 30, 14,
+            1, 30, 2,  # Default to 2 days
             key="global_lookback_slider"
         )
     
     with col3:
         global_window = st.slider(
             "Rolling Window (Bars)", 
-             20, 100, 30,
-            key="global_window_slider"  # Add a unique key
+            20, 100, 25,  # Default to 25 bars
+            key="global_window_slider"
         )
     
     # Run analysis button
     if st.button("Generate Global Regime Summary"):
-        with st.spinner("Analyzing all pairs across selected timeframes..."):
-            # Function to generate global summary
-            def generate_global_regime_summary(
-                timeframes, 
-                lookback_days, 
-                rolling_window
-            ):
-                global_summary = []
-                
-                # Fetch all available pairs
-                all_pairs = fetch_token_list()
-                
-                # Progress bar
-                progress_bar = st.progress(0)
-                
-                for i, pair in enumerate(all_pairs):
-                    # Update progress
-                    progress_bar.progress((i + 1) / len(all_pairs))
-                    
-                    pair_timeframe_data = {"Pair": pair}
-                    
-                    for tf in timeframes:
-                        # Get Hurst data for this pair and timeframe
-                        ohlc = get_hurst_data(
-                            pair, 
-                            tf, 
-                            lookback_days, 
-                            rolling_window
-                        )
-                        
-                        if ohlc is None or ohlc.empty:
-                            pair_timeframe_data[tf] = "Insufficient Data"
-                        else:
-                            # Get last regime description
-                            last_regime = ohlc['regime_desc'].iloc[-1]
-                            pair_timeframe_data[tf] = {
-                                "Regime": last_regime,
-                                "Hurst": ohlc['Hurst'].iloc[-1],
-                                "Emoji": regime_emojis.get(last_regime, "")
-                            }
-                    
-                    global_summary.append(pair_timeframe_data)
-                
-                return global_summary
+        with st.spinner("Analyzing all pairs across timeframes..."):
+            # Generate global summary
+            global_summary = []
             
-            # Generate and display summary
-            global_summary = generate_global_regime_summary(
-                global_timeframes, 
-                global_lookback, 
-                global_window
-            )
+            # Use all pairs or filter if needed
+            pairs_to_analyze = all_pairs
+            
+            for pair in pairs_to_analyze:
+                pair_data = {"Pair": pair}
+                
+                for tf in global_timeframes:
+                    # Get Hurst data for this pair and timeframe
+                    ohlc = get_hurst_data(
+                        pair, 
+                        tf, 
+                        global_lookback, 
+                        global_window
+                    )
+                    
+                    if ohlc is None or ohlc.empty or pd.isna(ohlc['Hurst'].iloc[-1]):
+                        pair_data[tf] = "Insufficient Data"
+                    else:
+                        # Get last regime description
+                        last_regime = ohlc['regime_desc'].iloc[-1]
+                        pair_data[tf] = {
+                            "Regime": last_regime,
+                            "Hurst": round(ohlc['Hurst'].iloc[-1], 2),
+                            "Emoji": regime_emojis.get(last_regime, "")
+                        }
+                
+                global_summary.append(pair_data)
             
             # Create DataFrame for display
             summary_df = pd.DataFrame(global_summary)
             
-            # Stylize the table
+            # Prepare the display DataFrame
+            display_df = summary_df.copy()
+            
+            # Format the timeframe columns
+            for tf in global_timeframes:
+                display_df[tf] = display_df[tf].apply(
+                    lambda x: f"{x['Regime']} {x['Emoji']} (H:{x['Hurst']})" 
+                    if isinstance(x, dict) else x
+                )
+            
+            # Define styling function
             def highlight_regimes(val):
-                if isinstance(val, dict):
-                    regime = val.get("Regime", "")
-                else:
-                    regime = val
-                
-                if "mean-reversion" in str(regime).lower():
+                if "mean-reversion" in str(val).lower():
                     return 'background-color: rgba(255,200,200,0.5)'
-                elif "trend" in str(regime).lower():
+                elif "trend" in str(val).lower():
                     return 'background-color: rgba(200,255,200,0.5)'
-                elif "random" in str(regime).lower():
+                elif "random" in str(val).lower():
                     return 'background-color: rgba(220,220,220,0.5)'
                 return ''
             
             # Display styled table
             st.dataframe(
-                summary_df.style.applymap(highlight_regimes)
+                display_df.style.applymap(highlight_regimes)
             )
             
-            # Optional: Download as CSV
+            # Download option
             st.download_button(
                 label="Download Global Summary",
                 data=summary_df.to_csv(index=False),
