@@ -971,8 +971,12 @@ with tab3:
 
 # --- Global Regime Summary Tab ---
 # --- Global Regime Summary Tab ---
+# --- Global Regime Summary Tab ---
 with tab4:
     st.header("Global Regime Summary")
+    
+    # Add a simple debug message
+    st.write("This tab calculates regimes for all pairs across selected timeframes")
     
     # Independent controls for global summary
     col1, col2, col3 = st.columns(3)
@@ -999,172 +1003,143 @@ with tab4:
             key="global_window_slider"
         )
     
-    # Add a debug/cache clear option
-    if st.button("Clear Cache and Regenerate", key="global_clear_cache"):
-        st.cache_data.clear()
-        st.success("Cache cleared! Click 'Generate Global Regime Summary' to run fresh analysis.")
+    # Ensure we have a session state key for this tab
+    if 'global_results' not in st.session_state:
+        st.session_state.global_results = None
     
-    # Run analysis button - add a unique key
-    if st.button("Generate Global Regime Summary", key="global_generate_button"):
-        # Add a debug message
-        st.write("Button clicked - starting analysis...")
-        
+    # Add a debug option
+    debug_mode = st.checkbox("Enable debug mode", value=False, key="global_debug")
+    
+    # Generate button with a unique key
+    generate_button = st.button("Generate Global Regime Summary", key="unique_global_generate")
+    
+    if debug_mode:
+        st.write(f"Button state: {generate_button}")
+    
+    if generate_button:
+        if debug_mode:
+            st.write("Button clicked!")
+            
         if not global_timeframes:
             st.warning("Please select at least one timeframe")
         else:
-            # Store in a separate session state variable
-            st.session_state.global_analysis_running = True
-            
-            with st.spinner("Analyzing all currency pairs across timeframes..."):
-                try:
-                    # Get all available pairs
-                    all_available_pairs = fetch_token_list()
+            try:
+                # Create a placeholder for the progress bar
+                progress_placeholder = st.empty()
+                progress_bar = progress_placeholder.progress(0)
+                
+                # Get a limited number of pairs for testing
+                all_pairs = fetch_token_list()
+                if debug_mode:
+                    st.write(f"Found {len(all_pairs)} pairs")
+                    all_pairs = all_pairs[:10]  # Limit to 10 pairs for debugging
+                    st.write(f"Using {len(all_pairs)} pairs for debug")
+                
+                # Process in smaller batches for reliability
+                batch_size = 5
+                rows = []
+                
+                # Process each batch
+                for i in range(0, len(all_pairs), batch_size):
+                    batch = all_pairs[i:i+batch_size]
+                    progress_bar.progress(i / len(all_pairs))
                     
-                    # Display number of pairs being processed
-                    st.info(f"Processing {len(all_available_pairs)} pairs...")
+                    if debug_mode:
+                        st.write(f"Processing batch {i//batch_size + 1}/{(len(all_pairs) + batch_size - 1)//batch_size}")
                     
-                    # Process in batches of 10 pairs at a time
-                    batch_size = 10
-                    num_batches = (len(all_available_pairs) + batch_size - 1) // batch_size
-                    
-                    # Initialize results
-                    rows = []
-                    
-                    # Show progress
-                    progress_bar = st.progress(0)
-                    
-                    for i in range(num_batches):
-                        # Update progress
-                        progress_bar.progress(i / num_batches)
+                    # Get data for this batch
+                    results = {}
+                    for pair in batch:
+                        row = {"Pair": pair}
                         
-                        # Get batch of pairs
-                        start_idx = i * batch_size
-                        end_idx = min((i + 1) * batch_size, len(all_available_pairs))
-                        batch_pairs = all_available_pairs[start_idx:end_idx]
-                        
-                        # Process batch
-                        batch_results = get_hurst_data_batch(batch_pairs, global_timeframes, global_lookback, global_window)
-                        
-                        # Extract results for each pair
-                        for pair in batch_pairs:
-                            # Start with pair name
-                            row_dict = {"Pair": pair}
-                            
-                            if pair not in batch_results:
-                                # No data for this pair
-                                for tf in global_timeframes:
-                                    row_dict[tf] = "No data available"
-                                rows.append(row_dict)
-                                continue
-                            
-                            # For each timeframe, get the regime
-                            for tf in global_timeframes:
-                                if tf not in batch_results[pair] or batch_results[pair][tf] is None or batch_results[pair][tf].empty:
-                                    row_dict[tf] = "No data available"
-                                    continue
-                                    
-                                ohlc = batch_results[pair][tf]
+                        # Process each timeframe
+                        for tf in global_timeframes:
+                            # Simplified logic - just calculate the Hurst value directly
+                            try:
+                                # Get price data
+                                end_time = datetime.now(timezone.utc)
+                                start_time = end_time - timedelta(days=global_lookback)
                                 
-                                # Check if we have valid data
-                                if pd.isna(ohlc['Hurst'].iloc[-1]):
-                                    row_dict[tf] = "Insufficient data"
-                                else:
-                                    # Get regime information
-                                    regime_desc = ohlc['regime_desc'].iloc[-1]
-                                    hurst_val = ohlc['Hurst'].iloc[-1]
-                                    emoji = regime_emojis.get(regime_desc, "")
-                                    
-                                    # Format information for display
-                                    row_dict[tf] = f"{regime_desc} {emoji} (H:{hurst_val:.2f})"
-                            
-                            # Add to results
-                            rows.append(row_dict)
-                    
-                    # Complete progress
-                    progress_bar.progress(1.0)
-                    
-                    # Convert to DataFrame
-                    results_df = pd.DataFrame(rows)
-                    
-                    # Show summary
-                    st.success(f"Analysis complete: {len(results_df)} pairs analyzed across {len(global_timeframes)} timeframes")
-                    
-                    # Store results in session state
-                    st.session_state.global_results_df = results_df
-                    
-                    # Define styling function
-                    def color_regimes(val):
-                        if pd.isna(val):
-                            return ''
-                        elif "insufficient" in str(val).lower() or "no data" in str(val).lower():
-                            return 'background-color: #f0f0f0'
-                        elif "error" in str(val).lower():
-                            return 'background-color: #fff3cd'  # Warning
-                        elif "mean-reversion" in str(val).lower():
-                            return 'background-color: rgba(255,200,200,0.5)'
-                        elif "trending" in str(val).lower():
-                            return 'background-color: rgba(200,255,200,0.5)'
-                        elif "random" in str(val).lower():
-                            return 'background-color: rgba(220,220,220,0.5)'
-                        return ''
-                    
-                    # Display styled DataFrame
-                    st.dataframe(
-                        results_df.style.applymap(
-                            color_regimes, 
-                            subset=[col for col in results_df.columns if col != "Pair"]
-                        ),
-                        height=600,
-                        use_container_width=True
-                    )
-                    
-                    # Add download option
-                    csv = results_df.to_csv(index=False)
-                    st.download_button(
-                        "Download as CSV",
-                        data=csv,
-                        file_name=f"global_regime_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                        mime="text/csv",
-                        key="global_download"
-                    )
-                except Exception as e:
-                    st.error(f"Error during analysis: {str(e)}")
-                    st.error("Please try again with different parameters or fewer timeframes")
-            
-            # Clear running flag
-            st.session_state.global_analysis_running = False
-    else:
-        # Check if we have previous results
-        if 'global_results_df' in st.session_state:
-            st.success("Using previously generated results. Click 'Generate Global Regime Summary' to refresh.")
-            
-            # Get results from session state
-            results_df = st.session_state.global_results_df
-            
-            # Define styling function
-            def color_regimes(val):
-                if pd.isna(val):
-                    return ''
-                elif "insufficient" in str(val).lower() or "no data" in str(val).lower():
-                    return 'background-color: #f0f0f0'
-                elif "error" in str(val).lower():
-                    return 'background-color: #fff3cd'  # Warning
-                elif "mean-reversion" in str(val).lower():
-                    return 'background-color: rgba(255,200,200,0.5)'
-                elif "trending" in str(val).lower():
-                    return 'background-color: rgba(200,255,200,0.5)'
-                elif "random" in str(val).lower():
-                    return 'background-color: rgba(220,220,220,0.5)'
-                return ''
-            
-            # Display styled DataFrame
-            st.dataframe(
-                results_df.style.applymap(
-                    color_regimes, 
-                    subset=[col for col in results_df.columns if col != "Pair"]
-                ),
-                height=600,
-                use_container_width=True
-            )
-        else:
-            st.info("Select timeframes and parameters, then click 'Generate Global Regime Summary' to analyze all currency pairs.")
+                                query = f"""
+                                SELECT created_at AT TIME ZONE 'UTC' + INTERVAL '8 hours' AS timestamp, 
+                                       final_price 
+                                FROM public.oracle_price_log 
+                                WHERE created_at BETWEEN '{start_time}' AND '{end_time}'
+                                AND pair_name = '{pair}';
+                                """
+                                
+                                df = pd.read_sql(query, engine)
+                                
+                                if df.empty:
+                                    row[tf] = "No data"
+                                    continue
+                                
+                                # Process data
+                                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                                df = df.set_index('timestamp').sort_index()
+                                
+                                # Resample to OHLC
+                                ohlc = df['final_price'].resample(tf).ohlc().dropna()
+                                
+                                if len(ohlc) < global_window:
+                                    row[tf] = "Insufficient data"
+                                    continue
+                                
+                                # Calculate Hurst on the last window
+                                last_window = ohlc['close'].tail(global_window).values
+                                hurst = universal_hurst(tuple(last_window))
+                                
+                                if pd.isna(hurst):
+                                    row[tf] = "Calculation failed"
+                                    continue
+                                
+                                # Get regime
+                                regime_info = detailed_regime_classification(hurst)
+                                regime_desc = regime_info[2]
+                                emoji = regime_emojis.get(regime_desc, "")
+                                
+                                # Store result
+                                row[tf] = f"{regime_desc} {emoji} (H:{hurst:.2f})"
+                                
+                            except Exception as e:
+                                if debug_mode:
+                                    st.write(f"Error processing {pair} - {tf}: {str(e)}")
+                                row[tf] = f"Error: {str(e)[:20]}"
+                        
+                        rows.append(row)
+                
+                # Complete progress
+                progress_bar.progress(1.0)
+                
+                # Create DataFrame
+                results_df = pd.DataFrame(rows)
+                
+                # Store in session state
+                st.session_state.global_results = results_df
+                
+                # Success message
+                st.success(f"Analysis complete for {len(rows)} pairs")
+                
+                # Display results
+                st.dataframe(results_df, height=600, use_container_width=True)
+                
+                # Add download option
+                csv = results_df.to_csv(index=False)
+                st.download_button(
+                    "Download as CSV",
+                    data=csv,
+                    file_name=f"global_regime_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                    mime="text/csv",
+                    key="global_download_btn"
+                )
+                
+            except Exception as e:
+                st.error(f"An error occurred: {str(e)}")
+                if debug_mode:
+                    import traceback
+                    st.code(traceback.format_exc())
+    
+    # If we have previous results, show them
+    elif st.session_state.global_results is not None:
+        st.success("Showing previously generated results")
+        st.dataframe(st.session_state.global_results, height=600, use_container_width=True)
