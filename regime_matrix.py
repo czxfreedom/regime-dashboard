@@ -971,6 +971,7 @@ with tab2:
 # --- Global Regime Summary Tab ---
 # --- Global Regime Summary Tab ---
 # --- Global Regime Summary Tab ---
+st.empty()
 with tab4:
     st.header("Global Regime Summary")
     
@@ -1072,7 +1073,8 @@ with tab4:
                         color_regimes, 
                         subset=[col for col in results_df.columns if col != "Pair"]
                     ),
-                    height=600
+                    height=2000,
+                    use_container_width=True  # Make it use full width
                 )
                 
                 # Add download option
