@@ -49,6 +49,7 @@ regime_emojis = {
 
 # --- DB CONFIG ---
 db_config = st.secrets["database"]
+
 db_uri = f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
 engine = create_engine(db_uri)
 
@@ -229,6 +230,26 @@ sort_option = st.sidebar.selectbox(
     ["Name", "Most Trending", "Most Mean-Reverting", "Regime Consistency"]
 )
 
+# --- Troubleshooting Guide ---
+with st.sidebar.expander("Troubleshooting 'Insufficient Data'", expanded=False):
+    st.markdown("""
+    ### Fixing "Insufficient Data" Issues
+    
+    If you're seeing many "Insufficient Data" messages:
+    
+    1. **Reduce Rolling Window**: Try a smaller rolling window (20-30 bars instead of 50+)
+    2. **Increase Lookback**: Extend lookback period to provide more data points
+    3. **Try Lower Timeframes**: Lower timeframes (15min, 30min) have more data points
+    4. **Check Pair Liquidity**: Some pairs may have sparse or irregular data
+    
+    **Optimal Settings**:
+    - For 15min timeframe: 2-3 day lookback with 20-30 bar window
+    - For 1h timeframe: 5-7 day lookback with 20-30 bar window
+    - For 6h timeframe: 14+ day lookback with 20-30 bar window
+    
+    **Technical Note**: Hurst calculation needs at least 10 valid price changes with sufficient variance.
+    """)
+
 # --- Color Code Legend ---
 with st.sidebar.expander("Legend: Regime Colors", expanded=True):
     st.markdown("""
@@ -295,7 +316,8 @@ def generate_summary_data():
                     "Hurst": ohlc['Hurst'].iloc[-1],
                     "Regime": ohlc['regime'].iloc[-1],
                     "Description": ohlc['regime_desc'].iloc[-1],
-                    "Emoji": regime_emojis.get(ohlc['regime_desc'].iloc[-1], "")
+                    "Emoji": regime_emojis.get(ohlc['regime_desc'].iloc[-1], ""),
+                    "Valid_Pct": (ohlc['Hurst'].notna().sum() / len(ohlc)) * 100
                 }
         
         summary_data.append(pair_data)
@@ -304,17 +326,17 @@ def generate_summary_data():
     if sort_option == "Most Trending":
         # Calculate average Hurst and sort descending
         for item in summary_data:
-            item["avg_hurst"] = np.mean([item[tf]["Hurst"] for tf in selected_timeframes if "Hurst" in item[tf] and not pd.isna(item[tf]["Hurst"])])
+            item["avg_hurst"] = np.mean([item[tf]["Hurst"] for tf in selected_timeframes if tf in item and "Hurst" in item[tf] and not pd.isna(item[tf]["Hurst"])])
         summary_data.sort(key=lambda x: x.get("avg_hurst", 0), reverse=True)
     elif sort_option == "Most Mean-Reverting":
         # Calculate average Hurst and sort ascending (lower Hurst = more mean-reverting)
         for item in summary_data:
-            item["avg_hurst"] = np.mean([item[tf]["Hurst"] for tf in selected_timeframes if "Hurst" in item[tf] and not pd.isna(item[tf]["Hurst"])])
+            item["avg_hurst"] = np.mean([item[tf]["Hurst"] for tf in selected_timeframes if tf in item and "Hurst" in item[tf] and not pd.isna(item[tf]["Hurst"])])
         summary_data.sort(key=lambda x: x.get("avg_hurst", 1))
     elif sort_option == "Regime Consistency":
         # Sort by how consistent regimes are across timeframes
         for item in summary_data:
-            regimes = [item[tf]["Regime"] for tf in selected_timeframes if "Regime" in item[tf]]
+            regimes = [item[tf]["Regime"] for tf in selected_timeframes if tf in item and "Regime" in item[tf]]
             item["consistency"] = len(set(regimes)) if regimes else 0
         summary_data.sort(key=lambda x: x.get("consistency", 3))
     
@@ -357,6 +379,19 @@ with tab1:
                     if ohlc is None or ohlc.empty:
                         st.write("No data")
                         continue
+
+                    # Calculate data quality metrics
+                    valid_data_pct = (ohlc['Hurst'].notna().sum() / len(ohlc)) * 100
+                    
+                    # Diagnostic information for insufficient data
+                    if valid_data_pct < 30:
+                        if len(ohlc) < rolling_window * 2:
+                            suggestion = "⚠️ Need more data. Increase lookback period."
+                        elif rolling_window > 40:
+                            suggestion = "⚠️ Window too large. Try a smaller rolling window."
+                        else:
+                            suggestion = f"⚠️ Low valid data ({valid_data_pct:.1f}%)."
+                        st.warning(suggestion)
 
                     # Chart
                     fig = go.Figure()
@@ -416,9 +451,12 @@ with tab1:
                     display_text = f"{current_desc} {emoji}" if not pd.isna(current_hurst) else "Unknown"
                     hurst_text = f"Hurst: {current_hurst:.2f}" if not pd.isna(current_hurst) else "Hurst: n/a"
                     
+                    # Add data quality info
+                    quality_text = f"Valid data: {valid_data_pct:.1f}%"
+                    
                     fig.update_layout(
                         title=dict(
-                            text=f"<b>{display_text}</b><br><sub>{hurst_text}</sub>",
+                            text=f"<b>{display_text}</b><br><sub>{hurst_text} | {quality_text}</sub>",
                             font=dict(color=title_color, size=14)
                         ),
                         margin=dict(l=5, r=5, t=60, b=5),
@@ -478,6 +516,17 @@ with tab2:
     else:
         st.subheader("🔍 Market Regime Summary Table")
         
+        # Recommended settings based on current data
+        st.info("""
+        ### Data Quality & Recommended Settings
+        
+        - **Low timeframes (15min)**: 2-3 day lookback, 20-30 bar window
+        - **Medium timeframes (1h)**: 5-7 day lookback, 20-30 bar window
+        - **High timeframes (6h)**: 14+ day lookback, 20-30 bar window
+        
+        Your current settings: **{} days lookback** with **{} bar window**
+        """.format(lookback_days, rolling_window))
+        
         # Create a formatted HTML table for better visualization
         html_table = "<table style='width:100%; border-collapse: collapse;'>"
         
@@ -513,8 +562,14 @@ with tab2:
                     # Add emoji if available
                     emoji = regime_data.get("Emoji", "")
                     
+                    # Add data quality info if available
+                    valid_pct = regime_data.get("Valid_Pct", 0)
+                    quality_text = ""
+                    if valid_pct < 30 and valid_pct > 0:
+                        quality_text = f"<br><small style='color:orange;'>Low quality: {valid_pct:.1f}%</small>"
+                    
                     html_table += f"<td style='padding:10px; border:1px solid #ddd; background-color:{bg_color};'>"
-                    html_table += f"{regime_data['Description']} {emoji}<br><small>Hurst: {hurst_val}</small>"
+                    html_table += f"{regime_data['Description']} {emoji}<br><small>Hurst: {hurst_val}</small>{quality_text}"
                     html_table += "</td>"
                 else:
                     html_table += "<td style='padding:10px; border:1px solid #ddd;'>No data</td>"
@@ -533,6 +588,7 @@ with tab2:
         for tf in selected_timeframes:
             header.append(f"{tf}_Regime")
             header.append(f"{tf}_Hurst")
+            header.append(f"{tf}_Valid_Pct")
         
         csv_data.append(header)
         
@@ -543,8 +599,10 @@ with tab2:
                 if tf in item:
                     row.append(item[tf]["Description"])
                     row.append(item[tf]["Hurst"] if "Hurst" in item[tf] and not pd.isna(item[tf]["Hurst"]) else "")
+                    row.append(item[tf].get("Valid_Pct", ""))
                 else:
                     row.append("No data")
+                    row.append("")
                     row.append("")
             
             csv_data.append(row)
@@ -560,6 +618,44 @@ with tab2:
             mime="text/csv"
         )
         
+        # Add dashboard statistics
+        st.subheader("Dashboard Statistics")
+        
+        # Count regimes
+        regime_counts = {}
+        valid_count = 0
+        invalid_count = 0
+        
+        for item in summary_data:
+            for tf in selected_timeframes:
+                if tf in item and "Description" in item[tf]:
+                    desc = item[tf]["Description"]
+                    regime_counts[desc] = regime_counts.get(desc, 0) + 1
+                    if desc == "Insufficient data":
+                        invalid_count += 1
+                    else:
+                        valid_count += 1
+        
+        # Display validity stats
+        total = valid_count + invalid_count
+        if total > 0:
+            valid_pct = (valid_count / total) * 100
+            
+            if valid_pct < 50:
+                st.warning(f"⚠️ Low data quality: Only {valid_pct:.1f}% of data points have valid regimes. Try adjusting parameters.")
+                
+                # Suggest improvements
+                if rolling_window > 40:
+                    st.info("📌 Suggestion: Try reducing your rolling window to 20-30 bars")
+                
+                # Suggest different timeframe/lookback combinations
+                if "6h" in selected_timeframes and lookback_days < 10:
+                    st.info("📌 Suggestion: For 6h timeframe, increase lookback to at least 14 days")
+                elif "1h" in selected_timeframes and lookback_days < 5:
+                    st.info("📌 Suggestion: For 1h timeframe, increase lookback to 5-7 days")
+            else:
+                st.success(f"✅ Good data quality: {valid_pct:.1f}% of data points have valid regimes")
+        
         # Add heatmap visualization of the current regimes
         st.subheader("Regime Heatmap")
         
@@ -573,7 +669,8 @@ with tab2:
                         "Pair": item["Pair"],
                         "Timeframe": tf,
                         "Hurst": item[tf]["Hurst"],
-                        "Regime": item[tf]["Description"]
+                        "Regime": item[tf]["Description"],
+                        "Valid_Pct": item[tf].get("Valid_Pct", 0)
                     })
         
         if heatmap_data:
@@ -628,5 +725,148 @@ with tab2:
             )
             
             st.plotly_chart(fig, use_container_width=True)
+            
+            # Additional visualization - Regime Distribution
+            st.subheader("Regime Distribution")
+            regime_counts = heatmap_df['Regime'].value_counts().reset_index()
+            regime_counts.columns = ['Regime', 'Count']
+            
+            # Create ordered categories for proper sorting
+            regime_order = [
+                "Strong mean-reversion", "Moderate mean-reversion", "Mild mean-reversion", "Slight mean-reversion bias",
+                "Pure random walk",
+                "Slight trending bias", "Mild trending", "Moderate trending", "Strong trending"
+            ]
+            
+            # Filter to keep only regimes in our order list
+            regime_counts = regime_counts[regime_counts['Regime'].isin(regime_order)]
+            
+            # Create categorical type with our custom order
+            regime_counts['Regime'] = pd.Categorical(
+                regime_counts['Regime'],
+                categories=regime_order,
+                ordered=True
+            )
+            
+            # Sort by our custom order
+            regime_counts = regime_counts.sort_values('Regime')
+            
+            # Create color map for bars
+            colors = []
+            for regime in regime_counts['Regime']:
+                if "mean-reversion" in regime.lower():
+                    if "strong" in regime.lower():
+                        colors.append("rgba(255,0,0,0.8)")
+                    elif "moderate" in regime.lower():
+                        colors.append("rgba(255,50,50,0.7)")
+                    elif "mild" in regime.lower():
+                        colors.append("rgba(255,100,100,0.6)")
+                    else:
+                        colors.append("rgba(255,150,150,0.5)")
+                elif "random" in regime.lower():
+                    colors.append("rgba(180,180,180,0.7)")
+                elif "trending" in regime.lower():
+                    if "strong" in regime.lower():
+                        colors.append("rgba(0,180,0,0.8)")
+                    elif "moderate" in regime.lower():
+                        colors.append("rgba(50,200,50,0.7)")
+                    elif "mild" in regime.lower():
+                        colors.append("rgba(100,220,100,0.6)")
+                    else:
+                        colors.append("rgba(150,255,150,0.5)")
+                else:
+                    colors.append("rgba(200,200,200,0.5)")
+            
+            fig = px.bar(
+                regime_counts,
+                y='Regime',
+                x='Count',
+                orientation='h',
+                labels={'Count': 'Number of Pairs/Timeframes', 'Regime': ''},
+                color_discrete_sequence=colors,
+                text='Count'
+            )
+            
+            fig.update_traces(textposition='outside')
+            
+            fig.update_layout(
+                title="Distribution of Market Regimes",
+                height=400,
+                showlegend=False,
+                xaxis=dict(title="Count"),
+                yaxis=dict(title=""),
+                plot_bgcolor='white'
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Data quality assessment
+            st.subheader("Data Quality Assessment")
+            
+            # Get valid percentage distribution
+            valid_pcts = [item[tf].get("Valid_Pct", 0) for item in summary_data for tf in selected_timeframes if tf in item and "Valid_Pct" in item[tf]]
+            
+            if valid_pcts:
+                # Create a histogram of valid percentages
+                fig = px.histogram(
+                    valid_pcts, 
+                    nbins=10,
+                    labels={'value': 'Valid Data Percentage', 'count': 'Number of Pair/Timeframe Combinations'},
+                    title="Distribution of Valid Data Percentages",
+                    color_discrete_sequence=['rgba(0,100,200,0.6)']
+                )
+                
+                # Add a vertical line for the mean
+                mean_valid = np.mean(valid_pcts)
+                fig.add_vline(
+                    x=mean_valid,
+                    line_dash="dash",
+                    line_color="red",
+                    annotation_text=f"Mean: {mean_valid:.1f}%",
+                    annotation_position="top right"
+                )
+                
+                # Add reference lines for quality thresholds
+                fig.add_vline(
+                    x=30,
+                    line_dash="dot",
+                    line_color="orange",
+                    annotation_text="Poor (<30%)",
+                    annotation_position="bottom right"
+                )
+                
+                fig.add_vline(
+                    x=70,
+                    line_dash="dot",
+                    line_color="green",
+                    annotation_text="Good (>70%)",
+                    annotation_position="bottom right"
+                )
+                
+                fig.update_layout(
+                    height=400,
+                    plot_bgcolor='white'
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Data quality summary
+                low_quality = len([x for x in valid_pcts if x < 30])
+                medium_quality = len([x for x in valid_pcts if 30 <= x < 70])
+                high_quality = len([x for x in valid_pcts if x >= 70])
+                total = len(valid_pcts)
+                
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Low Quality Data", f"{low_quality} ({low_quality/total*100:.1f}%)", delta=f"{low_quality} pairs/timeframes", delta_color="inverse")
+                col2.metric("Medium Quality Data", f"{medium_quality} ({medium_quality/total*100:.1f}%)", delta=f"{medium_quality} pairs/timeframes")
+                col3.metric("High Quality Data", f"{high_quality} ({high_quality/total*100:.1f}%)", delta=f"{high_quality} pairs/timeframes", delta_color="normal")
+                
+                if low_quality / total > 0.5:
+                    st.warning("""
+                    ### ⚠️ Data Quality Alert
+                    
+                    Over 50% of your pair/timeframe combinations have low quality data (under 30% valid values).
+                    Consider adjusting your parameters with the suggested values in the troubleshooting guide.
+                    """)
         else:
             st.info("Not enough data to generate heatmap")
