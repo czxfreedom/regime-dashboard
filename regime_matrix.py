@@ -10,8 +10,11 @@ from datetime import datetime, timedelta
 st.set_page_config(layout="wide")
 st.title("📈 Currency Pair Trend Matrix Dashboard")
 
-# Create tabs for Matrix View and Summary Table
-tab1, tab2 = st.tabs(["Matrix View", "Summary Table"])
+# --- DB CONFIG ---
+db_config = st.secrets["database"]
+
+db_uri = f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+engine = create_engine(db_uri)
 
 # --- Detailed Regime Color Map with Intensities ---
 color_map = {
@@ -46,12 +49,6 @@ regime_emojis = {
     "Strong trending": "⬆️⬆️⬆️",
     "Insufficient data": "❓",
 }
-
-# --- DB CONFIG ---
-db_config = st.secrets["database"]
-
-db_uri = f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-engine = create_engine(db_uri)
 
 # --- Hurst & Regime Logic ---
 def universal_hurst(ts):
@@ -219,11 +216,20 @@ def fetch_token_list():
     df = pd.read_sql(query, engine)
     return df['pair_name'].tolist()
 
+# Create tabs for Matrix View and Summary Table
+tab1, tab2 = st.tabs(["Matrix View", "Summary Table"])
+
+# Get pairs and populate sidebar
 all_pairs = fetch_token_list()
 selected_pairs = st.sidebar.multiselect("Select Currency Pairs", all_pairs, default=all_pairs[:5])
 timeframes = ["30s","15min", "30min", "1h", "4h", "6h"]
 selected_timeframes = st.sidebar.multiselect("Select Timeframes", timeframes, default=["15min", "1h", "6h"])
-# Display dynamic recommendations based on selected timeframes
+
+# IMPORTANT: Define sliders BEFORE using their values
+col1, col2 = st.sidebar.columns(2)
+lookback_days = col1.slider("Lookback (Days)", 1, 30, 3)
+rolling_window = col2.slider("Rolling Window (Bars)", 20, 100, 30)
+
 # Display dynamic recommendations based on selected timeframes
 if selected_timeframes:
     st.sidebar.markdown("### Recommended Settings")
@@ -236,14 +242,20 @@ if selected_timeframes:
     
     st.sidebar.markdown(settings_text)
     
-    # Auto-suggestion for current settings - Fixed version
-    recommended_lookbacks = [get_recommended_settings(tf)["lookback_min"] for tf in selected_timeframes]
-    recommended_windows = [get_recommended_settings(tf)["window_ideal"] for tf in selected_timeframes]
+    # Auto-suggestion for current settings
+    recommended_lookbacks = []
+    recommended_windows = []
     
-    if recommended_lookbacks:  # Make sure the list is not empty
+    for tf in selected_timeframes:
+        rec = get_recommended_settings(tf)
+        recommended_lookbacks.append(rec["lookback_min"])
+        recommended_windows.append(rec["window_ideal"])
+    
+    # Only proceed if we have recommendations
+    if recommended_lookbacks and recommended_windows:
         rec_lookback = max(recommended_lookbacks)
-        rec_window = min(recommended_windows) if recommended_windows else 30
-        
+        rec_window = min(recommended_windows)
+    
         if lookback_days < rec_lookback:
             st.sidebar.warning(f"⚠️ Current lookback ({lookback_days} days) may be too short for {max(selected_timeframes, key=lambda x: get_recommended_settings(x)['lookback_min'])}")
             
@@ -252,56 +264,6 @@ if selected_timeframes:
                 lookback_days = rec_lookback
                 rolling_window = rec_window
                 st.experimental_rerun()
-    rec_window = min([get_recommended_settings(tf)["window_ideal"] for tf in selected_timeframes])
-    
-    if lookback_days < rec_lookback:
-        st.sidebar.warning(f"⚠️ Current lookback ({lookback_days} days) may be too short for {max(selected_timeframes, key=lambda x: get_recommended_settings(x)['lookback_min'])}")
-        
-        # Add a button to auto-apply the recommended settings
-        if st.sidebar.button(f"Apply Recommended Settings ({rec_lookback} days lookback, {rec_window} bar window)"):
-            lookback_days = rec_lookback
-            rolling_window = rec_window
-            st.experimental_rerun()
-
-# --- Add this setting check at the beginning of the Matrix View tab section ---
-# (Replace the existing check for selected_pairs and selected_timeframes with this)
-
-with tab1:
-    if not selected_pairs or not selected_timeframes:
-        st.warning("Please select at least one pair and timeframe")
-    else:
-        # Check if current settings match recommendations
-        needs_adjustment = False
-        problematic_timeframes = []
-        
-        for tf in selected_timeframes:
-            rec = get_recommended_settings(tf)
-            if lookback_days < rec["lookback_min"] or rolling_window > rec["window_ideal"] * 1.5:
-                needs_adjustment = True
-                problematic_timeframes.append(tf)
-        
-        if needs_adjustment:
-            recommendation_text = "Recommended settings:\n"
-            for tf in problematic_timeframes:
-                rec = get_recommended_settings(tf)
-                recommendation_text += f"- {tf}: {rec['lookback_min']}-{rec['lookback_ideal']} day lookback, {rec['window_min']}-{rec['window_ideal']} bar window\n"
-            
-            st.warning(f"""
-            ⚠️ **Your current settings may result in insufficient data for some timeframes.**
-            
-            {recommendation_text}
-            
-            Current settings: {lookback_days} days lookback, {rolling_window} bar window
-            """)
-            
-        # Continue with the existing code for displaying pairs...
-        for pair in selected_pairs:
-            st.markdown(f"### 📌 {pair}")
-            cols = st.columns(len(selected_timeframes))
-            # Rest of your existing code...
-col1, col2 = st.sidebar.columns(2)
-lookback_days = col1.slider("Lookback (Days)", 1, 30, 3)
-rolling_window = col2.slider("Rolling Window (Bars)", 20, 100, 30)
 
 # Filter options
 regime_filter = st.sidebar.multiselect(
@@ -455,6 +417,31 @@ with tab1:
     if not selected_pairs or not selected_timeframes:
         st.warning("Please select at least one pair and timeframe")
     else:
+        # Check if current settings match recommendations
+        needs_adjustment = False
+        problematic_timeframes = []
+        
+        for tf in selected_timeframes:
+            rec = get_recommended_settings(tf)
+            if lookback_days < rec["lookback_min"] or rolling_window > rec["window_ideal"] * 1.5:
+                needs_adjustment = True
+                problematic_timeframes.append(tf)
+        
+        if needs_adjustment and problematic_timeframes:
+            recommendation_text = "Recommended settings:\n"
+            for tf in problematic_timeframes:
+                rec = get_recommended_settings(tf)
+                recommendation_text += f"- {tf}: {rec['lookback_min']}-{rec['lookback_ideal']} day lookback, {rec['window_min']}-{rec['window_ideal']} bar window\n"
+            
+            st.warning(f"""
+            ⚠️ **Your current settings may result in insufficient data for some timeframes.**
+            
+            {recommendation_text}
+            
+            Current settings: {lookback_days} days lookback, {rolling_window} bar window
+            """)
+            
+        # Display pairs and charts
         for pair in selected_pairs:
             st.markdown(f"### 📌 {pair}")
             cols = st.columns(len(selected_timeframes))
