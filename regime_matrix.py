@@ -88,6 +88,7 @@ def get_hurst_data(pair, timeframe, lookback_days, rolling_window):
     ohlc['Hurst'] = ohlc['close'].rolling(rolling_window).apply(universal_hurst)
     ohlc['regime_info'] = ohlc['Hurst'].apply(detailed_regime_classification)
     ohlc['regime'] = ohlc['regime_info'].apply(lambda x: x[0])
+    ohlc['regime_color'] = ohlc['regime_info'].apply(lambda x: x[1])
     return ohlc
 
 # --- Render Matrix ---
@@ -107,7 +108,11 @@ for pair in selected_pairs:
             ohlc = get_hurst_data(pair, timeframe, lookback_days, rolling_window)
 
             if ohlc is None or ohlc.empty:
-                st.write("No data available")
+                st.write("⚠️ No data available for this timeframe.")
+                continue
+
+            if ohlc['Hurst'].dropna().empty:
+                st.write("⚠️ No valid Hurst values. Try increasing lookback or reducing window.")
                 continue
 
             fig = go.Figure()
@@ -120,34 +125,31 @@ for pair in selected_pairs:
 
             for j in range(1, len(ohlc)):
                 regime = ohlc['regime'].iloc[j - 1]
-                if pd.isna(regime):
-                    continue
                 color = {
-                    "MEAN-REVERT": "rgba(255,0,0,0.3)",
-                    "TREND": "rgba(0,200,0,0.3)",
+                    "MEAN-REVERT": "rgba(255,0,0,0.2)",
+                    "TREND": "rgba(0,200,0,0.2)",
                     "NOISE": "rgba(200,200,200,0.3)"
-                }.get(regime, "rgba(150,150,150,0.2)")
+                }.get(regime, "rgba(150,150,150,0.1)")
+                label = regime if regime != "UNKNOWN" else ""
                 fig.add_vrect(
                     x0=ohlc.index[j - 1], x1=ohlc.index[j],
-                    fillcolor=color, opacity=0.5, layer="below", line_width=0
+                    fillcolor=color, opacity=0.3, layer="below", line_width=0,
+                    annotation_text=label, annotation_position="top left",
+                    annotation_font=dict(size=9, color="black")
                 )
 
-            if not ohlc.empty and not pd.isna(ohlc['Hurst'].iloc[-1]):
-                current_hurst = ohlc['Hurst'].iloc[-1]
-                current_regime = ohlc['regime'].iloc[-1]
-                regime_color = {
-                    "MEAN-REVERT": "red",
-                    "TREND": "green",
-                    "NOISE": "gray"
-                }.get(current_regime, "black")
-
-                fig.update_layout(
-                    title=f"H={current_hurst:.2f}",
-                    title_font_color=regime_color
-                )
+            current_hurst = ohlc['Hurst'].iloc[-1]
+            current_regime = ohlc['regime'].iloc[-1]
+            regime_color = {
+                "MEAN-REVERT": "red",
+                "TREND": "green",
+                "NOISE": "gray"
+            }.get(current_regime, "black")
 
             fig.update_layout(
-                height=150, width=250,
+                title=f"{current_regime} | H={current_hurst:.2f}",
+                title_font_color=regime_color,
+                height=180, width=250,
                 margin=dict(l=0, r=0, t=30, b=0),
                 showlegend=False,
                 xaxis=dict(showticklabels=False, showgrid=False),
@@ -156,9 +158,7 @@ for pair in selected_pairs:
 
             st.plotly_chart(fig, use_container_width=True)
 
-            if not ohlc.empty and not pd.isna(ohlc['Hurst'].iloc[-1]):
-                st.metric(
-                    "Trend Regime",
-                    f"{current_regime}",
-                    delta=f"{current_hurst:.2f}"
-                )
+            st.metric(
+                "Regime", f"{current_regime}",
+                delta=f"H={current_hurst:.2f}"
+            )
