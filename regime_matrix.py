@@ -979,7 +979,7 @@ with tab4:
         global_timeframes = st.multiselect(
             "Select Timeframes", 
             timeframes, 
-            default=["15min"]
+            default=["15min"],
             key="global_timeframes_select"  # Add a unique key here
         )
     
