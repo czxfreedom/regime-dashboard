@@ -986,14 +986,14 @@ with tab4:
     with col2:
         global_lookback = st.slider(
             "Lookback (Days)", 
-            1, 30, 14
+            1, 30, 14,
             key="global_lookback_slider"
         )
     
     with col3:
         global_window = st.slider(
             "Rolling Window (Bars)", 
-             20, 100, 30
+             20, 100, 30,
             key="global_window_slider"  # Add a unique key
         )
     
