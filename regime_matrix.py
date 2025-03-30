@@ -650,6 +650,7 @@ def generate_summary_data():
 # Get summary data
 if selected_pairs and selected_timeframes:
     summary_data = generate_summary_data()
+    st.session_state.summary_data = summary_data
 else:
     summary_data = []
 
@@ -870,7 +871,13 @@ with tab3:
 with tab1:
     # Add a refresh button at the top of the Matrix View tab
     refresh_clicked = st.button("Refresh Analysis")
+        # Use session state data if available
+    if refresh_clicked and 'summary_data' in st.session_state:
+        del st.session_state.summary_data  # Clear the cached data on refresh
     
+    # Retrieve summary data from session state if available
+    if 'summary_data' in st.session_state:
+        summary_data = st.session_state.summary_data
     if not selected_pairs or not selected_timeframes:
         st.warning("Please select at least one pair and timeframe")
     else:
@@ -1054,6 +1061,10 @@ with tab1:
 
 # --- Summary Table ---
 with tab2:
+        # Retrieve summary data from session state if available
+    if 'summary_data' in st.session_state:
+        summary_data = st.session_state.summary_data
+           
     if not summary_data:
         st.warning("Please select at least one pair and timeframe to generate summary data")
     else:
