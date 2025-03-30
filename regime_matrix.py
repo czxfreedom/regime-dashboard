@@ -979,19 +979,22 @@ with tab4:
         global_timeframes = st.multiselect(
             "Select Timeframes", 
             timeframes, 
-            default=["15min", "1h", "6h"]
+            default=["15min"]
+            key="global_timeframes_select"  # Add a unique key here
         )
     
     with col2:
         global_lookback = st.slider(
             "Lookback (Days)", 
             1, 30, 14
+            key="global_lookback_slider"
         )
     
     with col3:
         global_window = st.slider(
             "Rolling Window (Bars)", 
-            20, 100, 30
+             20, 100, 30
+            key="global_window_slider"  # Add a unique key
         )
     
     # Run analysis button
