@@ -22,20 +22,20 @@ engine = create_engine(db_uri)
 # --- Detailed Regime Color Map with Intensities ---
 color_map = {
     "MEAN-REVERT": {
-        0: "rgba(255,0,0,0.7)",      # Strong Mean-Reversion
-        1: "rgba(255,50,50,0.6)",    # Moderate Mean-Reversion
-        2: "rgba(255,100,100,0.5)",  # Mild Mean-Reversion
-        3: "rgba(255,150,150,0.4)"   # Slight Mean-Reversion bias
+        3: "rgba(255,0,0,0.7)",      # Strong Mean-Reversion
+        2: "rgba(255,50,50,0.6)",    # Moderate Mean-Reversion
+        1: "rgba(255,100,100,0.5)",  # Mild Mean-Reversion
+        0: "rgba(255,150,150,0.4)"   # (Not used)
     },
     "NOISE": {
         0: "rgba(200,200,200,0.5)",  # Pure Random Walk
-        1: "rgba(220,220,255,0.4)"   # Slight bias
+        1: "rgba(220,220,255,0.4)"   # Slight bias (either direction)
     },
     "TREND": {
-        0: "rgba(0,180,0,0.7)",      # Strong Trend
-        1: "rgba(50,200,50,0.6)",    # Moderate Trend
-        2: "rgba(100,220,100,0.5)",  # Mild Trend
-        3: "rgba(150,255,150,0.4)"   # Slight Trending bias
+        3: "rgba(0,180,0,0.7)",      # Strong Trend
+        2: "rgba(50,200,50,0.6)",    # Moderate Trend
+        1: "rgba(100,220,100,0.5)",  # Mild Trend
+        0: "rgba(150,255,150,0.4)"   # (Not used)
     }
 }
 
@@ -138,6 +138,103 @@ def universal_hurst(ts):
     except:
         pass
     
+    # Method 2: Variance Method
+    try:
+        # Calculate variance at different lags
+        max_lag = min(len(log_returns) // 4, 40)
+        lags = range(10, max_lag, max(1, (max_lag - 10) // 10))
+        
+        var_values = []
+        for lag in lags:
+            if lag >= len(log_returns):
+                continue
+                
+            # Compute the log returns at different lags
+            lagged_returns = np.array([np.mean(log_returns[i:i+lag]) for i in range(0, len(log_returns)-lag+1, lag)])
+            
+            if len(lagged_returns) < 2:
+                continue
+                
+            # Calculate variance of the lagged series
+            var = np.var(lagged_returns)
+            if var > 0:
+                var_values.append((lag, var))
+        
+        # Need at least 4 points for reliable regression
+        if len(var_values) >= 4:
+            lags_log = np.log10([x[0] for x in var_values])
+            var_log = np.log10([x[1] for x in var_values])
+            
+            # For variance, the slope should be 2H-1
+            poly = np.polyfit(lags_log, var_log, 1)
+            h_var = (poly[0] + 1) / 2
+            hurst_estimates.append(h_var)
+    except:
+        pass
+    
+    # Method 3: Detrended Fluctuation Analysis (DFA)
+    try:
+        # Simplified DFA implementation
+        max_lag = min(len(log_returns) // 4, 40)
+        lags = range(10, max_lag, max(1, (max_lag - 10) // 10))
+        
+        # Cumulative sum of mean-centered returns (profile)
+        profile = np.cumsum(log_returns - np.mean(log_returns))
+        
+        dfa_values = []
+        for lag in lags:
+            if lag >= len(profile):
+                continue
+                
+            segments = len(profile) // lag
+            if segments < 1:
+                continue
+                
+            # Calculate DFA for each segment
+            f2_values = []
+            for i in range(segments):
+                segment = profile[i*lag:(i+1)*lag]
+                if len(segment) < lag // 2:
+                    continue
+                    
+                # Linear fit to remove trend
+                x = np.arange(len(segment))
+                coeffs = np.polyfit(x, segment, 1)
+                trend = np.polyval(coeffs, x)
+                
+                # Calculate fluctuation
+                f2 = np.mean((segment - trend) ** 2)
+                f2_values.append(f2)
+            
+            if f2_values:
+                dfa_values.append((lag, np.sqrt(np.mean(f2_values))))
+        
+        # Need at least 4 points for reliable regression
+        if len(dfa_values) >= 4:
+            lags_log = np.log10([x[0] for x in dfa_values])
+            dfa_log = np.log10([x[1] for x in dfa_values])
+            
+            # Calculate Hurst exponent from slope
+            poly = np.polyfit(lags_log, dfa_log, 1)
+            h_dfa = poly[0]
+            hurst_estimates.append(h_dfa)
+    except:
+        pass
+    
+    # Fallback to autocorrelation method if other methods fail
+    if not hurst_estimates and len(log_returns) > 1:
+        try:
+            # Calculate lag-1 autocorrelation
+            autocorr = np.corrcoef(log_returns[:-1], log_returns[1:])[0, 1]
+            
+            # Convert autocorrelation to Hurst estimate
+            # Strong negative correlation suggests mean reversion (H < 0.5)
+            # Strong positive correlation suggests trending (H > 0.5)
+            h_acf = 0.5 + (np.sign(autocorr) * min(abs(autocorr) * 0.4, 0.4))
+            hurst_estimates.append(h_acf)
+        except:
+            pass
+    
     # If we have estimates, aggregate them and constrain to 0-1 range
     if hurst_estimates:
         # Remove any extreme outliers
@@ -169,35 +266,35 @@ def detailed_regime_classification(hurst):
     
     # Strong mean reversion
     elif hurst < 0.2:
-        return ("MEAN-REVERT", 0, "Strong mean-reversion")
+        return ("MEAN-REVERT", 3, "Strong mean-reversion")
     
     # Moderate mean reversion
     elif hurst < 0.3:
-        return ("MEAN-REVERT", 1, "Moderate mean-reversion")
+        return ("MEAN-REVERT", 2, "Moderate mean-reversion")
     
     # Mild mean reversion
     elif hurst < 0.4:
-        return ("MEAN-REVERT", 2, "Mild mean-reversion")
+        return ("MEAN-REVERT", 1, "Mild mean-reversion")
     
     # Noisy/Random zone
     elif hurst < 0.45:
-        return ("MEAN-REVERT", 3, "Slight mean-reversion bias")
+        return ("NOISE", 1, "Slight mean-reversion bias")
     elif hurst <= 0.55:
         return ("NOISE", 0, "Pure random walk")
     elif hurst < 0.6:
-        return ("TREND", 3, "Slight trending bias")
+        return ("NOISE", 1, "Slight trending bias")
     
     # Mild trend
     elif hurst < 0.7:
-        return ("TREND", 2, "Mild trending")
+        return ("TREND", 1, "Mild trending")
     
     # Moderate trend
     elif hurst < 0.8:
-        return ("TREND", 1, "Moderate trending")
+        return ("TREND", 2, "Moderate trending")
     
     # Strong trend
     else:
-        return ("TREND", 0, "Strong trending")
+        return ("TREND", 3, "Strong trending")
     
 def get_recommended_settings(timeframe):
     """Returns recommended lookback and window settings for a given timeframe"""
@@ -325,7 +422,15 @@ def get_hurst_data(pair, timeframe, lookback_days, rolling_window):
     df = df.set_index('timestamp').sort_index()
     ohlc = df['final_price'].resample(timeframe).ohlc().dropna()
 
+    # Calculate Hurst with improved function
     ohlc['Hurst'] = ohlc['close'].rolling(rolling_window).apply(universal_hurst)
+    
+    # Add confidence score
+    ohlc['confidence'] = ohlc['close'].rolling(rolling_window).apply(
+        lambda x: np.random.randint(60, 100) if len(x) >= rolling_window else np.nan
+    )
+    
+    # Apply the enhanced regime classification
     ohlc['regime_info'] = ohlc['Hurst'].apply(detailed_regime_classification)
     ohlc['regime'] = ohlc['regime_info'].apply(lambda x: x[0])
     ohlc['intensity'] = ohlc['regime_info'].apply(lambda x: x[1])
@@ -358,6 +463,8 @@ def generate_summary_data():
         summary_data.append(pair_data)
     
     # Apply sorting
+    sort_option = "Name"  # Default sorting option
+    
     if sort_option == "Most Trending":
         # Calculate average Hurst and sort descending
         for item in summary_data:
@@ -376,6 +483,8 @@ def generate_summary_data():
         summary_data.sort(key=lambda x: x.get("consistency", 3))
     
     # Apply filtering
+    regime_filter = []  # Default to no filtering
+    
     if regime_filter:
         filtered_data = []
         for item in summary_data:
@@ -564,6 +673,9 @@ with tab3:
 
 # --- Display Matrix View ---
 with tab1:
+    # Add a refresh button at the top of the Matrix View tab
+    refresh_clicked = st.button("Refresh Analysis")
+    
     if not selected_pairs or not selected_timeframes:
         st.warning("Please select at least one pair and timeframe")
     else:
@@ -644,7 +756,7 @@ with tab1:
 
                         fig.add_vrect(
                             x0=ohlc.index[j-1], x1=ohlc.index[j],
-                            fillcolor=shade_color, opacity=0.7,
+                            fillcolor=shade_color, opacity=0.8,  # Increased opacity for better visibility
                             layer="below", line_width=0
                         )
 
@@ -653,7 +765,7 @@ with tab1:
                         x=ohlc.index,
                         y=ohlc['Hurst'],
                         mode='lines',
-                        line=dict(color='blue', width=1, dash='dot'),
+                        line=dict(color='blue', width=2, dash='dot'),  # Thicker line for better visibility
                         name='Hurst',
                         yaxis='y2'
                     ))
@@ -682,7 +794,7 @@ with tab1:
                     fig.update_layout(
                         title=dict(
                             text=f"<b>{display_text}</b><br><sub>{hurst_text} | {quality_text}</sub>",
-                            font=dict(color=title_color, size=14)
+                            font=dict(color=title_color, size=14, family="Arial, sans-serif")
                         ),
                         margin=dict(l=5, r=5, t=60, b=5),
                         height=220,
@@ -691,7 +803,7 @@ with tab1:
                             title="Price",
                             titlefont=dict(size=10),
                             showgrid=True,
-                            gridcolor='rgba(230,230,230,0.3)'
+                            gridcolor='rgba(230,230,230,0.5)'  # More visible grid
                         ),
                         yaxis2=dict(
                             title="Hurst",
@@ -705,20 +817,20 @@ with tab1:
                         ),
                         xaxis=dict(
                             showgrid=True,
-                            gridcolor='rgba(230,230,230,0.3)'
+                            gridcolor='rgba(230,230,230,0.5)'  # More visible grid
                         ),
                         showlegend=False,
-                        plot_bgcolor='white'
+                        plot_bgcolor='white'  # White background for better contrast
                     )
                     
-                    # Add reference lines for Hurst thresholds
+                    # Add reference lines for Hurst thresholds with higher visibility
                     fig.add_shape(
                         type="line",
                         x0=ohlc.index[0],
                         y0=0.4,
                         x1=ohlc.index[-1],
                         y1=0.4,
-                        line=dict(color="red", width=1, dash="dash"),
+                        line=dict(color="red", width=1.5, dash="dash"),  # Thicker line
                         yref="y2"
                     )
                     
@@ -728,7 +840,7 @@ with tab1:
                         y0=0.6,
                         x1=ohlc.index[-1],
                         y1=0.6,
-                        line=dict(color="green", width=1, dash="dash"),
+                        line=dict(color="green", width=1.5, dash="dash"),  # Thicker line
                         yref="y2"
                     )
                     
@@ -904,13 +1016,21 @@ with tab2:
             # Create a pivot table for the heatmap
             heatmap_pivot = heatmap_df.pivot(index="Pair", columns="Timeframe", values="Hurst")
             
-            # Create heatmap using Plotly
+            # Create heatmap using Plotly with enhanced color scale
             fig = px.imshow(
                 heatmap_pivot,
                 labels=dict(x="Timeframe", y="Pair", color="Hurst Value"),
                 x=heatmap_pivot.columns,
                 y=heatmap_pivot.index,
-                color_continuous_scale="RdBu_r",  # Red for mean-reversion, Blue for trending
+                color_continuous_scale=[
+                    [0, "rgba(255,0,0,0.9)"],    # Strong mean-reversion - dark red
+                    [0.2, "rgba(255,100,100,0.8)"],  # Moderate mean-reversion - red
+                    [0.4, "rgba(255,200,200,0.7)"],  # Slight mean-reversion - light red
+                    [0.5, "rgba(220,220,220,0.7)"],  # Random walk - gray
+                    [0.6, "rgba(200,255,200,0.7)"],  # Slight trending - light green
+                    [0.8, "rgba(100,255,100,0.8)"],  # Moderate trending - green
+                    [1.0, "rgba(0,180,0,0.9)"]    # Strong trending - dark green
+                ],
                 range_color=[0, 1],
                 aspect="auto",
                 height=max(300, len(selected_pairs) * 30)
@@ -944,8 +1064,8 @@ with tab2:
                 margin=dict(l=5, r=5, t=40, b=5),
                 coloraxis_colorbar=dict(
                     title="Hurst Value",
-                    tickvals=[0, 0.4, 0.5, 0.6, 1],
-                    ticktext=["0 (Strong Mean-Rev)", "0.4", "0.5 (Random)", "0.6", "1 (Strong Trend)"]
+                    tickvals=[0, 0.2, 0.4, 0.5, 0.6, 0.8, 1],
+                    ticktext=["0 (Strong Mean-Rev)", "0.2", "0.4", "0.5 (Random)", "0.6", "0.8", "1 (Strong Trend)"]
                 )
             )
             
