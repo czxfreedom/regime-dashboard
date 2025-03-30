@@ -438,7 +438,32 @@ def get_hurst_data(pair, timeframe, lookback_days, rolling_window):
     ohlc['intensity'] = ohlc['regime_info'].apply(lambda x: x[1])
     ohlc['regime_desc'] = ohlc['regime_info'].apply(lambda x: x[2])
 
-    return ohlc         
+    return ohlc 
+
+def check_hurst_input_data(ohlc_data, window):
+    """Check the data that's being fed into the Hurst calculation"""
+    sample_window = ohlc_data['close'].tail(window).values
+    
+    # Basic stats
+    stats = {
+        "window_size": len(sample_window),
+        "min": float(np.min(sample_window)) if len(sample_window) > 0 else None,
+        "max": float(np.max(sample_window)) if len(sample_window) > 0 else None,
+        "mean": float(np.mean(sample_window)) if len(sample_window) > 0 else None,
+        "std": float(np.std(sample_window)) if len(sample_window) > 0 else None,
+        "zero_values": int(np.sum(sample_window == 0)) if len(sample_window) > 0 else None,
+        "identical_values": len(set(sample_window)) == 1 if len(sample_window) > 0 else None
+    }
+    
+    # Try a test calculation
+    if len(sample_window) >= 10:
+        try:
+            test_hurst = universal_hurst(sample_window)
+            stats["test_hurst"] = float(test_hurst)
+        except Exception as e:
+            stats["test_error"] = str(e)
+    
+    return stats        
 
 # --- Collect all data for summary table ---
 @st.cache_data
