@@ -223,7 +223,7 @@ def universal_hurst(ts):
 
 # Fallback to autocorrelation method if other methods fail
         if not hurst_estimates and len(log_returns) > 1:
-         try:
+          try:
             # Calculate lag-1 autocorrelation
             autocorr = np.corrcoef(log_returns[:-1], log_returns[1:])[0, 1]
             
@@ -232,8 +232,8 @@ def universal_hurst(ts):
             # Strong positive correlation suggests trending (H > 0.5)
             h_acf = 0.5 + (np.sign(autocorr) * min(abs(autocorr) * 0.4, 0.4))
             hurst_estimates.append(h_acf)
-        except:
-         pass
+          except Exception:
+            pass
     
     # If we have estimates, aggregate them and constrain to 0-1 range
     if hurst_estimates:
