@@ -972,6 +972,7 @@ with tab2:
 # --- Global Regime Summary Tab ---
 # --- Global Regime Summary Tab ---
 st.empty()
+# --- Global Regime Summary Tab ---
 with tab4:
     st.header("Global Regime Summary")
     
@@ -1000,6 +1001,11 @@ with tab4:
             key="global_window_slider"
         )
     
+    # Add a debug/cache clear option
+    if st.button("Clear Cache and Regenerate"):
+        st.cache_data.clear()
+        st.success("Cache cleared! Click 'Generate Global Regime Summary' to run fresh analysis.")
+    
     # Run analysis button
     if st.button("Generate Global Regime Summary"):
         if not global_timeframes:
@@ -1014,6 +1020,22 @@ with tab4:
                 
                 # Process each pair
                 progress_bar = st.progress(0)
+                
+                # Debug info - test first pair in detail
+                st.write("Debugging first pair:")
+                test_pair = all_available_pairs[0]
+                test_tf = global_timeframes[0]
+                test_ohlc = get_hurst_data(test_pair, test_tf, global_lookback, global_window)
+                if test_ohlc is not None and not test_ohlc.empty:
+                    st.write(f"Sample data for {test_pair} ({test_tf}):")
+                    st.write(f"- Last 5 Hurst values: {test_ohlc['Hurst'].tail().tolist()}")
+                    st.write(f"- Last regime: {test_ohlc['regime_desc'].iloc[-1]}")
+                    st.write(f"- Data shape: {test_ohlc.shape}")
+                    st.write(f"- Missing values: {test_ohlc['Hurst'].isna().sum()} out of {len(test_ohlc)}")
+                else:
+                    st.error(f"Could not get data for {test_pair} with {test_tf} timeframe")
+                
+                # Process each pair
                 for i, pair in enumerate(all_available_pairs):
                     # Update progress bar
                     progress_bar.progress(i / len(all_available_pairs))
@@ -1028,7 +1050,9 @@ with tab4:
                             ohlc = get_hurst_data(pair, tf, global_lookback, global_window)
                             
                             # Check if we have valid data
-                            if ohlc is None or ohlc.empty or pd.isna(ohlc['Hurst'].iloc[-1]):
+                            if ohlc is None or ohlc.empty:
+                                row_dict[tf] = "No data available"
+                            elif pd.isna(ohlc['Hurst'].iloc[-1]):
                                 row_dict[tf] = "Insufficient data"
                             else:
                                 # Get regime information
@@ -1036,8 +1060,11 @@ with tab4:
                                 hurst_val = ohlc['Hurst'].iloc[-1]
                                 emoji = regime_emojis.get(regime_desc, "")
                                 
-                                # Format as string with regime, emoji and Hurst value
-                                row_dict[tf] = f"{regime_desc} {emoji} (H:{hurst_val:.2f})"
+                                # Check for suspicious values
+                                if abs(hurst_val - 0.5) < 0.001:
+                                    row_dict[tf] = f"⚠️ {regime_desc} (H:{hurst_val:.2f}) - Check data"
+                                else:
+                                    row_dict[tf] = f"{regime_desc} {emoji} (H:{hurst_val:.2f})"
                         except Exception as e:
                             row_dict[tf] = f"Error: {str(e)[:50]}"
                     
@@ -1057,8 +1084,10 @@ with tab4:
                 def color_regimes(val):
                     if pd.isna(val):
                         return ''
-                    elif "insufficient" in str(val).lower():
+                    elif "insufficient" in str(val).lower() or "no data" in str(val).lower():
                         return 'background-color: #f0f0f0'
+                    elif "check data" in str(val).lower():
+                        return 'background-color: #fff3cd'  # Warning color
                     elif "mean-reversion" in str(val).lower():
                         return 'background-color: rgba(255,100,100,0.5)'
                     elif "trending" in str(val).lower():
