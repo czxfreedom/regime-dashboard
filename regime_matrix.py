@@ -91,12 +91,15 @@ def get_hurst_data(pair, timeframe, lookback_days, rolling_window):
     ohlc['regime_color'] = ohlc['regime_info'].apply(lambda x: x[1])
     return ohlc
 
+# --- Collect regime summary table ---
+summary_data = []
+
 # --- Render Matrix ---
 if not selected_pairs or not selected_timeframes:
     st.warning("Please select at least one pair and one timeframe")
     st.stop()
 
-st.subheader("Trend Regime Matrix")
+st.subheader("Trend Regime Visual Matrix")
 
 for pair in selected_pairs:
     st.markdown(f"### {pair}")
@@ -109,10 +112,12 @@ for pair in selected_pairs:
 
             if ohlc is None or ohlc.empty:
                 st.write("⚠️ No data available for this timeframe.")
+                summary_data.append((pair, timeframe, 'NO DATA'))
                 continue
 
             if ohlc['Hurst'].dropna().empty:
                 st.write("⚠️ No valid Hurst values. Try increasing lookback or reducing window.")
+                summary_data.append((pair, timeframe, 'NO HURST'))
                 continue
 
             fig = go.Figure()
@@ -130,12 +135,9 @@ for pair in selected_pairs:
                     "TREND": "rgba(0,200,0,0.2)",
                     "NOISE": "rgba(200,200,200,0.3)"
                 }.get(regime, "rgba(150,150,150,0.1)")
-                label = regime if regime != "UNKNOWN" else ""
                 fig.add_vrect(
                     x0=ohlc.index[j - 1], x1=ohlc.index[j],
-                    fillcolor=color, opacity=0.3, layer="below", line_width=0,
-                    annotation_text=label, annotation_position="top left",
-                    annotation_font=dict(size=9, color="black")
+                    fillcolor=color, opacity=0.3, layer="below", line_width=0
                 )
 
             current_hurst = ohlc['Hurst'].iloc[-1]
@@ -143,11 +145,14 @@ for pair in selected_pairs:
             regime_color = {
                 "MEAN-REVERT": "red",
                 "TREND": "green",
-                "NOISE": "gray"
+                "NOISE": "gray",
+                "UNKNOWN": "black"
             }.get(current_regime, "black")
 
+            summary_data.append((pair, timeframe, f"{current_regime} ({current_hurst:.2f})" if not pd.isna(current_hurst) else "UNKNOWN"))
+
             fig.update_layout(
-                title=f"{current_regime} | H={current_hurst:.2f}",
+                title=f"{current_regime} | H={current_hurst:.2f}" if not pd.isna(current_hurst) else "Regime Unknown",
                 title_font_color=regime_color,
                 height=180, width=250,
                 margin=dict(l=0, r=0, t=30, b=0),
@@ -158,7 +163,8 @@ for pair in selected_pairs:
 
             st.plotly_chart(fig, use_container_width=True)
 
-            st.metric(
-                "Regime", f"{current_regime}",
-                delta=f"H={current_hurst:.2f}"
-            )
+# --- Tabular Summary ---
+st.subheader("📊 Regime Table Summary")
+summary_df = pd.DataFrame(summary_data, columns=["Pair", "Timeframe", "Regime"])
+pivot_df = summary_df.pivot(index="Pair", columns="Timeframe", values="Regime").fillna("-")
+st.dataframe(pivot_df, use_container_width=True, height=300)
