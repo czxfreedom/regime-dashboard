@@ -969,6 +969,7 @@ with tab2:
         # Additional visualizations and statistics would continue here...
 
 # --- Global Regime Summary Tab ---
+# --- Global Regime Summary Tab ---
 with tab4:
     st.header("Global Regime Summary")
     
@@ -997,75 +998,70 @@ with tab4:
             key="global_window_slider"
         )
     
-    # Run analysis button
+    # Run analysis button - this is the only trigger for the analysis
     if st.button("Generate Global Regime Summary"):
+        # Only run the analysis when the button is clicked
         with st.spinner("Analyzing all pairs across timeframes..."):
-            # Generate global summary
-            global_summary = []
+            # Get all available pairs
+            pairs_to_analyze = fetch_token_list()
             
-            # Use all pairs or filter if needed
-            pairs_to_analyze = all_pairs
+            # Create a list to hold all the data
+            data_rows = []
             
+            # Process each pair
             for pair in pairs_to_analyze:
-                pair_data = {"Pair": pair}
+                row_data = {"Pair": pair}
                 
+                # Process each timeframe
                 for tf in global_timeframes:
-                    # Get Hurst data for this pair and timeframe
-                    ohlc = get_hurst_data(
-                        pair, 
-                        tf, 
-                        global_lookback, 
-                        global_window
-                    )
+                    # Get data for this pair and timeframe
+                    ohlc = get_hurst_data(pair, tf, global_lookback, global_window)
                     
+                    # Check if we have valid data
                     if ohlc is None or ohlc.empty or pd.isna(ohlc['Hurst'].iloc[-1]):
-                        pair_data[tf] = "Insufficient Data"
+                        row_data[tf] = "Insufficient data"
                     else:
-                        # Get last regime description
-                        last_regime = ohlc['regime_desc'].iloc[-1]
-                        pair_data[tf] = {
-                            "Regime": last_regime,
-                            "Hurst": round(ohlc['Hurst'].iloc[-1], 2),
-                            "Emoji": regime_emojis.get(last_regime, "")
-                        }
+                        # Get the regime information
+                        hurst_value = ohlc['Hurst'].iloc[-1]
+                        regime_desc = ohlc['regime_desc'].iloc[-1]
+                        emoji = regime_emojis.get(regime_desc, "")
+                        
+                        # Store as a formatted string
+                        row_data[tf] = f"{regime_desc} {emoji} (H:{hurst_value:.2f})"
                 
-                global_summary.append(pair_data)
+                # Add the row to our data
+                data_rows.append(row_data)
             
-            # Create DataFrame for display
-            summary_df = pd.DataFrame(global_summary)
+            # Create DataFrame from the processed data
+            result_df = pd.DataFrame(data_rows)
             
-            # Prepare the display DataFrame
-            display_df = summary_df.copy()
-            
-            # Format the timeframe columns
-            for tf in global_timeframes:
-                display_df[tf] = display_df[tf].apply(
-                    lambda x: f"{x['Regime']} {x['Emoji']} (H:{x['Hurst']})" 
-                    if isinstance(x, dict) else x
-                )
-            
-            # Define styling function
+            # Define a styling function that works with string values
             def highlight_regimes(val):
-                if "mean-reversion" in str(val).lower():
-                    return 'background-color: rgba(255,200,200,0.5)'
-                elif "trend" in str(val).lower():
-                    return 'background-color: rgba(200,255,200,0.5)'
-                elif "random" in str(val).lower():
-                    return 'background-color: rgba(220,220,220,0.5)'
+                if isinstance(val, str):
+                    if "mean-reversion" in val.lower():
+                        return 'background-color: rgba(255,100,100,0.5)'
+                    elif "trending" in val.lower():
+                        return 'background-color: rgba(100,255,100,0.5)'
+                    elif "random" in val.lower():
+                        return 'background-color: rgba(200,200,200,0.5)'
                 return ''
             
-            # Display styled table
-            st.dataframe(
-                display_df.style.applymap(highlight_regimes)
-            )
+            # Apply styling and display
+            styled_df = result_df.style.applymap(highlight_regimes, subset=[col for col in result_df.columns if col != "Pair"])
             
-            # Download option
+            # Display the table
+            st.dataframe(styled_df)
+            
+            # Create CSV for download
             st.download_button(
-                label="Download Global Summary",
-                data=summary_df.to_csv(index=False),
-                file_name="global_regime_summary.csv",
+                label="Download Global Regime Summary",
+                data=result_df.to_csv(index=False),
+                file_name=f"global_regime_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                 mime="text/csv"
             )
+    else:
+        # Display a message when the tab is first loaded
+        st.info("Select timeframes and parameters, then click 'Generate Global Regime Summary' to analyze all currency pairs.")
 
 # Main script execution
 if __name__ == "__main__":
