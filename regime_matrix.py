@@ -525,10 +525,10 @@ with tab3:
     # Select regime to filter by
     filter_regime = st.multiselect(
         "Show Only Pairs with These Regimes:", 
-        ["Strong mean-reversion", "Moderate mean-reversion", "Mild mean-reversion", "Slight mean-reversion bias",
+        ["All Regimes","Strong mean-reversion", "Moderate mean-reversion", "Mild mean-reversion", "Slight mean-reversion bias",
          "Pure random walk", 
          "Slight trending bias", "Mild trending", "Moderate trending", "Strong trending"],
-        default=[]
+        default=["All Regimes"]
     )
     
     # Sorting options
@@ -553,21 +553,40 @@ with tab3:
     
     # Button to run the filter
     if st.button("Find Matching Pairs"):
-        # Show a spinner while processing
-        with st.spinner("Analyzing all currency pairs..."):
-            # Get the complete list of pairs from database 
-            all_available_pairs = fetch_token_list()
-            
-            # Determine which parameters to use
-            if use_custom_params:
-                actual_lookback = custom_lookback
-                actual_window = custom_window
-            else:
-                actual_lookback = lookback_days
-                actual_window = rolling_window
-            
-            # Store results
-            regime_results = []
+    # Show a spinner while processing
+    with st.spinner("Analyzing all currency pairs..."):
+        # Existing code...
+
+        # If "All Regimes" is selected or no specific regimes are chosen, show all pairs
+        if "All Regimes" in filter_regime or not filter_regime:
+            # Show all pairs with their current regime
+            regime_results = [
+                {
+                    "Pair": pair,
+                    "Regime": (ohlc['regime_desc'].iloc[-1] if not ohlc.empty and not pd.isna(ohlc['regime_desc'].iloc[-1]) else "Insufficient data"),
+                    "Hurst": (ohlc['Hurst'].iloc[-1] if not ohlc.empty and not pd.isna(ohlc['Hurst'].iloc[-1]) else np.nan),
+                    "Data Quality": ((ohlc['Hurst'].notna().sum() / len(ohlc)) * 100 if not ohlc.empty else 0),
+                    "Emoji": (regime_emojis.get(ohlc['regime_desc'].iloc[-1], "") if not ohlc.empty and not pd.isna(ohlc['regime_desc'].iloc[-1]) else "")
+                }
+                for pair in all_available_pairs
+                if (ohlc := get_hurst_data(pair, filter_timeframe, actual_lookback, actual_window)) is not None
+            ]
+        else:
+            # Existing filtering logic for specific regimes
+            regime_results = [
+                {
+                    "Pair": pair,
+                    "Regime": ohlc['regime_desc'].iloc[-1],
+                    "Hurst": ohlc['Hurst'].iloc[-1],
+                    "Data Quality": (ohlc['Hurst'].notna().sum() / len(ohlc)) * 100,
+                    "Emoji": regime_emojis.get(ohlc['regime_desc'].iloc[-1], "")
+                }
+                for pair in all_available_pairs
+                if (ohlc := get_hurst_data(pair, filter_timeframe, actual_lookback, actual_window)) is not None
+                and ohlc['regime_desc'].iloc[-1] in filter_regime
+            ]
+
+        # Rest of the existing code remains the same
             
             # Process each pair
             progress_bar = st.progress(0)
