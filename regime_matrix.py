@@ -970,6 +970,7 @@ with tab3:
                 st.warning("No currency pairs match your filter criteria")
 
 # --- Global Regime Summary Tab ---
+# --- Global Regime Summary Tab ---
 with tab4:
     st.header("Global Regime Summary")
     
@@ -999,118 +1000,171 @@ with tab4:
         )
     
     # Add a debug/cache clear option
-    if st.button("Clear Cache and Regenerate"):
+    if st.button("Clear Cache and Regenerate", key="global_clear_cache"):
         st.cache_data.clear()
         st.success("Cache cleared! Click 'Generate Global Regime Summary' to run fresh analysis.")
     
-    # Run analysis button
-    if st.button("Generate Global Regime Summary"):
+    # Run analysis button - add a unique key
+    if st.button("Generate Global Regime Summary", key="global_generate_button"):
+        # Add a debug message
+        st.write("Button clicked - starting analysis...")
+        
         if not global_timeframes:
             st.warning("Please select at least one timeframe")
         else:
+            # Store in a separate session state variable
+            st.session_state.global_analysis_running = True
+            
             with st.spinner("Analyzing all currency pairs across timeframes..."):
-                # Get all available pairs
-                all_available_pairs = fetch_token_list()
-                
-                # Process in batches of 10 pairs at a time
-                batch_size = 10
-                num_batches = (len(all_available_pairs) + batch_size - 1) // batch_size
-                
-                # Initialize results
-                rows = []
-                
-                # Show progress
-                progress_bar = st.progress(0)
-                
-                for i in range(num_batches):
-                    # Update progress
-                    progress_bar.progress(i / num_batches)
+                try:
+                    # Get all available pairs
+                    all_available_pairs = fetch_token_list()
                     
-                    # Get batch of pairs
-                    start_idx = i * batch_size
-                    end_idx = min((i + 1) * batch_size, len(all_available_pairs))
-                    batch_pairs = all_available_pairs[start_idx:end_idx]
+                    # Display number of pairs being processed
+                    st.info(f"Processing {len(all_available_pairs)} pairs...")
                     
-                    # Process batch
-                    batch_results = get_hurst_data_batch(batch_pairs, global_timeframes, global_lookback, global_window)
+                    # Process in batches of 10 pairs at a time
+                    batch_size = 10
+                    num_batches = (len(all_available_pairs) + batch_size - 1) // batch_size
                     
-                    # Extract results for each pair
-                    for pair in batch_pairs:
-                        # Start with pair name
-                        row_dict = {"Pair": pair}
+                    # Initialize results
+                    rows = []
+                    
+                    # Show progress
+                    progress_bar = st.progress(0)
+                    
+                    for i in range(num_batches):
+                        # Update progress
+                        progress_bar.progress(i / num_batches)
                         
-                        if pair not in batch_results:
-                            # No data for this pair
-                            for tf in global_timeframes:
-                                row_dict[tf] = "No data available"
-                            rows.append(row_dict)
-                            continue
+                        # Get batch of pairs
+                        start_idx = i * batch_size
+                        end_idx = min((i + 1) * batch_size, len(all_available_pairs))
+                        batch_pairs = all_available_pairs[start_idx:end_idx]
                         
-                        # For each timeframe, get the regime
-                        for tf in global_timeframes:
-                            if tf not in batch_results[pair] or batch_results[pair][tf] is None or batch_results[pair][tf].empty:
-                                row_dict[tf] = "No data available"
-                                continue
-                                
-                            ohlc = batch_results[pair][tf]
+                        # Process batch
+                        batch_results = get_hurst_data_batch(batch_pairs, global_timeframes, global_lookback, global_window)
+                        
+                        # Extract results for each pair
+                        for pair in batch_pairs:
+                            # Start with pair name
+                            row_dict = {"Pair": pair}
                             
-                            # Check if we have valid data
-                            if pd.isna(ohlc['Hurst'].iloc[-1]):
-                                row_dict[tf] = "Insufficient data"
-                            else:
-                                # Get regime information
-                                regime_desc = ohlc['regime_desc'].iloc[-1]
-                                hurst_val = ohlc['Hurst'].iloc[-1]
-                                emoji = regime_emojis.get(regime_desc, "")
+                            if pair not in batch_results:
+                                # No data for this pair
+                                for tf in global_timeframes:
+                                    row_dict[tf] = "No data available"
+                                rows.append(row_dict)
+                                continue
+                            
+                            # For each timeframe, get the regime
+                            for tf in global_timeframes:
+                                if tf not in batch_results[pair] or batch_results[pair][tf] is None or batch_results[pair][tf].empty:
+                                    row_dict[tf] = "No data available"
+                                    continue
+                                    
+                                ohlc = batch_results[pair][tf]
                                 
-                                # Format information for display
-                                row_dict[tf] = f"{regime_desc} {emoji} (H:{hurst_val:.2f})"
-                        
-                        # Add to results
-                        rows.append(row_dict)
-                
-                # Complete progress
-                progress_bar.progress(1.0)
-                
-                # Convert to DataFrame
-                results_df = pd.DataFrame(rows)
-                
-                # Show summary
-                st.success(f"Analysis complete: {len(results_df)} pairs analyzed across {len(global_timeframes)} timeframes")
-                
-                # Define styling function
-                def color_regimes(val):
-                    if pd.isna(val):
+                                # Check if we have valid data
+                                if pd.isna(ohlc['Hurst'].iloc[-1]):
+                                    row_dict[tf] = "Insufficient data"
+                                else:
+                                    # Get regime information
+                                    regime_desc = ohlc['regime_desc'].iloc[-1]
+                                    hurst_val = ohlc['Hurst'].iloc[-1]
+                                    emoji = regime_emojis.get(regime_desc, "")
+                                    
+                                    # Format information for display
+                                    row_dict[tf] = f"{regime_desc} {emoji} (H:{hurst_val:.2f})"
+                            
+                            # Add to results
+                            rows.append(row_dict)
+                    
+                    # Complete progress
+                    progress_bar.progress(1.0)
+                    
+                    # Convert to DataFrame
+                    results_df = pd.DataFrame(rows)
+                    
+                    # Show summary
+                    st.success(f"Analysis complete: {len(results_df)} pairs analyzed across {len(global_timeframes)} timeframes")
+                    
+                    # Store results in session state
+                    st.session_state.global_results_df = results_df
+                    
+                    # Define styling function
+                    def color_regimes(val):
+                        if pd.isna(val):
+                            return ''
+                        elif "insufficient" in str(val).lower() or "no data" in str(val).lower():
+                            return 'background-color: #f0f0f0'
+                        elif "error" in str(val).lower():
+                            return 'background-color: #fff3cd'  # Warning
+                        elif "mean-reversion" in str(val).lower():
+                            return 'background-color: rgba(255,200,200,0.5)'
+                        elif "trending" in str(val).lower():
+                            return 'background-color: rgba(200,255,200,0.5)'
+                        elif "random" in str(val).lower():
+                            return 'background-color: rgba(220,220,220,0.5)'
                         return ''
-                    elif "insufficient" in str(val).lower() or "no data" in str(val).lower():
-                        return 'background-color: #f0f0f0'
-                    elif "error" in str(val).lower():
-                        return 'background-color: #fff3cd'  # Warning
-                    elif "mean-reversion" in str(val).lower():
-                        return 'background-color: rgba(255,200,200,0.5)'
-                    elif "trending" in str(val).lower():
-                        return 'background-color: rgba(200,255,200,0.5)'
-                    elif "random" in str(val).lower():
-                        return 'background-color: rgba(220,220,220,0.5)'
-                    return ''
-                
-                # Display styled DataFrame
-                st.dataframe(
-                    results_df.style.applymap(
-                        color_regimes, 
-                        subset=[col for col in results_df.columns if col != "Pair"]
-                    ),
-                    height=600,
-                    use_container_width=True
-                )
-                
-                # Add download option
-                csv = results_df.to_csv(index=False)
-                st.download_button(
-                    "Download as CSV",
-                    data=csv,
-                    file_name=f"global_regime_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                    mime="text/csv"
-                )
+                    
+                    # Display styled DataFrame
+                    st.dataframe(
+                        results_df.style.applymap(
+                            color_regimes, 
+                            subset=[col for col in results_df.columns if col != "Pair"]
+                        ),
+                        height=600,
+                        use_container_width=True
+                    )
+                    
+                    # Add download option
+                    csv = results_df.to_csv(index=False)
+                    st.download_button(
+                        "Download as CSV",
+                        data=csv,
+                        file_name=f"global_regime_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                        mime="text/csv",
+                        key="global_download"
+                    )
+                except Exception as e:
+                    st.error(f"Error during analysis: {str(e)}")
+                    st.error("Please try again with different parameters or fewer timeframes")
+            
+            # Clear running flag
+            st.session_state.global_analysis_running = False
     else:
-        st.info("Select timeframes and parameters, then click 'Generate Global Regime Summary' to analyze all currency pairs.")
+        # Check if we have previous results
+        if 'global_results_df' in st.session_state:
+            st.success("Using previously generated results. Click 'Generate Global Regime Summary' to refresh.")
+            
+            # Get results from session state
+            results_df = st.session_state.global_results_df
+            
+            # Define styling function
+            def color_regimes(val):
+                if pd.isna(val):
+                    return ''
+                elif "insufficient" in str(val).lower() or "no data" in str(val).lower():
+                    return 'background-color: #f0f0f0'
+                elif "error" in str(val).lower():
+                    return 'background-color: #fff3cd'  # Warning
+                elif "mean-reversion" in str(val).lower():
+                    return 'background-color: rgba(255,200,200,0.5)'
+                elif "trending" in str(val).lower():
+                    return 'background-color: rgba(200,255,200,0.5)'
+                elif "random" in str(val).lower():
+                    return 'background-color: rgba(220,220,220,0.5)'
+                return ''
+            
+            # Display styled DataFrame
+            st.dataframe(
+                results_df.style.applymap(
+                    color_regimes, 
+                    subset=[col for col in results_df.columns if col != "Pair"]
+                ),
+                height=600,
+                use_container_width=True
+            )
+        else:
+            st.info("Select timeframes and parameters, then click 'Generate Global Regime Summary' to analyze all currency pairs.")
