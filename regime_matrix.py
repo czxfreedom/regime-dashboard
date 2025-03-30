@@ -224,6 +224,7 @@ selected_pairs = st.sidebar.multiselect("Select Currency Pairs", all_pairs, defa
 timeframes = ["30s","15min", "30min", "1h", "4h", "6h"]
 selected_timeframes = st.sidebar.multiselect("Select Timeframes", timeframes, default=["15min", "1h", "6h"])
 # Display dynamic recommendations based on selected timeframes
+# Display dynamic recommendations based on selected timeframes
 if selected_timeframes:
     st.sidebar.markdown("### Recommended Settings")
     settings_text = ""
@@ -235,8 +236,22 @@ if selected_timeframes:
     
     st.sidebar.markdown(settings_text)
     
-    # Auto-suggestion for current settings
-    rec_lookback = max([get_recommended_settings(tf)["lookback_min"] for tf in selected_timeframes])
+    # Auto-suggestion for current settings - Fixed version
+    recommended_lookbacks = [get_recommended_settings(tf)["lookback_min"] for tf in selected_timeframes]
+    recommended_windows = [get_recommended_settings(tf)["window_ideal"] for tf in selected_timeframes]
+    
+    if recommended_lookbacks:  # Make sure the list is not empty
+        rec_lookback = max(recommended_lookbacks)
+        rec_window = min(recommended_windows) if recommended_windows else 30
+        
+        if lookback_days < rec_lookback:
+            st.sidebar.warning(f"⚠️ Current lookback ({lookback_days} days) may be too short for {max(selected_timeframes, key=lambda x: get_recommended_settings(x)['lookback_min'])}")
+            
+            # Add a button to auto-apply the recommended settings
+            if st.sidebar.button(f"Apply Recommended Settings ({rec_lookback} days lookback, {rec_window} bar window)"):
+                lookback_days = rec_lookback
+                rolling_window = rec_window
+                st.experimental_rerun()
     rec_window = min([get_recommended_settings(tf)["window_ideal"] for tf in selected_timeframes])
     
     if lookback_days < rec_lookback:
