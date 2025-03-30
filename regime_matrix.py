@@ -136,7 +136,8 @@ def universal_hurst(ts):
             poly = np.polyfit(lags_log, rs_log, 1)
             h_rs = poly[0]
             hurst_estimates.append(h_rs)
-    except:
+    except Exception as e:
+        # print(f"RS error: {str(e)}")
         pass
 
     # Method 2: Variance Method
@@ -170,7 +171,8 @@ def universal_hurst(ts):
             poly = np.polyfit(lags_log, var_log, 1)
             h_var = (poly[0] + 1) / 2
             hurst_estimates.append(h_var)
-    except:
+    except Exception as e:
+        # print(f"Variance error: {str(e)}")
         pass
     
     # Method 3: Detrended Fluctuation Analysis (DFA)
@@ -219,12 +221,13 @@ def universal_hurst(ts):
             poly = np.polyfit(lags_log, dfa_log, 1)
             h_dfa = poly[0]
             hurst_estimates.append(h_dfa)
-    except:
+    except Exception as e:
+        # print(f"DFA error: {str(e)}")
         pass
 
-# Fallback to autocorrelation method if other methods fail
-        if not hurst_estimates and len(log_returns) > 1:
-          try:
+    # Fallback to autocorrelation method if other methods fail
+    if not hurst_estimates and len(log_returns) > 1:
+        try:
             # Calculate lag-1 autocorrelation
             autocorr = np.corrcoef(log_returns[:-1], log_returns[1:])[0, 1]
             
@@ -233,7 +236,8 @@ def universal_hurst(ts):
             # Strong positive correlation suggests trending (H > 0.5)
             h_acf = 0.5 + (np.sign(autocorr) * min(abs(autocorr) * 0.4, 0.4))
             hurst_estimates.append(h_acf)
-          except Exception:
+        except Exception as e:
+            # print(f"Autocorr error: {str(e)}")
             pass
     
     # If we have estimates, aggregate them and constrain to 0-1 range
@@ -251,6 +255,33 @@ def universal_hurst(ts):
     
     # If all methods fail, return 0.5 (random walk assumption)
     return 0.5
+
+# --- Calculate Hurst confidence ---
+def hurst_confidence(ts):
+    """Calculate confidence score for Hurst estimation (0-100%)"""
+    ts = np.array(ts)
+    
+    # Factors affecting confidence
+    factors = []
+    
+    # 1. Length of time series
+    len_factor = min(1.0, len(ts) / 50)
+    factors.append(len_factor)
+    
+    # 2. Variance in the series
+    var = np.var(ts)
+    var_factor = min(1.0, var / 1e-4) if var > 0 else 0
+    factors.append(var_factor)
+    
+    # 3. Trend consistency
+    diff = np.diff(ts)
+    sign_changes = np.sum(diff[:-1] * diff[1:] < 0)
+    consistency = 1.0 - min(1.0, sign_changes / (len(diff) - 1)) if len(diff) > 1 else 0
+    factors.append(consistency)
+    
+    # Combine factors
+    confidence = np.mean(factors) * 100
+    return round(confidence)
 
 def detailed_regime_classification(hurst):
     """
@@ -309,6 +340,71 @@ def get_recommended_settings(timeframe):
     }
     
     return recommendations.get(timeframe, {"lookback_min": 3, "lookback_ideal": 7, "window_min": 20, "window_ideal": 30})
+
+# --- Validate price data function ---
+def validate_price_data(df):
+    """Validate price data and return diagnostics"""
+    diagnostics = {}
+    
+    # Check if dataframe is empty
+    if df.empty:
+        return {"error": "Dataframe is empty"}
+    
+    # Check data types
+    diagnostics["data_types"] = {col: str(df[col].dtype) for col in df.columns}
+    
+    # Convert price to numeric and check for NaNs
+    if 'final_price' in df.columns:
+        price_col = 'final_price'
+    elif 'close' in df.columns:
+        price_col = 'close'
+    else:
+        return {"error": "No price column found"}
+    
+    # Ensure price is numeric
+    original_price = df[price_col].copy()
+    numeric_price = pd.to_numeric(original_price, errors='coerce')
+    
+    # Check for NaNs introduced by conversion
+    nan_count = numeric_price.isna().sum()
+    nan_pct = nan_count / len(numeric_price) * 100 if len(numeric_price) > 0 else 0
+    
+    diagnostics["nan_values"] = {
+        "count": int(nan_count),
+        "percentage": float(nan_pct)
+    }
+    
+    # Check for duplicate timestamps
+    if 'timestamp' in df.columns:
+        duplicates = df['timestamp'].duplicated().sum()
+        diagnostics["duplicate_timestamps"] = int(duplicates)
+    
+    # Check price variation
+    if len(numeric_price.dropna()) > 1:
+        price_stats = {
+            "min": float(numeric_price.min()),
+            "max": float(numeric_price.max()),
+            "mean": float(numeric_price.mean()),
+            "std": float(numeric_price.std()),
+            "zero_values": int((numeric_price == 0).sum())
+        }
+        
+        # Check price changes
+        price_changes = numeric_price.pct_change().dropna()
+        if len(price_changes) > 0:
+            change_stats = {
+                "min_change_pct": float(price_changes.min() * 100),
+                "max_change_pct": float(price_changes.max() * 100),
+                "mean_abs_change_pct": float(price_changes.abs().mean() * 100),
+                "std_change_pct": float(price_changes.std() * 100),
+                "zero_changes": int((price_changes == 0).sum()),
+                "zero_changes_pct": float((price_changes == 0).sum() / len(price_changes) * 100) if len(price_changes) > 0 else 0
+            }
+            
+            diagnostics["price_stats"] = price_stats
+            diagnostics["change_stats"] = change_stats
+    
+    return diagnostics
 
 # --- Sidebar Parameters ---
 @st.cache_data
@@ -402,7 +498,6 @@ with st.sidebar.expander("Legend: Regime Colors", expanded=True):
     - <span style='background-color:rgba(0,180,0,0.7);padding:3px'>**Strong Trending ⬆️⬆️⬆️**</span>  
     """, unsafe_allow_html=True)          
 
-
 # --- Data Fetching ---
 @st.cache_data(ttl=300)  # Cache data for 5 minutes
 def get_hurst_data(pair, timeframe, lookback_days, rolling_window):
@@ -420,17 +515,29 @@ def get_hurst_data(pair, timeframe, lookback_days, rolling_window):
     if df.empty:
         return None
 
+    # Validate the price data
+    data_diagnostics = validate_price_data(df)
+    
+    # If there are serious data issues, return None
+    if "error" in data_diagnostics:
+        return None
+    
+    # Convert timestamp and sort
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df = df.set_index('timestamp').sort_index()
+    
+    # Resample to OHLC
     ohlc = df['final_price'].resample(timeframe).ohlc().dropna()
-
+    
+    # If not enough data for the window size, return None
+    if len(ohlc) < rolling_window:
+        return None
+    
     # Calculate Hurst with improved function
     ohlc['Hurst'] = ohlc['close'].rolling(rolling_window).apply(universal_hurst)
     
-    # Add confidence score
-    ohlc['confidence'] = ohlc['close'].rolling(rolling_window).apply(
-        lambda x: np.random.randint(60, 100) if len(x) >= rolling_window else np.nan
-    )
+    # Add proper confidence score based on the data
+    ohlc['confidence'] = ohlc['close'].rolling(rolling_window).apply(hurst_confidence)
     
     # Apply the enhanced regime classification
     ohlc['regime_info'] = ohlc['Hurst'].apply(detailed_regime_classification)
@@ -442,6 +549,9 @@ def get_hurst_data(pair, timeframe, lookback_days, rolling_window):
 
 def check_hurst_input_data(ohlc_data, window):
     """Check the data that's being fed into the Hurst calculation"""
+    if ohlc_data is None or ohlc_data.empty or len(ohlc_data) < window:
+        return {"error": "Insufficient data for analysis"}
+        
     sample_window = ohlc_data['close'].tail(window).values
     
     # Basic stats
@@ -460,6 +570,11 @@ def check_hurst_input_data(ohlc_data, window):
         try:
             test_hurst = universal_hurst(sample_window)
             stats["test_hurst"] = float(test_hurst)
+            # Analyze returns for better diagnostics
+            log_returns = np.diff(np.log(sample_window + 1e-10))
+            stats["returns_mean"] = float(np.mean(log_returns))
+            stats["returns_std"] = float(np.std(log_returns))
+            stats["returns_zero_count"] = int(np.sum(log_returns == 0))
         except Exception as e:
             stats["test_error"] = str(e)
     
@@ -479,12 +594,17 @@ def generate_summary_data():
             if ohlc is None or ohlc.empty or pd.isna(ohlc['Hurst'].iloc[-1]):
                 pair_data[tf] = {"Hurst": np.nan, "Regime": "UNKNOWN", "Description": "Insufficient data"}
             else:
+                # Get diagnostic data for debugging if needed
+                diagnostic_info = check_hurst_input_data(ohlc, rolling_window)
+                
                 pair_data[tf] = {
                     "Hurst": ohlc['Hurst'].iloc[-1],
                     "Regime": ohlc['regime'].iloc[-1],
                     "Description": ohlc['regime_desc'].iloc[-1],
                     "Emoji": regime_emojis.get(ohlc['regime_desc'].iloc[-1], ""),
-                    "Valid_Pct": (ohlc['Hurst'].notna().sum() / len(ohlc)) * 100
+                    "Valid_Pct": (ohlc['Hurst'].notna().sum() / len(ohlc)) * 100,
+                    "Confidence": ohlc['confidence'].iloc[-1],
+                    "Diagnostic": diagnostic_info
                 }
         
         summary_data.append(pair_data)
@@ -508,10 +628,10 @@ def generate_summary_data():
             regimes = [item[tf]["Regime"] for tf in selected_timeframes if tf in item and "Regime" in item[tf]]
             item["consistency"] = len(set(regimes)) if regimes else 0
         summary_data.sort(key=lambda x: x.get("consistency", 3))
-    
+
     # Apply filtering
     regime_filter = []  # Default to no filtering
-    
+
     if regime_filter:
         filtered_data = []
         for item in summary_data:
@@ -524,7 +644,7 @@ def generate_summary_data():
             if match:
                 filtered_data.append(item)
         summary_data = filtered_data
-    
+
     return summary_data
 
 # Get summary data
@@ -532,7 +652,6 @@ if selected_pairs and selected_timeframes:
     summary_data = generate_summary_data()
 else:
     summary_data = []
-
 
 # --- Filter by Regime Tab ---
 with tab3:
@@ -543,7 +662,7 @@ with tab3:
     matching specific market regimes, regardless of the pairs selected in the sidebar.
     """)
     
-    # Select timeframe to analyze
+    # Select timeframe
     filter_timeframe = st.selectbox(
         "Select Timeframe to Analyze",
         timeframes,
@@ -597,31 +716,79 @@ with tab3:
             # If "All Regimes" is selected or no specific regimes are chosen, show all pairs
             if "All Regimes" in filter_regime or not filter_regime:
                 # Show all pairs with their current regime
-                regime_results = [
-                    {
-                        "Pair": pair,
-                        "Regime": (ohlc['regime_desc'].iloc[-1] if not ohlc.empty and not pd.isna(ohlc['regime_desc'].iloc[-1]) else "Insufficient data"),
-                        "Hurst": (ohlc['Hurst'].iloc[-1] if not ohlc.empty and not pd.isna(ohlc['Hurst'].iloc[-1]) else np.nan),
-                        "Data Quality": ((ohlc['Hurst'].notna().sum() / len(ohlc)) * 100 if not ohlc.empty else 0),
-                        "Emoji": (regime_emojis.get(ohlc['regime_desc'].iloc[-1], "") if not ohlc.empty and not pd.isna(ohlc['regime_desc'].iloc[-1]) else "")
-                    }
-                    for pair in all_available_pairs
-                    if (ohlc := get_hurst_data(pair, filter_timeframe, actual_lookback, actual_window)) is not None
-                ]
+                regime_results = []
+                
+                # Process in batches to show progress
+                batch_size = max(1, len(all_available_pairs) // 10)
+                progress_bar = st.progress(0)
+                
+                for i in range(0, len(all_available_pairs), batch_size):
+                    batch_pairs = all_available_pairs[i:i+batch_size]
+                    progress_bar.progress(i / len(all_available_pairs))
+                    
+                    for pair in batch_pairs:
+                        ohlc = get_hurst_data(pair, filter_timeframe, actual_lookback, actual_window)
+                        
+                        if ohlc is None or ohlc.empty:
+                            regime_results.append({
+                                "Pair": pair,
+                                "Regime": "Insufficient data",
+                                "Hurst": np.nan,
+                                "Data Quality": 0,
+                                "Emoji": "❓"
+                            })
+                        else:
+                            if pd.isna(ohlc['Hurst'].iloc[-1]):
+                                regime_results.append({
+                                    "Pair": pair,
+                                    "Regime": "Insufficient data",
+                                    "Hurst": np.nan,
+                                    "Data Quality": 0,
+                                    "Emoji": "❓"
+                                })
+                            else:
+                                # Calculate data quality
+                                data_quality = (ohlc['Hurst'].notna().sum() / len(ohlc)) * 100
+                                
+                                regime_results.append({
+                                    "Pair": pair,
+                                    "Regime": ohlc['regime_desc'].iloc[-1],
+                                    "Hurst": ohlc['Hurst'].iloc[-1],
+                                    "Data Quality": data_quality,
+                                    "Emoji": regime_emojis.get(ohlc['regime_desc'].iloc[-1], "")
+                                })
+                
+                # Complete progress
+                progress_bar.progress(1.0)
             else:
                 # Existing filtering logic for specific regimes
-                regime_results = [
-                    {
-                        "Pair": pair,
-                        "Regime": ohlc['regime_desc'].iloc[-1],
-                        "Hurst": ohlc['Hurst'].iloc[-1],
-                        "Data Quality": (ohlc['Hurst'].notna().sum() / len(ohlc)) * 100,
-                        "Emoji": regime_emojis.get(ohlc['regime_desc'].iloc[-1], "")
-                    }
-                    for pair in all_available_pairs
-                    if (ohlc := get_hurst_data(pair, filter_timeframe, actual_lookback, actual_window)) is not None
-                    and ohlc['regime_desc'].iloc[-1] in filter_regime
-                ]
+                regime_results = []
+                
+                # Process in batches to show progress
+                batch_size = max(1, len(all_available_pairs) // 10)
+                progress_bar = st.progress(0)
+                
+                for i in range(0, len(all_available_pairs), batch_size):
+                    batch_pairs = all_available_pairs[i:i+batch_size]
+                    progress_bar.progress(i / len(all_available_pairs))
+                    
+                    for pair in batch_pairs:
+                        ohlc = get_hurst_data(pair, filter_timeframe, actual_lookback, actual_window)
+                        
+                        if ohlc is not None and not ohlc.empty and not pd.isna(ohlc['regime_desc'].iloc[-1]):
+                            if ohlc['regime_desc'].iloc[-1] in filter_regime:
+                                data_quality = (ohlc['Hurst'].notna().sum() / len(ohlc)) * 100
+                                
+                                regime_results.append({
+                                    "Pair": pair,
+                                    "Regime": ohlc['regime_desc'].iloc[-1],
+                                    "Hurst": ohlc['Hurst'].iloc[-1],
+                                    "Data Quality": data_quality,
+                                    "Emoji": regime_emojis.get(ohlc['regime_desc'].iloc[-1], "")
+                                })
+                
+                # Complete progress
+                progress_bar.progress(1.0)
             
             # Filter by data quality
             regime_results = [
@@ -758,20 +925,26 @@ with tab1:
                             suggestion = f"⚠️ Low valid data ({valid_data_pct:.1f}%)."
                         st.warning(suggestion)
 
-                    # Chart code remains the same as in previous implementation
-                    # ... (Previous chart creation code would be inserted here)
+                    # Check if we have a valid Hurst value
+                    if pd.isna(ohlc['Hurst'].iloc[-1]):
+                        st.error("Insufficient data for Hurst calculation")
+                        
+                        # Show diagnostic info
+                        diagnostics = check_hurst_input_data(ohlc, rolling_window)
+                        with st.expander("Diagnostics"):
+                            st.json(diagnostics)
+                        
+                        continue
                     
-                    # Inside the Matrix View tab, for each timeframe
-                    # Chart
+                    # Chart 
                     fig = go.Figure()
 
-                # Background regime color with improved visualization
+                    # Background regime color with improved visualization
                     for j in range(1, len(ohlc)):
                         if pd.isna(ohlc['regime'].iloc[j-1]) or pd.isna(ohlc['intensity'].iloc[j-1]):
                              continue
         
                         r = ohlc['regime'].iloc[j-1]
-    
                         intensity = ohlc['intensity'].iloc[j-1]
     
                         if r in color_map and intensity in color_map[r]:
@@ -785,7 +958,7 @@ with tab1:
                             layer="below", line_width=0
                         )
 
-# Price line
+                    # Price line
                     fig.add_trace(go.Scatter(
                         x=ohlc.index, 
                         y=ohlc['close'], 
@@ -803,7 +976,7 @@ with tab1:
                         yaxis='y2'
                     ))
 
-                                    # Determine color based on regime
+                    # Determine color based on regime
                     if ohlc['regime'].iloc[-1] == "MEAN-REVERT":
                          title_color = "red"
                     elif ohlc['regime'].iloc[-1] == "TREND":
@@ -886,6 +1059,19 @@ with tab2:
     else:
         st.subheader("🔍 Pair-Specific Summary Table")
         
+        # Add debug option to show raw hurst values
+        show_raw_data = st.checkbox("Show Raw Hurst Diagnostics", value=False)
+        
+        if show_raw_data:
+            for item in summary_data:
+                st.write(f"**{item['Pair']}**")
+                
+                for tf in selected_timeframes:
+                    if tf in item and "Diagnostic" in item[tf]:
+                        st.write(f"  {tf}: {item[tf]['Hurst']:.3f} - {item[tf]['Description']}")
+                        with st.expander(f"Diagnostics for {item['Pair']} - {tf}"):
+                            st.json(item[tf]["Diagnostic"])
+        
         # Recommended settings based on current data
         st.info("""
         ### Data Quality & Recommended Settings
@@ -909,12 +1095,7 @@ with tab2:
         
         html_table += "</tr>"
         
-        # Data rows for the table would continue here...
-        # (The rest of the summary table code from previous implementation)
-        # 
-        # 
-        # 
- # Data rows
+        # Data rows
         for item in summary_data:
             html_table += "<tr>"
             html_table += f"<td style='padding:10px; border:1px solid #ddd; font-weight:bold;'>{item['Pair']}</td>"
@@ -924,10 +1105,13 @@ with tab2:
                     regime_data = item[tf]
                     
                     # Determine cell background color based on regime
-                    if regime_data["Regime"] == "MEAN-REVERT":
-                        bg_color = "rgba(255,200,200,0.5)"
-                    elif regime_data["Regime"] == "TREND":
-                        bg_color = "rgba(200,255,200,0.5)"
+                    if "Regime" in regime_data:
+                        if regime_data["Regime"] == "MEAN-REVERT":
+                            bg_color = "rgba(255,200,200,0.5)"
+                        elif regime_data["Regime"] == "TREND":
+                            bg_color = "rgba(200,255,200,0.5)"
+                        else:
+                            bg_color = "rgba(220,220,220,0.3)"
                     else:
                         bg_color = "rgba(220,220,220,0.3)"
                     
@@ -992,13 +1176,7 @@ with tab2:
             file_name=f"market_regimes_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
             mime="text/csv"
         )
-        
-        # Additional visualizations and statistics would continue here...
 
-# --- Global Regime Summary Tab ---
-# --- Global Regime Summary Tab ---
-# --- Global Regime Summary Tab ---
-st.empty()
 # --- Global Regime Summary Tab ---
 with tab4:
     st.header("Global Regime Summary")
@@ -1048,55 +1226,108 @@ with tab4:
                 # Process each pair
                 progress_bar = st.progress(0)
                 
-                # Debug info - test first pair in detail
-                st.write("Debugging first pair:")
-                test_pair = all_available_pairs[0]
-                test_tf = global_timeframes[0]
-                test_ohlc = get_hurst_data(test_pair, test_tf, global_lookback, global_window)
-                if test_ohlc is not None and not test_ohlc.empty:
-                    st.write(f"Sample data for {test_pair} ({test_tf}):")
-                    st.write(f"- Last 5 Hurst values: {test_ohlc['Hurst'].tail().tolist()}")
-                    st.write(f"- Last regime: {test_ohlc['regime_desc'].iloc[-1]}")
-                    st.write(f"- Data shape: {test_ohlc.shape}")
-                    st.write(f"- Missing values: {test_ohlc['Hurst'].isna().sum()} out of {len(test_ohlc)}")
-                else:
-                    st.error(f"Could not get data for {test_pair} with {test_tf} timeframe")
+                # For debugging purposes, let's output more info
+                show_debug = st.checkbox("Show Debug Information", value=False)
                 
-                # Process each pair
-                for i, pair in enumerate(all_available_pairs):
-                    # Update progress bar
+                if show_debug:
+                    st.info("Debug mode enabled - showing details for first pair")
+                    test_pair = all_available_pairs[0]
+                    test_tf = global_timeframes[0]
+                    
+                    # Get raw price data first
+                    end_time = datetime.now(timezone.utc)
+                    start_time = end_time - timedelta(days=global_lookback)
+                    
+                    query = f"""
+                    SELECT created_at AT TIME ZONE 'UTC' + INTERVAL '8 hours' AS timestamp, final_price
+                    FROM public.oracle_price_log
+                    WHERE created_at BETWEEN '{start_time}' AND '{end_time}'
+                    AND pair_name = '{test_pair}';
+                    """
+                    raw_df = pd.read_sql(query, engine)
+                    
+                    st.write(f"Raw data for {test_pair}:")
+                    st.write(f"- Row count: {len(raw_df)}")
+                    if not raw_df.empty:
+                        st.write(f"- Price range: {raw_df['final_price'].min()} to {raw_df['final_price'].max()}")
+                        st.write(f"- Sample data:")
+                        st.dataframe(raw_df.head(5))
+                    
+                    # Now get processed OHLC data
+                    test_ohlc = get_hurst_data(test_pair, test_tf, global_lookback, global_window)
+                    if test_ohlc is not None and not test_ohlc.empty:
+                        st.write(f"Processed data for {test_pair} ({test_tf}):")
+                        st.write(f"- OHLC rows: {len(test_ohlc)}")
+                        st.write(f"- Last Hurst values: {test_ohlc['Hurst'].tail(5).tolist()}")
+                        st.write(f"- Last regime: {test_ohlc['regime_desc'].iloc[-1]}")
+                        st.write(f"- Missing Hurst values: {test_ohlc['Hurst'].isna().sum()} out of {len(test_ohlc)}")
+                        
+                        # Show sample calculation
+                        sample_window = test_ohlc['close'].tail(global_window).values
+                        st.write("Sample Hurst calculation on latest window:")
+                        try:
+                            sample_hurst = universal_hurst(sample_window)
+                            st.write(f"Manual Hurst result: {sample_hurst}")
+                            
+                            # Show the price data and log returns
+                            log_returns = np.diff(np.log(sample_window + 1e-10))
+                            
+                            fig = go.Figure()
+                            fig.add_trace(go.Scatter(
+                                y=sample_window,
+                                mode='lines',
+                                name='Price'
+                            ))
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            fig2 = go.Figure()
+                            fig2.add_trace(go.Scatter(
+                                y=log_returns,
+                                mode='lines',
+                                name='Log Returns'
+                            ))
+                            st.plotly_chart(fig2, use_container_width=True)
+                            
+                        except Exception as e:
+                            st.error(f"Error in sample calculation: {str(e)}")
+                    else:
+                        st.error(f"Could not get processed data for {test_pair}")
+                
+                # Process all pairs in batches to show progress
+                batch_size = max(1, len(all_available_pairs) // 10)
+                
+                for i in range(0, len(all_available_pairs), batch_size):
+                    batch_pairs = all_available_pairs[i:i+batch_size]
                     progress_bar.progress(i / len(all_available_pairs))
                     
-                    # Start with pair name
-                    row_dict = {"Pair": pair}
-                    
-                    # For each timeframe, get the regime
-                    for tf in global_timeframes:
-                        try:
-                            # Get data for this pair and timeframe
-                            ohlc = get_hurst_data(pair, tf, global_lookback, global_window)
-                            
-                            # Check if we have valid data
-                            if ohlc is None or ohlc.empty:
-                                row_dict[tf] = "No data available"
-                            elif pd.isna(ohlc['Hurst'].iloc[-1]):
-                                row_dict[tf] = "Insufficient data"
-                            else:
-                                # Get regime information
-                                regime_desc = ohlc['regime_desc'].iloc[-1]
-                                hurst_val = ohlc['Hurst'].iloc[-1]
-                                emoji = regime_emojis.get(regime_desc, "")
+                    for pair in batch_pairs:
+                        # Start with pair name
+                        row_dict = {"Pair": pair}
+                        
+                        # For each timeframe, get the regime
+                        for tf in global_timeframes:
+                            try:
+                                # Get data for this pair and timeframe
+                                ohlc = get_hurst_data(pair, tf, global_lookback, global_window)
                                 
-                                # Check for suspicious values
-                                if abs(hurst_val - 0.5) < 0.001:
-                                    row_dict[tf] = f"⚠️ {regime_desc} (H:{hurst_val:.2f}) - Check data"
+                                # Check if we have valid data
+                                if ohlc is None or ohlc.empty:
+                                    row_dict[tf] = "No data available"
+                                elif pd.isna(ohlc['Hurst'].iloc[-1]):
+                                    row_dict[tf] = "Insufficient data"
                                 else:
+                                    # Get regime information
+                                    regime_desc = ohlc['regime_desc'].iloc[-1]
+                                    hurst_val = ohlc['Hurst'].iloc[-1]
+                                    emoji = regime_emojis.get(regime_desc, "")
+                                    
+                                    # Format information for display
                                     row_dict[tf] = f"{regime_desc} {emoji} (H:{hurst_val:.2f})"
-                        except Exception as e:
-                            row_dict[tf] = f"Error: {str(e)[:50]}"
-                    
-                    # Add this pair's data to our collection
-                    rows.append(row_dict)
+                            except Exception as e:
+                                row_dict[tf] = f"Error: {str(e)[:50]}"
+                        
+                        # Add this pair's data to our collection
+                        rows.append(row_dict)
                 
                 # Complete progress
                 progress_bar.progress(1.0)
@@ -1113,14 +1344,14 @@ with tab4:
                         return ''
                     elif "insufficient" in str(val).lower() or "no data" in str(val).lower():
                         return 'background-color: #f0f0f0'
-                    elif "check data" in str(val).lower():
-                        return 'background-color: #fff3cd'  # Warning color
+                    elif "error" in str(val).lower():
+                        return 'background-color: #fff3cd'  # Warning
                     elif "mean-reversion" in str(val).lower():
-                        return 'background-color: rgba(255,100,100,0.5)'
+                        return 'background-color: rgba(255,200,200,0.5)'
                     elif "trending" in str(val).lower():
-                        return 'background-color: rgba(100,255,100,0.5)'
+                        return 'background-color: rgba(200,255,200,0.5)'
                     elif "random" in str(val).lower():
-                        return 'background-color: rgba(200,200,200,0.5)'
+                        return 'background-color: rgba(220,220,220,0.5)'
                     return ''
                 
                 # Display styled DataFrame
@@ -1129,7 +1360,7 @@ with tab4:
                         color_regimes, 
                         subset=[col for col in results_df.columns if col != "Pair"]
                     ),
-                    height=2000,
+                    height=600,
                     use_container_width=True  # Make it use full width
                 )
                 
@@ -1147,5 +1378,3 @@ with tab4:
 # Main script execution
 if __name__ == "__main__":
     st.write("Market Regime Analysis Dashboard")
-
-
