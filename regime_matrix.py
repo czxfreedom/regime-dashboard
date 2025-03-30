@@ -1120,26 +1120,98 @@ with tab4:
                 # Success message
                 st.success(f"Analysis complete for {len(rows)} pairs")
                 
-                # Display results
-                st.dataframe(results_df, height=600, use_container_width=True)
-                
-                # Add download option
-                csv = results_df.to_csv(index=False)
-                st.download_button(
-                    "Download as CSV",
-                    data=csv,
-                    file_name=f"global_regime_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                    mime="text/csv",
-                    key="global_download_btn"
-                )
-                
-            except Exception as e:
-                st.error(f"An error occurred: {str(e)}")
-                if debug_mode:
-                    import traceback
-                    st.code(traceback.format_exc())
+                # Enhanced styling function
+                def style_regime_table(df):
+                    # Create a copy with styled values
+                    styled_df = df.copy()
     
-    # If we have previous results, show them
-    elif st.session_state.global_results is not None:
-        st.success("Showing previously generated results")
-        st.dataframe(st.session_state.global_results, height=600, use_container_width=True)
+                    # Define CSS for the entire dataframe
+                    styles = [
+                              # Increase overall font size
+                              dict(selector="th", props=[("font-size", "16px"), ("font-weight", "bold"), 
+                                   ("background-color", "#f2f2f2"), ("padding", "12px")]),
+                              dict(selector="td", props=[("font-size", "15px"), ("padding", "10px")])
+                    ]
+    
+                    # Apply styling based on regime
+                    def color_regimes(val):
+                        if pd.isna(val):
+                            return 'background-color: #f0f0f0; color: #666666;'
+        
+                        if "mean-reversion" in str(val).lower():
+                            intensity = "strong" if "strong" in str(val).lower() else \
+                                        "moderate" if "moderate" in str(val).lower() else \
+                                        "mild" if "mild" in str(val).lower() else "slight"
+            
+                            if intensity == "strong":
+                                return 'background-color: rgba(255,0,0,0.7); color: white; font-weight: bold;'
+                            elif intensity == "moderate":
+                                return 'background-color: rgba(255,50,50,0.6); color: white; font-weight: bold;'
+                            elif intensity == "mild":
+                                return 'background-color: rgba(255,100,100,0.5); color: black;'
+                            else:  # slight
+                                return 'background-color: rgba(255,150,150,0.4); color: black;'
+                
+                        elif "trending" in str(val).lower():
+                            intensity = "strong" if "strong" in str(val).lower() else \
+                                        "moderate" if "moderate" in str(val).lower() else \
+                                        "mild" if "mild" in str(val).lower() else "slight"
+            
+                            if intensity == "strong":
+                                return 'background-color: rgba(0,180,0,0.7); color: white; font-weight: bold;'
+                            elif intensity == "moderate":
+                                return 'background-color: rgba(50,200,50,0.6); color: white; font-weight: bold;'
+                            elif intensity == "mild":
+                                return 'background-color: rgba(100,220,100,0.5); color: black;'
+                            else:  # slight
+                                return 'background-color: rgba(150,255,150,0.4); color: black;'
+                
+                        elif "random" in str(val).lower():
+                            return 'background-color: rgba(200,200,200,0.5); color: black;'
+            
+                        elif "no data" in str(val).lower() or "insufficient" in str(val).lower():
+                            return 'background-color: #f0f0f0; color: #999999; font-style: italic;'
+            
+                        else:
+                            return ''
+    
+    # Apply the styling
+    return styled_df.style.set_table_styles(styles).applymap(color_regimes)
+
+# Display the enhanced table with increased height
+st.dataframe(
+    style_regime_table(results_df),
+    height=800,  # Increase height to show more rows
+    use_container_width=True
+)
+
+# Add option to view full-screen
+st.markdown("""
+<style>
+    .fullscreen-button {
+        background-color: #4CAF50;
+        border: none;
+        color: white;
+        padding: 10px 20px;
+        text-align: center;
+        text-decoration: none;
+        display: inline-block;
+        font-size: 16px;
+        margin: 4px 2px;
+        cursor: pointer;
+        border-radius: 4px;
+    }
+</style>
+
+<a href="#" class="fullscreen-button" onclick="document.querySelector('iframe[title=\"streamlit_app\"]').requestFullscreen(); return false;">View Table Fullscreen</a>
+""", unsafe_allow_html=True)
+
+# Add download options
+csv = results_df.to_csv(index=False)
+st.download_button(
+    "Download as CSV",
+    data=csv,
+    file_name=f"global_regime_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+    mime="text/csv",
+    key="global_download_btn"
+)
