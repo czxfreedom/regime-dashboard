@@ -552,11 +552,17 @@ with tab3:
                                           get_recommended_settings(filter_timeframe)["window_ideal"])
     
     # Button to run the filter
-    if st.button("Find Matching Pairs"):
+    # Button to run the filter
+if st.button("Find Matching Pairs"):
     # Show a spinner while processing
-     with st.spinner("Analyzing all currency pairs..."):
-        # Existing code...
-
+    with st.spinner("Analyzing all currency pairs..."):
+        # Get the complete list of pairs from database 
+        all_available_pairs = fetch_token_list()
+        
+        # Determine which parameters to use
+        actual_lookback = custom_lookback if use_custom_params else lookback_days
+        actual_window = custom_window if use_custom_params else rolling_window
+        
         # If "All Regimes" is selected or no specific regimes are chosen, show all pairs
         if "All Regimes" in filter_regime or not filter_regime:
             # Show all pairs with their current regime
@@ -585,7 +591,24 @@ with tab3:
                 if (ohlc := get_hurst_data(pair, filter_timeframe, actual_lookback, actual_window)) is not None
                 and ohlc['regime_desc'].iloc[-1] in filter_regime
             ]
-
+        
+        # Filter by data quality
+        regime_results = [
+            result for result in regime_results 
+            if result['Data Quality'] >= min_data_quality
+        ]
+        
+        # Sorting logic
+        if sort_option_filter == "Most Trending (Highest Hurst)":
+            regime_results.sort(key=lambda x: x["Hurst"] if not pd.isna(x["Hurst"]) else -np.inf, reverse=True)
+        elif sort_option_filter == "Most Mean-Reverting (Lowest Hurst)":
+            regime_results.sort(key=lambda x: x["Hurst"] if not pd.isna(x["Hurst"]) else np.inf)
+        elif sort_option_filter == "Data Quality":
+            regime_results.sort(key=lambda x: x["Data Quality"], reverse=True)
+        else:  # Sort by name
+            regime_results.sort(key=lambda x: x["Pair"])
+        
+        # Rest of the existing display code...
         # Rest of the existing code remains the same
             
             # Process each pair
