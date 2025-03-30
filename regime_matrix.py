@@ -304,7 +304,99 @@ with st.sidebar.expander("Legend: Regime Colors", expanded=True):
     - <span style='background-color:rgba(0,180,0,0.7);padding:3px'>**Strong Trending ⬆️⬆️⬆️**</span>  
     """, unsafe_allow_html=True)
 
-# --- Move Filtering and Sorting to a dedicated tab ---
+# --- Data Fetching ---
+@st.cache_data(ttl=300)  # Cache data for 5 minutes
+def get_hurst_data(pair, timeframe, lookback_days, rolling_window):
+    end_time = datetime.utcnow()
+    start_time = end_time - timedelta(days=lookback_days)
+
+    query = f"""
+    SELECT created_at AT TIME ZONE 'UTC' + INTERVAL '8 hours' AS timestamp, final_price
+    FROM public.oracle_price_log
+    WHERE created_at BETWEEN '{start_time}' AND '{end_time}'
+    AND pair_name = '{pair}';
+    """
+    df = pd.read_sql(query, engine)
+
+    if df.empty:
+        return None
+
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df = df.set_index('timestamp').sort_index()
+    ohlc = df['final_price'].resample(timeframe).ohlc().dropna()
+
+    ohlc['Hurst'] = ohlc['close'].rolling(rolling_window).apply(universal_hurst)
+    ohlc['regime_info'] = ohlc['Hurst'].apply(detailed_regime_classification)
+    ohlc['regime'] = ohlc['regime_info'].apply(lambda x: x[0])
+    ohlc['intensity'] = ohlc['regime_info'].apply(lambda x: x[1])
+    ohlc['regime_desc'] = ohlc['regime_info'].apply(lambda x: x[2])
+
+    return ohlc
+
+# --- Collect all data for summary table ---
+@st.cache_data
+def generate_summary_data():
+    summary_data = []
+    
+    for pair in selected_pairs:
+        pair_data = {"Pair": pair}
+        
+        for tf in selected_timeframes:
+            ohlc = get_hurst_data(pair, tf, lookback_days, rolling_window)
+            
+            if ohlc is None or ohlc.empty or pd.isna(ohlc['Hurst'].iloc[-1]):
+                pair_data[tf] = {"Hurst": np.nan, "Regime": "UNKNOWN", "Description": "Insufficient data"}
+            else:
+                pair_data[tf] = {
+                    "Hurst": ohlc['Hurst'].iloc[-1],
+                    "Regime": ohlc['regime'].iloc[-1],
+                    "Description": ohlc['regime_desc'].iloc[-1],
+                    "Emoji": regime_emojis.get(ohlc['regime_desc'].iloc[-1], ""),
+                    "Valid_Pct": (ohlc['Hurst'].notna().sum() / len(ohlc)) * 100
+                }
+        
+        summary_data.append(pair_data)
+    
+    # Apply sorting
+    if sort_option == "Most Trending":
+        # Calculate average Hurst and sort descending
+        for item in summary_data:
+            item["avg_hurst"] = np.mean([item[tf]["Hurst"] for tf in selected_timeframes if tf in item and "Hurst" in item[tf] and not pd.isna(item[tf]["Hurst"])])
+        summary_data.sort(key=lambda x: x.get("avg_hurst", 0), reverse=True)
+    elif sort_option == "Most Mean-Reverting":
+        # Calculate average Hurst and sort ascending (lower Hurst = more mean-reverting)
+        for item in summary_data:
+            item["avg_hurst"] = np.mean([item[tf]["Hurst"] for tf in selected_timeframes if tf in item and "Hurst" in item[tf] and not pd.isna(item[tf]["Hurst"])])
+        summary_data.sort(key=lambda x: x.get("avg_hurst", 1))
+    elif sort_option == "Regime Consistency":
+        # Sort by how consistent regimes are across timeframes
+        for item in summary_data:
+            regimes = [item[tf]["Regime"] for tf in selected_timeframes if tf in item and "Regime" in item[tf]]
+            item["consistency"] = len(set(regimes)) if regimes else 0
+        summary_data.sort(key=lambda x: x.get("consistency", 3))
+    
+    # Apply filtering
+    if regime_filter:
+        filtered_data = []
+        for item in summary_data:
+            # Check if any timeframe matches the filter
+            match = False
+            for tf in selected_timeframes:
+                if tf in item and "Description" in item[tf] and item[tf]["Description"] in regime_filter:
+                    match = True
+                    break
+            if match:
+                filtered_data.append(item)
+        summary_data = filtered_data
+    
+    return summary_data
+
+# Get summary data
+if selected_pairs and selected_timeframes:
+    summary_data = generate_summary_data()
+else:
+    summary_data = []
+
 # --- Filter by Regime Tab ---
 with tab3:
     st.header("Find Currency Pairs by Regime")
@@ -351,23 +443,22 @@ with tab3:
                                           get_recommended_settings(filter_timeframe)["window_ideal"])
     
     # Button to run the filter
-    # Button to run the filter
     if st.button("Find Matching Pairs"):
-     # Show a spinner while processing
-     with st.spinner("Analyzing all currency pairs..."):
-        # Get the complete list of pairs from database 
-        all_available_pairs = fetch_token_list()
-        
-        # Determine which parameters to use
-        if use_custom_params:
-            actual_lookback = custom_lookback
-            actual_window = custom_window
-        else:
-            actual_lookback = lookback_days
-            actual_window = rolling_window
-        
-        # Store results
-        regime_results = []
+        # Show a spinner while processing
+        with st.spinner("Analyzing all currency pairs..."):
+            # Get the complete list of pairs from database 
+            all_available_pairs = fetch_token_list()
+            
+            # Determine which parameters to use
+            if use_custom_params:
+                actual_lookback = custom_lookback
+                actual_window = custom_window
+            else:
+                actual_lookback = lookback_days
+                actual_window = rolling_window
+            
+            # Store results
+            regime_results = []
             
             # Process each pair
             progress_bar = st.progress(0)
@@ -470,99 +561,6 @@ with tab3:
         
         These regimes can inform different trading strategies - mean-reverting pairs tend to respond well to range-bound strategies, while trending pairs suit momentum strategies.
         """)
-
-# --- Data Fetching ---
-@st.cache_data(ttl=300)  # Cache data for 5 minutes
-def get_hurst_data(pair, timeframe, lookback_days, rolling_window):
-    end_time = datetime.utcnow()
-    start_time = end_time - timedelta(days=lookback_days)
-
-    query = f"""
-    SELECT created_at AT TIME ZONE 'UTC' + INTERVAL '8 hours' AS timestamp, final_price
-    FROM public.oracle_price_log
-    WHERE created_at BETWEEN '{start_time}' AND '{end_time}'
-    AND pair_name = '{pair}';
-    """
-    df = pd.read_sql(query, engine)
-
-    if df.empty:
-        return None
-
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df = df.set_index('timestamp').sort_index()
-    ohlc = df['final_price'].resample(timeframe).ohlc().dropna()
-
-    ohlc['Hurst'] = ohlc['close'].rolling(rolling_window).apply(universal_hurst)
-    ohlc['regime_info'] = ohlc['Hurst'].apply(detailed_regime_classification)
-    ohlc['regime'] = ohlc['regime_info'].apply(lambda x: x[0])
-    ohlc['intensity'] = ohlc['regime_info'].apply(lambda x: x[1])
-    ohlc['regime_desc'] = ohlc['regime_info'].apply(lambda x: x[2])
-
-    return ohlc
-
-# --- Collect all data for summary table ---
-@st.cache_data
-def generate_summary_data():
-    summary_data = []
-    
-    for pair in selected_pairs:
-        pair_data = {"Pair": pair}
-        
-        for tf in selected_timeframes:
-            ohlc = get_hurst_data(pair, tf, lookback_days, rolling_window)
-            
-            if ohlc is None or ohlc.empty or pd.isna(ohlc['Hurst'].iloc[-1]):
-                pair_data[tf] = {"Hurst": np.nan, "Regime": "UNKNOWN", "Description": "Insufficient data"}
-            else:
-                pair_data[tf] = {
-                    "Hurst": ohlc['Hurst'].iloc[-1],
-                    "Regime": ohlc['regime'].iloc[-1],
-                    "Description": ohlc['regime_desc'].iloc[-1],
-                    "Emoji": regime_emojis.get(ohlc['regime_desc'].iloc[-1], ""),
-                    "Valid_Pct": (ohlc['Hurst'].notna().sum() / len(ohlc)) * 100
-                }
-        
-        summary_data.append(pair_data)
-    
-    # Apply sorting
-    if sort_option == "Most Trending":
-        # Calculate average Hurst and sort descending
-        for item in summary_data:
-            item["avg_hurst"] = np.mean([item[tf]["Hurst"] for tf in selected_timeframes if tf in item and "Hurst" in item[tf] and not pd.isna(item[tf]["Hurst"])])
-        summary_data.sort(key=lambda x: x.get("avg_hurst", 0), reverse=True)
-    elif sort_option == "Most Mean-Reverting":
-        # Calculate average Hurst and sort ascending (lower Hurst = more mean-reverting)
-        for item in summary_data:
-            item["avg_hurst"] = np.mean([item[tf]["Hurst"] for tf in selected_timeframes if tf in item and "Hurst" in item[tf] and not pd.isna(item[tf]["Hurst"])])
-        summary_data.sort(key=lambda x: x.get("avg_hurst", 1))
-    elif sort_option == "Regime Consistency":
-        # Sort by how consistent regimes are across timeframes
-        for item in summary_data:
-            regimes = [item[tf]["Regime"] for tf in selected_timeframes if tf in item and "Regime" in item[tf]]
-            item["consistency"] = len(set(regimes)) if regimes else 0
-        summary_data.sort(key=lambda x: x.get("consistency", 3))
-    
-    # Apply filtering
-    if regime_filter:
-        filtered_data = []
-        for item in summary_data:
-            # Check if any timeframe matches the filter
-            match = False
-            for tf in selected_timeframes:
-                if tf in item and "Description" in item[tf] and item[tf]["Description"] in regime_filter:
-                    match = True
-                    break
-            if match:
-                filtered_data.append(item)
-        summary_data = filtered_data
-    
-    return summary_data
-
-# Get summary data
-if selected_pairs and selected_timeframes:
-    summary_data = generate_summary_data()
-else:
-    summary_data = []
 
 # --- Display Matrix View ---
 with tab1:
@@ -1097,7 +1095,3 @@ with tab2:
                     """)
         else:
             st.info("Not enough data to generate heatmap")
-
-
-
-
