@@ -11,7 +11,7 @@ st.set_page_config(layout="wide")
 st.title("📈 Currency Pair Trend Matrix Dashboard")
 
 # Create tabs for Matrix View, Summary Table, and Filters/Settings
-tab1, tab2, tab3 = st.tabs(["Matrix View", "Summary Table", "Filters & Settings"])
+tab1, tab2, tab3 = st.tabs(["Matrix View", "Summary Table", "Filter by Regime"])
 
 # --- DB CONFIG ---
 db_config = st.secrets["database"]
@@ -305,37 +305,166 @@ with st.sidebar.expander("Legend: Regime Colors", expanded=True):
     """, unsafe_allow_html=True)
 
 # --- Move Filtering and Sorting to a dedicated tab ---
+# --- Filter by Regime Tab ---
 with tab3:
-    st.header("Filtering & Sorting Settings")
+    st.header("Find Currency Pairs by Regime")
     
-    st.subheader("Filter by Regime")
-    regime_filter = st.multiselect(
-        "Show only currency pairs that exhibit these regimes in any timeframe:", 
+    st.info("""
+    This tab allows you to search across **all currency pairs** in the database to find those 
+    matching specific market regimes, regardless of the pairs selected in the sidebar.
+    """)
+    
+    # Select timeframe to analyze
+    filter_timeframe = st.selectbox(
+        "Select Timeframe to Analyze",
+        timeframes,
+        index=timeframes.index("1h") if "1h" in timeframes else 0
+    )
+    
+    # Select regime to filter by
+    filter_regime = st.multiselect(
+        "Show Only Pairs with These Regimes:", 
         ["Strong mean-reversion", "Moderate mean-reversion", "Mild mean-reversion", "Slight mean-reversion bias",
          "Pure random walk", 
          "Slight trending bias", "Mild trending", "Moderate trending", "Strong trending"],
         default=[]
     )
     
-    st.subheader("Sort Pairs By")
-    sort_option = st.selectbox(
-        "Order currency pairs according to:",
-        ["Name", "Most Trending", "Most Mean-Reverting", "Regime Consistency"]
+    # Sorting options
+    sort_option_filter = st.selectbox(
+        "Sort Results By:",
+        ["Name", "Most Trending (Highest Hurst)", "Most Mean-Reverting (Lowest Hurst)", "Data Quality"],
+        index=0
     )
     
-    # Add a button to apply filters
-    apply_button = st.button("Apply Filters and Sorting")
+    # Data quality filter
+    min_data_quality = st.slider("Minimum Data Quality (%)", 0, 100, 30)
     
-    # Provide some helpful guidance
-    st.info("""
-    **How to use filters:**
+    # Use current lookback/window or set custom ones
+    use_custom_params = st.checkbox("Use Custom Parameters (instead of sidebar settings)", value=False)
     
-    1. Select one or more regimes to filter pairs that exhibit those characteristics
-    2. Choose a sorting method to organize the results
-    3. Click 'Apply Filters and Sorting' to update the Matrix and Summary views
+    if use_custom_params:
+        custom_col1, custom_col2 = st.columns(2)
+        custom_lookback = custom_col1.slider("Custom Lookback (Days)", 1, 30, 
+                                            get_recommended_settings(filter_timeframe)["lookback_ideal"])
+        custom_window = custom_col2.slider("Custom Window (Bars)", 20, 100, 
+                                          get_recommended_settings(filter_timeframe)["window_ideal"])
     
-    Filtering shows only currency pairs that have at least one timeframe matching any of your selected regimes.
-    """)
+    # Button to run the filter
+    if st.button("Find Matching Pairs"):
+        # Show a spinner while processing
+        with st.spinner("Analyzing all currency pairs..."):
+            # Get the complete list of pairs from database 
+            all_available_pairs = fetch_token_list()
+            
+            # Determine which parameters to use
+            actual_lookback = custom_lookback if use_custom_params else lookback_days
+            actual_window = custom_window if use_custom_params else rolling_window
+            
+            # Store results
+            regime_results = []
+            
+            # Process each pair
+            progress_bar = st.progress(0)
+            for i, pair in enumerate(all_available_pairs):
+                # Update progress
+                progress_bar.progress((i + 1) / len(all_available_pairs))
+                
+                # Get data for this pair at the selected timeframe
+                ohlc = get_hurst_data(pair, filter_timeframe, actual_lookback, actual_window)
+                
+                if ohlc is None or ohlc.empty or pd.isna(ohlc['Hurst'].iloc[-1]):
+                    # Skip pairs with no valid data
+                    continue
+                
+                # Calculate data quality
+                valid_data_pct = (ohlc['Hurst'].notna().sum() / len(ohlc)) * 100
+                
+                # Skip pairs with low data quality if filter is applied
+                if valid_data_pct < min_data_quality:
+                    continue
+                
+                # Current regime and Hurst value
+                current_hurst = ohlc['Hurst'].iloc[-1]
+                current_regime = ohlc['regime_desc'].iloc[-1]
+                
+                # Check if pair matches the filter criteria
+                if not filter_regime or current_regime in filter_regime:
+                    regime_results.append({
+                        "Pair": pair,
+                        "Regime": current_regime,
+                        "Hurst": current_hurst,
+                        "Data Quality": valid_data_pct,
+                        "Emoji": regime_emojis.get(current_regime, "")
+                    })
+            
+            # Sort results based on the selected option
+            if sort_option_filter == "Most Trending (Highest Hurst)":
+                regime_results.sort(key=lambda x: x["Hurst"], reverse=True)
+            elif sort_option_filter == "Most Mean-Reverting (Lowest Hurst)":
+                regime_results.sort(key=lambda x: x["Hurst"])
+            elif sort_option_filter == "Data Quality":
+                regime_results.sort(key=lambda x: x["Data Quality"], reverse=True)
+            else:  # Sort by name
+                regime_results.sort(key=lambda x: x["Pair"])
+                
+            # Display results
+            if regime_results:
+                st.success(f"Found {len(regime_results)} matching pairs")
+                
+                # Create a DataFrame for better display
+                results_df = pd.DataFrame(regime_results)
+                
+                # Define a function to apply styling to the table
+                def highlight_regimes(val):
+                    color = "white"
+                    if "mean-reversion" in str(val).lower():
+                        color = "rgba(255,200,200,0.5)"
+                    elif "trend" in str(val).lower():
+                        color = "rgba(200,255,200,0.5)"
+                    elif "random" in str(val).lower():
+                        color = "rgba(220,220,220,0.5)"
+                    return f'background-color: {color}'
+                
+                # Apply styling and display the table
+                st.dataframe(results_df.style.applymap(highlight_regimes, subset=['Regime']))
+                
+                # Option to select these pairs in the main view
+                if st.button(f"Add these {len(regime_results)} pairs to sidebar selection"):
+                    # Get the pairs to add
+                    pairs_to_add = [item["Pair"] for item in regime_results]
+                    # Convert to set to avoid duplicates and combine with existing selection
+                    updated_pairs = list(set(selected_pairs + pairs_to_add))
+                    # Update session state to persist across reruns
+                    if 'selected_pairs' not in st.session_state:
+                        st.session_state.selected_pairs = updated_pairs
+                    else:
+                        st.session_state.selected_pairs = updated_pairs
+                    st.experimental_rerun()
+            else:
+                st.warning("No currency pairs match your filter criteria")
+    
+    # Add explanation of regimes
+    with st.expander("About Market Regimes", expanded=False):
+        st.markdown("""
+        ### Understanding Market Regimes
+        
+        Market regimes are determined by the Hurst exponent value:
+        
+        - **Mean-Reverting (Hurst < 0.45)**: Markets tend to revert to a mean price. Prices are anti-persistent, with reversals more likely than trends continuing.
+        
+        - **Random Walk (0.45 ≤ Hurst ≤ 0.55)**: Price movements are essentially random with no significant pattern. Future price changes cannot be predicted from past prices.
+        
+        - **Trending (Hurst > 0.55)**: Markets show persistence in their direction. If prices are rising, they're more likely to continue rising than reverse.
+        
+        The intensity of regimes is determined by how far the Hurst exponent is from 0.5:
+        - Strong: far from 0.5
+        - Moderate: moderately distant from 0.5
+        - Mild: somewhat distant from 0.5
+        - Slight bias: just beyond the random boundary
+        
+        These regimes can inform different trading strategies - mean-reverting pairs tend to respond well to range-bound strategies, while trending pairs suit momentum strategies.
+        """)
 
 # --- Data Fetching ---
 @st.cache_data(ttl=300)  # Cache data for 5 minutes
@@ -963,3 +1092,7 @@ with tab2:
                     """)
         else:
             st.info("Not enough data to generate heatmap")
+
+
+
+
