@@ -973,6 +973,7 @@ with tab3:
 # --- Global Regime Summary Tab ---
 # --- Global Regime Summary Tab ---
 # --- Global Regime Summary Tab ---
+# --- Global Regime Summary Tab ---
 with tab4:
     st.header("Global Regime Summary")
     
@@ -983,74 +984,253 @@ with tab4:
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        global_timeframes = st.multiselect(...)
+        global_timeframes = st.multiselect(
+            "Select Timeframes", 
+            timeframes, 
+            default=[timeframes[0]] if timeframes else [],
+            key="global_timeframes_select_unique"
+        )
     
     with col2:
-        global_lookback = st.slider(...)
+        global_lookback = st.slider(
+            "Lookback (Days)", 
+            1, 30, 3,
+            key="global_lookback_slider_unique"
+        )
     
     with col3:
-        global_window = st.slider(...)
+        global_window = st.slider(
+            "Rolling Window (Bars)", 
+            20, 100, 25,
+            key="global_window_slider_unique"
+        )
     
-    # Define styling function
+    # Ensure we have a session state key for this tab
+    if 'global_results' not in st.session_state:
+        st.session_state.global_results = None
+    
+    # Add a debug option
+    debug_mode = st.checkbox("Enable debug mode", value=False, key="global_debug_unique")
+    
+    # Define styling function properly (outside of any conditional blocks)
     def style_regime_table(df):
-        ...
+        # Create a copy with styled values
+        styled_df = df.copy()
         
-    # Generate button
-    generate_button = st.button(...)
+        # Define CSS for the entire dataframe
+        styles = [
+            # Increase overall font size
+            dict(selector="th", props=[("font-size", "16px"), ("font-weight", "bold"), 
+                  ("background-color", "#f2f2f2"), ("padding", "12px")]),
+            dict(selector="td", props=[("font-size", "15px"), ("padding", "10px")])
+        ]
+        
+        # Apply styling based on regime
+        def color_regimes(val):
+            if pd.isna(val):
+                return 'background-color: #f0f0f0; color: #666666;'
+            
+            if "mean-reversion" in str(val).lower():
+                intensity = "strong" if "strong" in str(val).lower() else \
+                           "moderate" if "moderate" in str(val).lower() else \
+                           "mild" if "mild" in str(val).lower() else "slight"
+                
+                if intensity == "strong":
+                    return 'background-color: rgba(255,0,0,0.7); color: white; font-weight: bold;'
+                elif intensity == "moderate":
+                    return 'background-color: rgba(255,50,50,0.6); color: white; font-weight: bold;'
+                elif intensity == "mild":
+                    return 'background-color: rgba(255,100,100,0.5); color: black;'
+                else:  # slight
+                    return 'background-color: rgba(255,150,150,0.4); color: black;'
+                    
+            elif "trending" in str(val).lower():
+                intensity = "strong" if "strong" in str(val).lower() else \
+                           "moderate" if "moderate" in str(val).lower() else \
+                           "mild" if "mild" in str(val).lower() else "slight"
+                
+                if intensity == "strong":
+                    return 'background-color: rgba(0,180,0,0.7); color: white; font-weight: bold;'
+                elif intensity == "moderate":
+                    return 'background-color: rgba(50,200,50,0.6); color: white; font-weight: bold;'
+                elif intensity == "mild":
+                    return 'background-color: rgba(100,220,100,0.5); color: black;'
+                else:  # slight
+                    return 'background-color: rgba(150,255,150,0.4); color: black;'
+                    
+            elif "random" in str(val).lower():
+                return 'background-color: rgba(200,200,200,0.5); color: black;'
+                
+            elif "no data" in str(val).lower() or "insufficient" in str(val).lower():
+                return 'background-color: #f0f0f0; color: #999999; font-style: italic;'
+                
+            else:
+                return ''
+        
+        # Return the styled dataframe
+        return styled_df.style.set_table_styles(styles).applymap(color_regimes)
+    
+    # Generate button with a unique key
+    generate_button = st.button("Generate Global Regime Summary", key="unique_global_generate_btn")
+    
+    if debug_mode:
+        st.write(f"Button state: {generate_button}")
     
     if generate_button:
-        try:
-            # Process data
-            ...
+        if debug_mode:
+            st.write("Button clicked!")
             
-            # Display results
-            st.dataframe(...)
-            
-            # Add fullscreen button
-            st.markdown(...)
-            
-            # Download button
-            st.download_button(...)
-            
-        except Exception as e:
-            ...
-    
-    # Show previous results
+        if not global_timeframes:
+            st.warning("Please select at least one timeframe")
+        else:
+            try:
+                # Create a placeholder for the progress bar
+                progress_placeholder = st.empty()
+                progress_bar = progress_placeholder.progress(0)
+                
+                # Get all pairs for testing
+                all_pairs = fetch_token_list()
+                if debug_mode:
+                    st.write(f"Found {len(all_pairs)} pairs")
+                    if debug_mode:
+                        all_pairs = all_pairs[:10]  # Limit to 10 pairs for debugging
+                        st.write(f"Using {len(all_pairs)} pairs for debug")
+                
+                # Process in smaller batches for reliability
+                batch_size = 5
+                rows = []
+                
+                # Process each batch
+                for i in range(0, len(all_pairs), batch_size):
+                    batch = all_pairs[i:i+batch_size]
+                    progress_bar.progress(i / len(all_pairs) if len(all_pairs) > 0 else 0)
+                    
+                    if debug_mode:
+                        st.write(f"Processing batch {i//batch_size + 1}/{(len(all_pairs) + batch_size - 1)//batch_size}")
+                    
+                    # Get data for this batch
+                    for pair in batch:
+                        row = {"Pair": pair}
+                        
+                        # Process each timeframe
+                        for tf in global_timeframes:
+                            # Simplified logic - just calculate the Hurst value directly
+                            try:
+                                # Get price data
+                                end_time = datetime.now(timezone.utc)
+                                start_time = end_time - timedelta(days=global_lookback)
+                                
+                                query = f"""
+                                SELECT created_at AT TIME ZONE 'UTC' + INTERVAL '8 hours' AS timestamp, 
+                                       final_price 
+                                FROM public.oracle_price_log 
+                                WHERE created_at BETWEEN '{start_time}' AND '{end_time}'
+                                AND pair_name = '{pair}';
+                                """
+                                
+                                df = pd.read_sql(query, engine)
+                                
+                                if df.empty:
+                                    row[tf] = "No data"
+                                    continue
+                                
+                                # Process data
+                                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                                df = df.set_index('timestamp').sort_index()
+                                
+                                # Resample to OHLC
+                                ohlc = df['final_price'].resample(tf).ohlc().dropna()
+                                
+                                if len(ohlc) < global_window:
+                                    row[tf] = "Insufficient data"
+                                    continue
+                                
+                                # Calculate Hurst on the last window
+                                last_window = ohlc['close'].tail(global_window).values
+                                hurst = universal_hurst(tuple(last_window))
+                                
+                                if pd.isna(hurst):
+                                    row[tf] = "Calculation failed"
+                                    continue
+                                
+                                # Get regime
+                                regime_info = detailed_regime_classification(hurst)
+                                regime_desc = regime_info[2]
+                                emoji = regime_emojis.get(regime_desc, "")
+                                
+                                # Store result
+                                row[tf] = f"{regime_desc} {emoji} (H:{hurst:.2f})"
+                                
+                            except Exception as e:
+                                if debug_mode:
+                                    st.write(f"Error processing {pair} - {tf}: {str(e)}")
+                                row[tf] = f"Error: {str(e)[:20]}"
+                        
+                        rows.append(row)
+                
+                # Complete progress
+                progress_bar.progress(1.0)
+                
+                # Create DataFrame
+                results_df = pd.DataFrame(rows)
+                
+                # Store in session state
+                st.session_state.global_results = results_df
+                
+                # Success message
+                st.success(f"Analysis complete for {len(rows)} pairs")
+                
+                # Display the enhanced table with increased height
+                st.dataframe(
+                    style_regime_table(results_df),
+                    height=800,  # Increase height to show more rows
+                    use_container_width=True
+                )
+                
+                # Add option to view full-screen
+                st.markdown("""
+                <style>
+                    .fullscreen-button {
+                        background-color: #4CAF50;
+                        border: none;
+                        color: white;
+                        padding: 10px 20px;
+                        text-align: center;
+                        text-decoration: none;
+                        display: inline-block;
+                        font-size: 16px;
+                        margin: 4px 2px;
+                        cursor: pointer;
+                        border-radius: 4px;
+                    }
+                </style>
+
+                <a href="#" class="fullscreen-button" onclick="document.querySelector('iframe[title=\"streamlit_app\"]').requestFullscreen(); return false;">View Table Fullscreen</a>
+                """, unsafe_allow_html=True)
+                
+                # Add download options
+                csv = results_df.to_csv(index=False)
+                st.download_button(
+                    "Download as CSV",
+                    data=csv,
+                    file_name=f"global_regime_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                    mime="text/csv",
+                    key="global_download_btn"
+                )
+                
+            except Exception as e:
+                st.error(f"An error occurred: {str(e)}")
+                if debug_mode:
+                    import traceback
+                    st.code(traceback.format_exc())
+                    
+    # Display previous results if they exist
     elif st.session_state.global_results is not None:
-        ...
-st.dataframe(
-    style_regime_table(results_df),
-    height=800,  # Increase height to show more rows
-    use_container_width=True
-)
-
-# Add option to view full-screen
-st.markdown("""
-<style>
-    .fullscreen-button {
-        background-color: #4CAF50;
-        border: none;
-        color: white;
-        padding: 10px 20px;
-        text-align: center;
-        text-decoration: none;
-        display: inline-block;
-        font-size: 16px;
-        margin: 4px 2px;
-        cursor: pointer;
-        border-radius: 4px;
-    }
-</style>
-
-<a href="#" class="fullscreen-button" onclick="document.querySelector('iframe[title=\"streamlit_app\"]').requestFullscreen(); return false;">View Table Fullscreen</a>
-""", unsafe_allow_html=True)
-
-# Add download options
-csv = results_df.to_csv(index=False)
-st.download_button(
-    "Download as CSV",
-    data=csv,
-    file_name=f"global_regime_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-    mime="text/csv",
-    key="global_download_btn"
-)
+        st.success("Showing previously generated results")
+        
+        # Display using the same styling
+        st.dataframe(
+            style_regime_table(st.session_state.global_results),
+            height=800,
+            use_container_width=True
+        )
