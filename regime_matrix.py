@@ -10,6 +10,9 @@ from datetime import datetime, timedelta
 st.set_page_config(layout="wide")
 st.title("📈 Currency Pair Trend Matrix Dashboard")
 
+# Create tabs for Matrix View, Summary Table, and Filters/Settings
+tab1, tab2, tab3 = st.tabs(["Matrix View", "Summary Table", "Filters & Settings"])
+
 # --- DB CONFIG ---
 db_config = st.secrets["database"]
 
@@ -216,21 +219,18 @@ def fetch_token_list():
     df = pd.read_sql(query, engine)
     return df['pair_name'].tolist()
 
-# Create tabs for Matrix View and Summary Table
-tab1, tab2 = st.tabs(["Matrix View", "Summary Table"])
-
-# Get pairs and populate sidebar
+# Keep only the most essential controls in the sidebar
 all_pairs = fetch_token_list()
 selected_pairs = st.sidebar.multiselect("Select Currency Pairs", all_pairs, default=all_pairs[:5])
 timeframes = ["30s","15min", "30min", "1h", "4h", "6h"]
 selected_timeframes = st.sidebar.multiselect("Select Timeframes", timeframes, default=["15min", "1h", "6h"])
 
-# IMPORTANT: Define sliders BEFORE using their values
+# IMPORTANT: Define sliders in sidebar (essential settings)
 col1, col2 = st.sidebar.columns(2)
-lookback_days = col1.slider("Lookback (Days)", 1, 30, 3)
+lookback_days = col1.slider("Lookback (Days)", 1, 30, 14)  # Default to 14 for better results
 rolling_window = col2.slider("Rolling Window (Bars)", 20, 100, 30)
 
-# Display dynamic recommendations based on selected timeframes
+# Display dynamic recommendations in sidebar
 if selected_timeframes:
     st.sidebar.markdown("### Recommended Settings")
     settings_text = ""
@@ -241,7 +241,7 @@ if selected_timeframes:
         """
     
     st.sidebar.markdown(settings_text)
-    
+
     # Auto-suggestion for current settings
     recommended_lookbacks = []
     recommended_windows = []
@@ -264,21 +264,6 @@ if selected_timeframes:
                 lookback_days = rec_lookback
                 rolling_window = rec_window
                 st.experimental_rerun()
-
-# Filter options
-regime_filter = st.sidebar.multiselect(
-    "Filter by Regime", 
-    ["Strong mean-reversion", "Moderate mean-reversion", "Mild mean-reversion", "Slight mean-reversion bias",
-     "Pure random walk", 
-     "Slight trending bias", "Mild trending", "Moderate trending", "Strong trending"],
-    default=[]
-)
-
-# Sorting options
-sort_option = st.sidebar.selectbox(
-    "Sort Pairs By",
-    ["Name", "Most Trending", "Most Mean-Reverting", "Regime Consistency"]
-)
 
 # --- Troubleshooting Guide ---
 with st.sidebar.expander("Troubleshooting 'Insufficient Data'", expanded=False):
@@ -318,6 +303,39 @@ with st.sidebar.expander("Legend: Regime Colors", expanded=True):
     - <span style='background-color:rgba(50,200,50,0.6);padding:3px'>**Moderate Trending ⬆️⬆️**</span>  
     - <span style='background-color:rgba(0,180,0,0.7);padding:3px'>**Strong Trending ⬆️⬆️⬆️**</span>  
     """, unsafe_allow_html=True)
+
+# --- Move Filtering and Sorting to a dedicated tab ---
+with tab3:
+    st.header("Filtering & Sorting Settings")
+    
+    st.subheader("Filter by Regime")
+    regime_filter = st.multiselect(
+        "Show only currency pairs that exhibit these regimes in any timeframe:", 
+        ["Strong mean-reversion", "Moderate mean-reversion", "Mild mean-reversion", "Slight mean-reversion bias",
+         "Pure random walk", 
+         "Slight trending bias", "Mild trending", "Moderate trending", "Strong trending"],
+        default=[]
+    )
+    
+    st.subheader("Sort Pairs By")
+    sort_option = st.selectbox(
+        "Order currency pairs according to:",
+        ["Name", "Most Trending", "Most Mean-Reverting", "Regime Consistency"]
+    )
+    
+    # Add a button to apply filters
+    apply_button = st.button("Apply Filters and Sorting")
+    
+    # Provide some helpful guidance
+    st.info("""
+    **How to use filters:**
+    
+    1. Select one or more regimes to filter pairs that exhibit those characteristics
+    2. Choose a sorting method to organize the results
+    3. Click 'Apply Filters and Sorting' to update the Matrix and Summary views
+    
+    Filtering shows only currency pairs that have at least one timeframe matching any of your selected regimes.
+    """)
 
 # --- Data Fetching ---
 @st.cache_data(ttl=300)  # Cache data for 5 minutes
