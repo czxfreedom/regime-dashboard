@@ -351,18 +351,23 @@ with tab3:
                                           get_recommended_settings(filter_timeframe)["window_ideal"])
     
     # Button to run the filter
+    # Button to run the filter
     if st.button("Find Matching Pairs"):
-        # Show a spinner while processing
-        with st.spinner("Analyzing all currency pairs..."):
-            # Get the complete list of pairs from database 
-            all_available_pairs = fetch_token_list()
-            
-            # Determine which parameters to use
-            actual_lookback = custom_lookback if use_custom_params else lookback_days
-            actual_window = custom_window if use_custom_params else rolling_window
-            
-            # Store results
-            regime_results = []
+     # Show a spinner while processing
+     with st.spinner("Analyzing all currency pairs..."):
+        # Get the complete list of pairs from database 
+        all_available_pairs = fetch_token_list()
+        
+        # Determine which parameters to use
+        if use_custom_params:
+            actual_lookback = custom_lookback
+            actual_window = custom_window
+        else:
+            actual_lookback = lookback_days
+            actual_window = rolling_window
+        
+        # Store results
+        regime_results = []
             
             # Process each pair
             progress_bar = st.progress(0)
