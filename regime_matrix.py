@@ -735,7 +735,122 @@ with tab1:
                     # Chart code remains the same as in previous implementation
                     # ... (Previous chart creation code would be inserted here)
                     
-                    st.plotly_chart(fig, use_container_width=True)
+                    # Inside the Matrix View tab, for each timeframe
+# Chart
+fig = go.Figure()
+
+# Background regime color with improved visualization
+for j in range(1, len(ohlc)):
+    if pd.isna(ohlc['regime'].iloc[j-1]) or pd.isna(ohlc['intensity'].iloc[j-1]):
+        continue
+        
+    r = ohlc['regime'].iloc[j-1]
+    intensity = ohlc['intensity'].iloc[j-1]
+    
+    if r in color_map and intensity in color_map[r]:
+        shade_color = color_map[r][intensity]
+    else:
+        shade_color = "rgba(200,200,200,0.3)"
+
+    fig.add_vrect(
+        x0=ohlc.index[j-1], x1=ohlc.index[j],
+        fillcolor=shade_color, opacity=0.8,
+        layer="below", line_width=0
+    )
+
+# Price line
+fig.add_trace(go.Scatter(
+    x=ohlc.index, 
+    y=ohlc['close'], 
+    mode='lines', 
+    line=dict(color='black', width=1.5), 
+    name='Price'))
+
+# Add Hurst line on secondary y-axis
+fig.add_trace(go.Scatter(
+    x=ohlc.index,
+    y=ohlc['Hurst'],
+    mode='lines',
+    line=dict(color='blue', width=2, dash='dot'),
+    name='Hurst',
+    yaxis='y2'
+))
+
+# Determine color based on regime
+if ohlc['regime'].iloc[-1] == "MEAN-REVERT":
+    title_color = "red"
+elif ohlc['regime'].iloc[-1] == "TREND":
+    title_color = "green"
+else:
+    title_color = "gray"
+
+# Current regime info
+current_hurst = ohlc['Hurst'].iloc[-1]
+current_regime = ohlc['regime'].iloc[-1]
+current_desc = ohlc['regime_desc'].iloc[-1]
+
+# Add emoji to description
+emoji = regime_emojis.get(current_desc, "")
+display_text = f"{current_desc} {emoji}" if not pd.isna(current_hurst) else "Unknown"
+hurst_text = f"Hurst: {current_hurst:.2f}" if not pd.isna(current_hurst) else "Hurst: n/a"
+
+# Add data quality info
+quality_text = f"Valid data: {valid_data_pct:.1f}%"
+
+fig.update_layout(
+    title=dict(
+        text=f"<b>{display_text}</b><br><sub>{hurst_text} | {quality_text}</sub>",
+        font=dict(color=title_color, size=14, family="Arial, sans-serif")
+    ),
+    margin=dict(l=5, r=5, t=60, b=5),
+    height=220,
+    hovermode="x unified",
+    yaxis=dict(
+        title="Price",
+        titlefont=dict(size=10),
+        showgrid=True,
+        gridcolor='rgba(230,230,230,0.5)'
+    ),
+    yaxis2=dict(
+        title="Hurst",
+        titlefont=dict(color="blue", size=10),
+        tickfont=dict(color="blue", size=8),
+        anchor="x",
+        overlaying="y",
+        side="right",
+        range=[0, 1],
+        showgrid=False
+    ),
+    xaxis=dict(
+        showgrid=True,
+        gridcolor='rgba(230,230,230,0.5)'
+    ),
+    showlegend=False,
+    plot_bgcolor='white'
+)
+
+# Add reference lines for Hurst thresholds
+fig.add_shape(
+    type="line",
+    x0=ohlc.index[0],
+    y0=0.4,
+    x1=ohlc.index[-1],
+    y1=0.4,
+    line=dict(color="red", width=1.5, dash="dash"),
+    yref="y2"
+)
+
+fig.add_shape(
+    type="line",
+    x0=ohlc.index[0],
+    y0=0.6,
+    x1=ohlc.index[-1],
+    y1=0.6,
+    line=dict(color="green", width=1.5, dash="dash"),
+    yref="y2"
+)
+
+st.plotly_chart(fig, use_container_width=True)
 
 # --- Summary Table ---
 with tab2:
