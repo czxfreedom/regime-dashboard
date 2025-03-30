@@ -771,22 +771,63 @@ fig2.update_layout(
 )
 
 # Add an improved, more visible legend box
+
+# Add a clearer legend as a separate box outside the main chart area
+fig2.update_layout(
+    # Other layout settings remain the same...
+    margin=dict(r=130),  # Add right margin to make space for the legend
+)
+
+# Add colored rectangles as shapes to serve as legend keys
+# Mean-reversion legend item
+fig2.add_shape(
+    type="rect", xref="paper", yref="paper",
+    x0=1.02, y0=0.80, x1=1.05, y1=0.85,
+    fillcolor="rgba(255,0,0,0.7)", line=dict(color="black", width=1)
+)
 fig2.add_annotation(
-    x=1.02,
-    y=0.5,
-    xref="paper",
-    yref="paper",
-    text="<b>Regime Legend:</b><br><br>" +
-         "<span style='color:white; background-color:rgba(255,0,0,0.8); padding:3px;'>■ Mean-Reversion</span><br><br>" +
-         "<span style='color:white; background-color:rgba(100,100,100,0.8); padding:3px;'>■ Random/Noise</span><br><br>" + 
-         "<span style='color:white; background-color:rgba(0,180,0,0.8); padding:3px;'>■ Trending</span>",
+    xref="paper", yref="paper", x=1.07, y=0.825, 
+    text="Mean-Reversion",
     showarrow=False,
-    font=dict(size=12, family="Arial"),
-    align="left",
-    bgcolor="white",
-    bordercolor="black",
-    borderwidth=1,
-    borderpad=6
+    font=dict(size=12),
+    align="left"
+)
+
+# Random/Noise legend item
+fig2.add_shape(
+    type="rect", xref="paper", yref="paper",
+    x0=1.02, y0=0.70, x1=1.05, y1=0.75,
+    fillcolor="rgba(200,200,200,0.5)", line=dict(color="black", width=1)
+)
+fig2.add_annotation(
+    xref="paper", yref="paper", x=1.07, y=0.725, 
+    text="Random/Noise",
+    showarrow=False,
+    font=dict(size=12),
+    align="left"
+)
+
+# Trending legend item
+fig2.add_shape(
+    type="rect", xref="paper", yref="paper",
+    x0=1.02, y0=0.60, x1=1.05, y1=0.65,
+    fillcolor="rgba(0,200,0,0.7)", line=dict(color="black", width=1)
+)
+fig2.add_annotation(
+    xref="paper", yref="paper", x=1.07, y=0.625, 
+    text="Trending",
+    showarrow=False,
+    font=dict(size=12),
+    align="left"
+)
+
+# Add legend title
+fig2.add_annotation(
+    xref="paper", yref="paper", x=1.06, y=0.90, 
+    text="<b>Regime Legend</b>",
+    showarrow=False,
+    font=dict(size=14),
+    align="center"
 )
 # Display both charts
 st.plotly_chart(fig, use_container_width=True)
