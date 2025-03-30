@@ -603,7 +603,7 @@ fig.update_layout(
     hovermode="closest"
 )
 
-# Create the second figure (Price chart)
+# Create the second figure (Price chart) with improved contrast and spacing
 fig2 = go.Figure()
 
 # Add candlestick chart
@@ -616,7 +616,7 @@ fig2.add_trace(go.Candlestick(
     name="Price"
 ))
 
-# Add colored background for different regimes with enhanced visibility
+# Add colored background for different regimes with MUCH higher contrast
 for i in range(1, len(df_plot)):
     if pd.isna(df_plot['regime'].iloc[i-1]) or pd.isna(df_plot['intensity'].iloc[i-1]):
         continue
@@ -625,47 +625,83 @@ for i in range(1, len(df_plot)):
     intensity = df_plot['intensity'].iloc[i-1]
     desc = df_plot['regime_desc'].iloc[i-1]
     
-    # More saturated colors with better visibility
+    # Much more saturated colors with higher contrast
     if regime == "MEAN-REVERT":
-        colors = ['rgba(255,200,200,0.4)', 'rgba(255,150,150,0.4)', 'rgba(255,100,100,0.4)', 'rgba(255,50,50,0.4)']
+        colors = ['rgba(255,200,200,0.6)', 'rgba(255,150,150,0.6)', 'rgba(255,100,100,0.7)', 'rgba(255,0,0,0.7)']
         color = colors[intensity]
     elif regime == "TREND":
-        colors = ['rgba(200,255,200,0.4)', 'rgba(150,255,150,0.4)', 'rgba(100,255,100,0.4)', 'rgba(50,255,50,0.4)']
+        colors = ['rgba(200,255,200,0.6)', 'rgba(150,255,150,0.6)', 'rgba(100,255,100,0.7)', 'rgba(0,200,0,0.7)']
         color = colors[intensity]
     else:  # NOISE
         if intensity == 0:
-            color = 'rgba(200,200,200,0.3)'  # Pure random
+            color = 'rgba(200,200,200,0.5)'  # Pure random - more visible gray
         elif intensity > 0:
-            color = 'rgba(200,255,220,0.3)'  # Trending bias
+            color = 'rgba(200,255,220,0.5)'  # Trending bias
         else:
-            color = 'rgba(255,200,220,0.3)'  # Mean-reversion bias
+            color = 'rgba(255,200,220,0.5)'  # Mean-reversion bias
     
     # Add vertical rectangles with improved visibility
     fig2.add_vrect(
         x0=df_plot['timestamp'].iloc[i-1],
         x1=df_plot['timestamp'].iloc[i],
         fillcolor=color,
-        opacity=0.7,  # Higher opacity for better visibility
+        opacity=0.9,  # Even higher opacity for better visibility
         layer="below",
-        line_width=0
+        line_width=1,  # Add border
+        line=dict(color='rgba(0,0,0,0.3)')  # Light border
     )
+
+# Create spaced-out regime change labels (limit frequency)
+# Only show labels for significant changes and ensure they don't overlap
+label_positions = []
+min_label_distance = 5  # Minimum distance between labels in bars
+regime_changes = []
+
+# Identify regime changes
+for i in range(1, len(df_plot)):
+    if i > 1 and df_plot['regime'].iloc[i-1] != df_plot['regime'].iloc[i-2]:
+        regime_changes.append(i-1)
+
+# Filter out labels that would be too close to each other
+spaced_changes = []
+if regime_changes:
+    spaced_changes.append(regime_changes[0])
+    for change in regime_changes[1:]:
+        if change - spaced_changes[-1] >= min_label_distance:
+            spaced_changes.append(change)
+
+# Add well-spaced labels
+for i in spaced_changes:
+    regime = df_plot['regime'].iloc[i]
+    desc = df_plot['regime_desc'].iloc[i]
     
-    # Add text labels for regime changes
-    if i > 1 and df_plot['regime_desc'].iloc[i-2] != df_plot['regime_desc'].iloc[i-1]:
-        fig2.add_annotation(
-            x=df_plot['timestamp'].iloc[i-1],
-            y=df_plot['high'].iloc[i-1] * 1.01,  # Slightly above price
-            text=desc,
-            showarrow=True,
-            arrowhead=1,
-            arrowsize=1,
-            arrowwidth=1,
-            arrowcolor="black",
-            font=dict(size=10, color="black", family="Arial Black"),
-            bgcolor="white",
-            bordercolor="black",
-            borderwidth=1
-        )
+    # Set label color based on regime
+    if regime == "MEAN-REVERT":
+        bg_color = "rgba(255,0,0,0.8)"
+        txt_color = "white"
+    elif regime == "TREND":
+        bg_color = "rgba(0,180,0,0.8)"
+        txt_color = "white"
+    else:  # NOISE
+        bg_color = "rgba(100,100,100,0.8)"
+        txt_color = "white"
+    
+    fig2.add_annotation(
+        x=df_plot['timestamp'].iloc[i],
+        y=df_plot['high'].iloc[i] * 1.02,  # Position above price
+        text=desc,
+        showarrow=True,
+        arrowhead=2,
+        arrowsize=1,
+        arrowwidth=2,
+        arrowcolor=bg_color,
+        font=dict(size=11, color=txt_color, family="Arial"),
+        bgcolor=bg_color,
+        bordercolor="black",
+        borderwidth=1,
+        borderpad=4,
+        opacity=0.9
+    )
 
 # Add Hurst line on secondary axis with better visibility
 fig2.add_trace(go.Scatter(
@@ -673,35 +709,35 @@ fig2.add_trace(go.Scatter(
     y=df_plot['Hurst'],
     mode='lines',
     name='Hurst',
-    line=dict(color='blue', width=2),
-    yaxis='y2'  # Use secondary y-axis
+    line=dict(color='blue', width=3),  # Thicker line
+    yaxis='y2'
 ))
 
-# Add horizontal lines using scatter traces
+# Add horizontal lines using scatter traces with higher contrast
 min_date = df_plot['timestamp'].min()
 max_date = df_plot['timestamp'].max()
 
-# Mean-reversion threshold
+# Mean-reversion threshold - more visible
 fig2.add_trace(go.Scatter(
     x=[min_date, max_date],
     y=[0.4, 0.4],
     mode='lines',
-    line=dict(color="red", width=1, dash="dash"),
+    line=dict(color="red", width=2, dash="dash"),
     name="Mean-Reversion Threshold",
     yaxis='y2'
 ))
 
-# Trending threshold
+# Trending threshold - more visible
 fig2.add_trace(go.Scatter(
     x=[min_date, max_date],
     y=[0.6, 0.6],
     mode='lines',
-    line=dict(color="green", width=1, dash="dash"),
+    line=dict(color="green", width=2, dash="dash"),
     name="Trending Threshold",
     yaxis='y2'
 ))
 
-# Update layout
+# Update layout with better contrast
 fig2.update_layout(
     title=f"Price Chart with Regime Overlay for {selected_token} ({timeframe})",
     xaxis_title="Time",
@@ -712,41 +748,43 @@ fig2.update_layout(
         yanchor="bottom",
         y=1.02,
         xanchor="right",
-        x=1
+        x=1,
+        bgcolor="rgba(255,255,255,0.9)",  # Add background to legend
+        bordercolor="black",
+        borderwidth=1
     ),
     yaxis2=dict(
         title="Hurst",
-        titlefont=dict(color="blue"),
-        tickfont=dict(color="blue"),
+        titlefont=dict(color="blue", size=14),  # Larger font
+        tickfont=dict(color="blue", size=12),   # Larger ticks
         anchor="x",
         overlaying="y",
         side="right",
-        range=[0, 1]  # Fixed range for Hurst
+        range=[0, 1],  # Fixed range for Hurst
+        showgrid=True,
+        gridcolor="rgba(0,0,255,0.1)"  # Light blue grid
     ),
-    hovermode="x unified"
+    hovermode="x unified",
+    plot_bgcolor='white',  # White background
+    paper_bgcolor='white',
+    font=dict(size=12)  # Larger default font
 )
 
-# Add a comprehensive legend
+# Add an improved, more visible legend box
 fig2.add_annotation(
-    x=1.01,
+    x=1.02,
     y=0.5,
     xref="paper",
     yref="paper",
-    text="<b>Regime Legend:</b><br>" +
-         "<span style='color:red'>■</span> Mean-Reversion<br>" +
-         "<span style='color:gray'>■</span> Random/Noise<br>" + 
-         "<span style='color:green'>■</span> Trending",
+    text="<b>Regime Legend:</b><br><br>" +
+         "<span style='color:white; background-color:rgba(255,0,0,0.8); padding:3px;'>■ Mean-Reversion</span><br><br>" +
+         "<span style='color:white; background-color:rgba(100,100,100,0.8); padding:3px;'>■ Random/Noise</span><br><br>" + 
+         "<span style='color:white; background-color:rgba(0,180,0,0.8); padding:3px;'>■ Trending</span>",
     showarrow=False,
-    font=dict(size=10),
+    font=dict(size=12, family="Arial"),
     align="left",
     bgcolor="white",
     bordercolor="black",
-    borderwidth=1
+    borderwidth=1,
+    borderpad=6
 )
-
-# Display both charts
-st.plotly_chart(fig, use_container_width=True)
-st.plotly_chart(fig2, use_container_width=True)
-
-# Remove the redundant third chart if it exists
-# No code needed here, just don't create a third chart
