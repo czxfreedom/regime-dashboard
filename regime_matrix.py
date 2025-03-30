@@ -6,7 +6,6 @@ from sqlalchemy import create_engine
 from datetime import datetime, timedelta
 
 # --- Setup ---
-st.set_page_config(layout="wide")
 st.title("Currency Pair Trend Matrix Dashboard")
 
 # --- DB CONFIG ---
@@ -15,6 +14,7 @@ db_uri = f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}@{db
 engine = create_engine(db_uri)
 
 # --- Parameters ---
+# Get all pairs
 @st.cache_data
 def fetch_token_list():
     query = "SELECT DISTINCT pair_name FROM public.oracle_price_log ORDER BY pair_name"
@@ -32,41 +32,45 @@ selected_timeframes = st.multiselect("Select Timeframes", timeframes, default=["
 lookback_days = st.slider("Lookback (Days)", 1, 30, 7)
 rolling_window = st.slider("Rolling Window (Bars)", 20, 100, 50)
 
-# --- Hurst Calculation ---
+# --- Helper Functions ---
 def universal_hurst(ts):
     ts = np.array(ts)
-    if len(ts) < 10 or np.std(ts) < 1e-8:
+    if len(ts) < 20 or np.std(ts) == 0:
         return np.nan
-    lags = range(2, min(len(ts) - 1, 10))
+    lags = range(2, 20)
     tau = []
     for lag in lags:
         diff = ts[lag:] - ts[:-lag]
-        std_diff = np.std(diff)
-        if std_diff < 1e-8:
-            continue
-        tau.append(std_diff)
-    if len(tau) < 4:
-        return np.nan
-    try:
-        poly = np.polyfit(np.log(list(lags[:len(tau)])), np.log(tau), 1)
-        hurst = poly[0]
-        if hurst < 0 or hurst > 1.5:
+        if len(diff) == 0 or np.std(diff) == 0:
             return np.nan
-        return hurst
-    except:
+        tau.append(np.std(diff))
+    if any(t == 0 for t in tau):
         return np.nan
+    poly = np.polyfit(np.log(lags), np.log(tau), 1)
+    return poly[0]
 
-def detailed_regime_classification(h):
-    if pd.isna(h):
-        return ('UNKNOWN', '')
-    elif h < 0.4:
-        return ('MEAN-REVERT', 'red')
-    elif h > 0.6:
-        return ('TREND', 'green')
+def detailed_regime_classification(hurst):
+    if pd.isna(hurst):
+        return ("UNKNOWN", 0, "Insufficient data")
+    elif hurst < 0.2:
+        return ("MEAN-REVERT", 3, "Strong mean-reversion")
+    elif hurst < 0.3:
+        return ("MEAN-REVERT", 2, "Moderate mean-reversion")
+    elif hurst < 0.4:
+        return ("MEAN-REVERT", 1, "Mild mean-reversion")
+    elif hurst < 0.45:
+        return ("NOISE", 1, "Slight mean-reversion bias")
+    elif hurst <= 0.55:
+        return ("NOISE", 0, "Pure random walk")
+    elif hurst < 0.6:
+        return ("NOISE", 1, "Slight trending bias")
+    elif hurst < 0.7:
+        return ("TREND", 1, "Mild trending")
+    elif hurst < 0.8:
+        return ("TREND", 2, "Moderate trending")
     else:
-        return ('NOISE', 'gray')
+        return ("TREND", 3, "Strong trending")
 
-# --- Get Hurst Data ---
 def get_hurst_data(pair, timeframe, lookback_days, rolling_window):
     end_time = datetime.utcnow()
     start_time = end_time - timedelta(days=lookback_days)
@@ -85,21 +89,20 @@ def get_hurst_data(pair, timeframe, lookback_days, rolling_window):
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df = df.set_index('timestamp').sort_index()
     ohlc = df['final_price'].resample(timeframe).ohlc().dropna()
+
     ohlc['Hurst'] = ohlc['close'].rolling(rolling_window).apply(universal_hurst)
     ohlc['regime_info'] = ohlc['Hurst'].apply(detailed_regime_classification)
     ohlc['regime'] = ohlc['regime_info'].apply(lambda x: x[0])
-    ohlc['regime_color'] = ohlc['regime_info'].apply(lambda x: x[1])
+    ohlc['intensity'] = ohlc['regime_info'].apply(lambda x: x[1])
+    ohlc['regime_desc'] = ohlc['regime_info'].apply(lambda x: x[2])
+
     return ohlc
 
-# --- Collect regime summary table ---
-summary_data = []
-
 # --- Render Matrix ---
+st.subheader("Trend Regime Matrix")
 if not selected_pairs or not selected_timeframes:
-    st.warning("Please select at least one pair and one timeframe")
+    st.warning("Please select at least one pair and timeframe")
     st.stop()
-
-st.subheader("Trend Regime Visual Matrix")
 
 for pair in selected_pairs:
     st.markdown(f"### {pair}")
@@ -111,13 +114,7 @@ for pair in selected_pairs:
             ohlc = get_hurst_data(pair, timeframe, lookback_days, rolling_window)
 
             if ohlc is None or ohlc.empty:
-                st.write("⚠️ No data available for this timeframe.")
-                summary_data.append((pair, timeframe, 'NO DATA'))
-                continue
-
-            if ohlc['Hurst'].dropna().empty:
-                st.write("⚠️ No valid Hurst values. Try increasing lookback or reducing window.")
-                summary_data.append((pair, timeframe, 'NO HURST'))
+                st.write("No data available")
                 continue
 
             fig = go.Figure()
@@ -129,42 +126,49 @@ for pair in selected_pairs:
             ))
 
             for j in range(1, len(ohlc)):
-                regime = ohlc['regime'].iloc[j - 1]
-                color = {
-                    "MEAN-REVERT": "rgba(255,0,0,0.2)",
-                    "TREND": "rgba(0,200,0,0.2)",
-                    "NOISE": "rgba(200,200,200,0.3)"
-                }.get(regime, "rgba(150,150,150,0.1)")
+                regime = ohlc['regime'].iloc[j-1]
+                intensity = ohlc['intensity'].iloc[j-1]
+                desc = ohlc['regime_desc'].iloc[j-1]
+
+                if regime == "MEAN-REVERT":
+                    shades = ['rgba(255,200,200,0.6)', 'rgba(255,100,100,0.6)', 'rgba(255,0,0,0.6)']
+                    color = shades[intensity-1]
+                elif regime == "TREND":
+                    shades = ['rgba(200,255,200,0.6)', 'rgba(100,255,100,0.6)', 'rgba(0,200,0,0.6)']
+                    color = shades[intensity-1]
+                else:
+                    color = 'rgba(220,220,220,0.5)'
+
                 fig.add_vrect(
-                    x0=ohlc.index[j - 1], x1=ohlc.index[j],
-                    fillcolor=color, opacity=0.3, layer="below", line_width=0
+                    x0=ohlc.index[j-1],
+                    x1=ohlc.index[j],
+                    fillcolor=color,
+                    opacity=0.8,
+                    layer="below",
+                    line_width=0
                 )
 
-            current_hurst = ohlc['Hurst'].iloc[-1]
-            current_regime = ohlc['regime'].iloc[-1]
-            regime_color = {
-                "MEAN-REVERT": "red",
-                "TREND": "green",
-                "NOISE": "gray",
-                "UNKNOWN": "black"
-            }.get(current_regime, "black")
-
-            summary_data.append((pair, timeframe, f"{current_regime} ({current_hurst:.2f})" if not pd.isna(current_hurst) else "UNKNOWN"))
+            if not ohlc.empty and not pd.isna(ohlc['Hurst'].iloc[-1]):
+                current_hurst = ohlc['Hurst'].iloc[-1]
+                current_regime = ohlc['regime'].iloc[-1]
+                color = "red" if current_regime == "MEAN-REVERT" else "green" if current_regime == "TREND" else "gray"
+                fig.update_layout(title=f"{current_regime} | H={current_hurst:.2f}", title_font_color=color)
 
             fig.update_layout(
-                title=f"{current_regime} | H={current_hurst:.2f}" if not pd.isna(current_hurst) else "Regime Unknown",
-                title_font_color=regime_color,
-                height=180, width=250,
+                height=200,
                 margin=dict(l=0, r=0, t=30, b=0),
                 showlegend=False,
-                xaxis=dict(showticklabels=False, showgrid=False),
-                yaxis=dict(showticklabels=False, showgrid=False)
+                xaxis=dict(showticklabels=False),
+                yaxis=dict(showticklabels=False)
             )
 
             st.plotly_chart(fig, use_container_width=True)
 
-# --- Tabular Summary ---
-st.subheader("📊 Regime Table Summary")
-summary_df = pd.DataFrame(summary_data, columns=["Pair", "Timeframe", "Regime"])
-pivot_df = summary_df.pivot(index="Pair", columns="Timeframe", values="Regime").fillna("-")
-st.dataframe(pivot_df, use_container_width=True, height=300)
+# Add Regime Legend
+st.markdown("---")
+st.markdown("""
+**Regime Color Code:**
+- 🟥 **Mean-Revert**
+- 🟩 **Trending**
+- ⬜ **Noise/Unknown**
+""")
