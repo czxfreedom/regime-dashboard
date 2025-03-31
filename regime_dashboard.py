@@ -766,7 +766,11 @@ fig2.add_trace(go.Scatter(
 # Update layout with legend below the chart
 fig2.update_layout(
     title=f"Price Chart with Regime Overlay for {selected_token} ({timeframe})",
-    xaxis_title="Time",
+    xaxis=dict(
+        title="Time",
+        title_standoff=0,  # Reduce space between axis and title
+        title_position="bottom center"  # Position at bottom center
+    ),
     yaxis_title="Price",
     height=500,
     legend=dict(
