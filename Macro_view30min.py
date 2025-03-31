@@ -221,7 +221,7 @@ def detailed_regime_classification(hurst):
         return ("TREND", 3, "Strong trending")
 
 # Fetch and calculate Hurst for a token with 30min timeframe
-@st.cache_data(ttl=600, show_spinner="Calculating Hurst exponents...")  # Cache for 10 minutes
+@st.cache_data(ttl=600, show_spinner="Calculating Hurst exponents...")
 def fetch_and_calculate_hurst(token):
     end_time = datetime.utcnow()
     start_time = end_time - timedelta(days=lookback_days + 1)
@@ -232,29 +232,33 @@ def fetch_and_calculate_hurst(token):
     AND pair_name = '{token}';
     """
     try:
-        print(f"Executing query for token: {token}")  # Debug
+        print(f"[{token}] Executing query: {query}")
         df = pd.read_sql(query, engine)
-        print(f"Query executed successfully for token: {token}")  # Debug
+        print(f"[{token}] Query executed. DataFrame shape: {df.shape}")
+
         if df.empty:
-            print(f"No data found for token: {token}")
+            print(f"[{token}] No data found.")
             return None
-        print(f"Data fetched for token {token}: shape = {df.shape}") # Debug
-        print(f"First few rows of data for token {token}:\n{df.head()}") #Debug
+
+        print(f"[{token}] First few rows:\n{df.head()}")
+        print(f"[{token}] DataFrame columns and types:\n{df.info()}")
 
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.set_index('timestamp').sort_index()
         one_min_ohlc = df['final_price'].resample('1min').ohlc().dropna()
         if one_min_ohlc.empty:
-            print(f"No OHLC data for token: {token}")
+            print(f"[{token}] No OHLC data after resampling.")
             return None
             
-        print(f"Token: {token}, one_min_ohlc['close'] type: {type(one_min_ohlc['close'])}")
-        print(f"Token: {token}, one_min_ohlc['close'] first 5 values: {one_min_ohlc['close'].head()}")
-            
-        one_min_ohlc['Hurst'] = one_min_ohlc['close'].apply(universal_hurst)
+        print(f"[{token}] one_min_ohlc head:\n{one_min_ohlc.head()}")
+        print(f"[{token}] one_min_ohlc info:\n{one_min_ohlc.info()}")
+
+        # Corrected line: Apply universal_hurst to the 'close' prices directly
+        one_min_ohlc['Hurst'] = one_min_ohlc['close'].rolling(window=rolling_window).apply(universal_hurst)
+
         thirty_min_hurst = one_min_ohlc['Hurst'].resample('30min').mean().dropna()
         if thirty_min_hurst.empty:
-            print(f"No 30-min Hurst data for token: {token}")
+            print(f"[{token}] No 30-min Hurst data.")
             return None
         last_24h_hurst = thirty_min_hurst.iloc[-48:]
         last_24h_hurst = last_24h_hurst.to_frame()
@@ -262,10 +266,11 @@ def fetch_and_calculate_hurst(token):
         last_24h_hurst['regime_info'] = last_24h_hurst['Hurst'].apply(detailed_regime_classification)
         last_24h_hurst['regime'] = last_24h_hurst['regime_info'].apply(lambda x: x[0])
         last_24h_hurst['regime_desc'] = last_24h_hurst['regime_info'].apply(lambda x: x[2])
+        print(f"[{token}] Successful Calculation")
         return last_24h_hurst
     except Exception as e:
         st.error(f"Error processing {token}: {e}")
-        print(f"Error processing {token}: {e}")  # Print to console for detailed error
+        print(f"[{token}] Error processing: {e}")
         return None
 
 # Show progress bar while calculating
@@ -275,11 +280,15 @@ status_text = st.empty()
 # Calculate Hurst for each token
 token_results = {}
 for i, token in enumerate(selected_tokens):
-    progress_bar.progress((i) / len(selected_tokens))
-    status_text.text(f"Processing {token} ({i+1}/{len(selected_tokens)})")
-    result = fetch_and_calculate_hurst(token)
-    if result is not None:
-        token_results[token] = result
+    try:  # Added try-except around token processing
+        progress_bar.progress((i) / len(selected_tokens))
+        status_text.text(f"Processing {token} ({i+1}/{len(selected_tokens)})")
+        result = fetch_and_calculate_hurst(token)
+        if result is not None:
+            token_results[token] = result
+    except Exception as e:
+        st.error(f"Error processing token {token}: {e}")
+        print(f"Error processing token {token} in main loop: {e}")
 
 # Final progress update
 progress_bar.progress(1.0)
