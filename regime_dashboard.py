@@ -772,7 +772,7 @@ fig2.update_layout(
     legend=dict(
         orientation="h",  # horizontal orientation
         yanchor="top",
-        y=-0.15,  # position below the chart
+        y=-0.25,  # position further below the chart (changed from -0.15 to -0.25)
         xanchor="center",
         x=0.5,  # centered
         bgcolor="rgba(255,255,255,0.9)",
@@ -780,6 +780,7 @@ fig2.update_layout(
         borderwidth=1,
         title="Regime Types"
     ),
+    
     yaxis2=dict(
         title="Hurst",
         titlefont=dict(color="blue", size=14),
@@ -795,7 +796,7 @@ fig2.update_layout(
     plot_bgcolor='white',
     paper_bgcolor='white',
     font=dict(size=12),
-    margin=dict(b=80)  # Add bottom margin for the legend
+    margin=dict(b=120)  # Add bottom margin for the legend
 )
 
 # Display both charts
