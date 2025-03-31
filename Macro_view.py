@@ -222,18 +222,30 @@ def detailed_regime_classification(hurst):
     else:
         return ("TREND", 3, "Strong trending")
 
+# Function to convert time string to sortable minutes value
+def time_to_minutes(time_str):
+    hours, minutes = map(int, time_str.split(':'))
+    return hours * 60 + minutes
+
 # Fetch and calculate Hurst for a token with 30min timeframe
 @st.cache_data(ttl=600, show_spinner="Calculating Hurst exponents...")
 def fetch_and_calculate_hurst(token):
-    end_time_utc = datetime.utcnow()
-    singapore_timezone = pytz.timezone('Asia/Singapore')
-    end_time_singapore = end_time_utc.replace(tzinfo=pytz.utc).astimezone(singapore_timezone)
-    start_time_singapore = end_time_singapore - timedelta(days=lookback_days)
+    # Get current time in Singapore timezone
+    now_utc = datetime.now(pytz.utc)
+    now_sg = now_utc.astimezone(singapore_timezone)
+    start_time_sg = now_sg - timedelta(days=lookback_days)
+    
+    # Convert back to UTC for database query
+    start_time_utc = start_time_sg.astimezone(pytz.utc)
+    end_time_utc = now_sg.astimezone(pytz.utc)
 
     query = f"""
-    SELECT created_at AT TIME ZONE 'UTC' + INTERVAL '8 hours' AS timestamp, final_price, pair_name
+    SELECT 
+        created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp, 
+        final_price, 
+        pair_name
     FROM public.oracle_price_log
-    WHERE created_at BETWEEN '{start_time_singapore.astimezone(pytz.utc)}' AND '{end_time_singapore.astimezone(pytz.utc)}'
+    WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
     AND pair_name = '{token}';
     """
     try:
@@ -258,7 +270,7 @@ def fetch_and_calculate_hurst(token):
         print(f"[{token}] one_min_ohlc head:\n{one_min_ohlc.head()}")
         print(f"[{token}] one_min_ohlc info:\n{one_min_ohlc.info()}")
 
-        # Corrected line: Apply universal_hurst to the 'close' prices directly
+        # Apply universal_hurst to the 'close' prices directly
         one_min_ohlc['Hurst'] = one_min_ohlc['close'].rolling(window=rolling_window).apply(universal_hurst)
 
         thirty_min_hurst = one_min_ohlc['Hurst'].resample('30min').mean().dropna()
@@ -267,6 +279,8 @@ def fetch_and_calculate_hurst(token):
             return None
         last_24h_hurst = thirty_min_hurst.iloc[-48:]
         last_24h_hurst = last_24h_hurst.to_frame()
+        # Store original datetime index for sorting
+        last_24h_hurst['original_datetime'] = last_24h_hurst.index
         last_24h_hurst['time_label'] = last_24h_hurst.index.strftime('%H:%M')
         last_24h_hurst['regime_info'] = last_24h_hurst['Hurst'].apply(detailed_regime_classification)
         last_24h_hurst['regime'] = last_24h_hurst['regime_info'].apply(lambda x: x[0])
@@ -301,18 +315,31 @@ status_text.text(f"Processed {len(token_results)}/{len(selected_tokens)} tokens 
 
 # Create table for display
 if token_results:
-    all_times = set()
-    for df in token_results.values():
-        all_times.update(df['time_label'].tolist())
-    all_times = sorted(all_times, reverse=True)  # Sort times in descending order
+    # Get all datetimes from all tokens
+    combined_datetime_df = pd.DataFrame()
+    for token, df in token_results.items():
+        if 'original_datetime' in df.columns:
+            token_dt = df[['original_datetime', 'time_label']].copy()
+            token_dt['token'] = token
+            combined_datetime_df = pd.concat([combined_datetime_df, token_dt])
+    
+    # Group by time_label and find the latest datetime for each time slot 
+    # (in case different tokens have slightly different timestamps)
+    time_mapping = combined_datetime_df.groupby('time_label')['original_datetime'].max()
+    
+    # Now create the hurst table using time_labels
+    all_times = sorted(time_mapping.index, key=time_to_minutes, reverse=True)
+    
     table_data = {}
     for token, df in token_results.items():
         hurst_series = df.set_index('time_label')['Hurst']
         table_data[token] = hurst_series
+    
     hurst_table = pd.DataFrame(table_data)
+    # Use the sorted time labels
     hurst_table = hurst_table.reindex(all_times)
-    hurst_table = hurst_table.sort_index(ascending=False)
     hurst_table = hurst_table.round(2)
+    
     def color_cells(val):
         if pd.isna(val):
             return 'background-color: #f5f5f5; color: #666666;' # Grey for missing
@@ -324,10 +351,12 @@ if token_results:
             return f'background-color: rgba({255-intensity}, 255, {255-intensity}, 0.7); color: black'
         else:
             return 'background-color: rgba(200, 200, 200, 0.5); color: black' # Lighter gray
+    
     styled_table = hurst_table.style.applymap(color_cells)
     st.markdown("## Hurst Exponent Table (30min timeframe, Last 24 hours, Singapore Time)")
     st.markdown("### Color Legend: <span style='color:red'>Mean Reversion</span>, <span style='color:gray'>Random Walk</span>, <span style='color:green'>Trending</span>", unsafe_allow_html=True)
     st.dataframe(styled_table, height=700, use_container_width=True)
+    
     st.subheader("Current Market Overview (Singapore Time)")
     latest_values = {}
     for token, df in token_results.items():
@@ -335,18 +364,22 @@ if token_results:
             latest = df['Hurst'].iloc[-1]
             regime = df['regime_desc'].iloc[-1]
             latest_values[token] = (latest, regime)
+    
     if latest_values:
         mean_reverting = sum(1 for v, r in latest_values.values() if v < 0.4)
         random_walk = sum(1 for v, r in latest_values.values() if 0.4 <= v <= 0.6)
         trending = sum(1 for v, r in latest_values.values() if v > 0.6)
         total = mean_reverting + random_walk + trending
+        
         col1, col2, col3 = st.columns(3)
         col1.metric("Mean-Reverting", f"{mean_reverting} ({mean_reverting/total*100:.1f}%)", delta=f"{mean_reverting/total*100:.1f}%")
         col2.metric("Random Walk", f"{random_walk} ({random_walk/total*100:.1f}%)", delta=f"{random_walk/total*100:.1f}%")
         col3.metric("Trending", f"{trending} ({trending/total*100:.1f}%)", delta=f"{trending/total*100:.1f}%")
+        
         labels = ['Mean-Reverting', 'Random Walk', 'Trending']
         values = [mean_reverting, random_walk, trending]
         colors = ['rgba(255,100,100,0.8)', 'rgba(200,200,200,0.8)', 'rgba(100,255,100,0.8)'] # Slightly more opaque
+        
         fig = go.Figure(data=[go.Pie(labels=labels, values=values, marker=dict(colors=colors, line=dict(color='#000000', width=2)), textinfo='label+percent', hole=.3)]) # Added black borders
         fig.update_layout(
             title="Current Market Regime Distribution (Singapore Time)",
@@ -354,6 +387,7 @@ if token_results:
             font=dict(color="#000000", size=12),  # Set default font color and size
         )
         st.plotly_chart(fig, use_container_width=True)
+        
         col1, col2, col3 = st.columns(3)
         with col1:
             st.markdown("### Mean-Reverting Tokens")
@@ -364,6 +398,7 @@ if token_results:
                     st.markdown(f"- **{token}**: <span style='color:red'>{value:.2f}</span> ({regime})", unsafe_allow_html=True)
             else:
                 st.markdown("*No tokens in this category*")
+        
         with col2:
             st.markdown("### Random Walk Tokens")
             rw_tokens = [(t, v, r) for t, (v, r) in latest_values.items() if 0.4 <= v <= 0.6]
@@ -373,6 +408,7 @@ if token_results:
                     st.markdown(f"- **{token}**: <span style='color:gray'>{value:.2f}</span> ({regime})", unsafe_allow_html=True)
             else:
                 st.markdown("*No tokens in this category*")
+        
         with col3:
             st.markdown("### Trending Tokens")
             tr_tokens = [(t, v, r) for t, (v, r) in latest_values.items() if v > 0.6]
