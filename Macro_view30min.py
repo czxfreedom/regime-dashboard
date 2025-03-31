@@ -83,29 +83,30 @@ def calculate_comprehensive_hurst(token):
     start_time = end_time - timedelta(days=1)
     
     query = text(f"""
-    WITH time_blocks AS (
+    WITH time_series AS (
         SELECT 
             generate_series(
-                date_trunc('day', '{start_time}'::timestamp) + INTERVAL '8 hours',
-                date_trunc('day', '{start_time}'::timestamp) + INTERVAL '32 hours',
+                date_trunc('day', :start_time::timestamp) + INTERVAL '8 hours',
+                date_trunc('day', :start_time::timestamp) + INTERVAL '32 hours',
                 INTERVAL '30 minutes'
-            ) AS block_start,
-            generate_series(
-                date_trunc('day', '{start_time}'::timestamp) + INTERVAL '8 hours',
-                date_trunc('day', '{start_time}'::timestamp) + INTERVAL '32 hours',
-                INTERVAL '30 minutes'
-            ) AS block_end
+            ) AS block_time
+    ),
+    token_data AS (
+        SELECT 
+            time_series.block_time,
+            final_price
+        FROM time_series
+        LEFT JOIN public.oracle_price_log ON 
+            pair_name = :token AND
+            created_at >= time_series.block_time AND
+            created_at < time_series.block_time + INTERVAL '30 minutes'
     )
     SELECT 
-        time_blocks.block_start AS time_block,
-        final_price,
-        created_at
-    FROM time_blocks
-    JOIN public.oracle_price_log ON 
-        pair_name = :token AND
-        created_at >= time_blocks.block_start AND
-        created_at < time_blocks.block_end
-    ORDER BY created_at;
+        block_time,
+        final_price
+    FROM token_data
+    WHERE final_price IS NOT NULL
+    ORDER BY block_time;
     """)
     
     try:
@@ -113,21 +114,19 @@ def calculate_comprehensive_hurst(token):
             df = pd.read_sql(
                 query, 
                 connection, 
-                params={'token': token}
+                params={
+                    'token': token, 
+                    'start_time': start_time
+                }
             )
         
         if df.empty:
-            st.warning(f"No data found for {token}")
             return None
         
-        def process_block(block_data):
-            if len(block_data) < 10:
-                return np.nan
-            
-            prices = block_data['final_price'].values
-            return calculate_multi_window_hurst(prices)
-        
-        grouped_df = df.groupby('time_block').apply(process_block).reset_index()
+        # Group by time blocks and calculate Hurst
+        grouped_df = df.groupby('block_time').apply(
+            lambda x: calculate_multi_window_hurst(x['final_price'].values)
+        ).reset_index()
         grouped_df.columns = ['time_block', 'Hurst']
         
         grouped_df['time_label'] = grouped_df['time_block'].dt.strftime('%H:%M')
