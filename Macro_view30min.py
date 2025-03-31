@@ -191,8 +191,8 @@ def calculate_comprehensive_hurst(token):
         grouped_df = df.groupby('time_block').apply(calculate_block_hurst).reset_index()
         grouped_df.columns = ['time_block', 'Hurst']
         
-        # Create time labels
-        grouped_df['time_label'] = grouped_df['time_block'].dt.strftime('%H:%M')
+        # Create time labels with index to ensure uniqueness
+        grouped_df['time_label'] = grouped_df['time_block'].dt.strftime('%H:%M') + '_' + grouped_df.index.astype(str)
         
         # Add regime classification
         def classify_regime(hurst):
@@ -213,7 +213,16 @@ def calculate_comprehensive_hurst(token):
         grouped_df['regime'] = grouped_df['regime_info'].apply(lambda x: x[0])
         grouped_df['regime_desc'] = grouped_df['regime_info'].apply(lambda x: x[2])
         
-        return grouped_df.set_index('time_label')[['Hurst', 'regime', 'regime_desc']]
+        # Return DataFrame with unique index
+        result_df = grouped_df.set_index('time_label')[['Hurst', 'regime', 'regime_desc']]
+        
+        # Create standard 48-block time labels
+        standard_labels = [f'{h:02d}:{m:02d}' for h in range(24) for m in [0, 30]]
+        
+        # Reindex with standard labels, filling with NaN
+        result_df = result_df.reindex(standard_labels)
+        
+        return result_df
     
     except Exception as e:
         st.error(f"Error processing {token}: {e}")
