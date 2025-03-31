@@ -38,6 +38,9 @@ rolling_window = 20  # Window size for volatility calculation
 expected_points = 48  # Expected data points per pair over 24 hours
 singapore_timezone = pytz.timezone('Asia/Singapore')
 
+# Set extreme volatility threshold
+extreme_vol_threshold = 1.0  # 100% annualized volatility
+
 # Fetch all available tokens from DB
 @st.cache_data(show_spinner="Fetching tokens...")
 def fetch_all_tokens():
@@ -192,10 +195,21 @@ def fetch_and_calculate_volatility(token):
         last_24h_vol['original_datetime'] = last_24h_vol.index
         last_24h_vol['time_label'] = last_24h_vol.index.strftime('%H:%M')
         
+        # Calculate 24-hour average volatility
+        last_24h_vol['avg_24h_vol'] = last_24h_vol['realized_vol'].mean()
+        
         # Classify volatility
         last_24h_vol['vol_info'] = last_24h_vol['realized_vol'].apply(classify_volatility)
         last_24h_vol['vol_regime'] = last_24h_vol['vol_info'].apply(lambda x: x[0])
         last_24h_vol['vol_desc'] = last_24h_vol['vol_info'].apply(lambda x: x[2])
+        
+        # Also classify the 24-hour average
+        last_24h_vol['avg_vol_info'] = last_24h_vol['avg_24h_vol'].apply(classify_volatility)
+        last_24h_vol['avg_vol_regime'] = last_24h_vol['avg_vol_info'].apply(lambda x: x[0])
+        last_24h_vol['avg_vol_desc'] = last_24h_vol['avg_vol_info'].apply(lambda x: x[2])
+        
+        # Flag extreme volatility events
+        last_24h_vol['is_extreme'] = last_24h_vol['realized_vol'] >= extreme_vol_threshold
         
         print(f"[{token}] Successful Volatility Calculation")
         return last_24h_vol
@@ -273,19 +287,132 @@ if token_results:
     st.markdown("Values shown as annualized volatility percentage")
     st.dataframe(styled_table, height=700, use_container_width=True)
     
-    st.subheader("Current Market Volatility Overview (Singapore Time)")
-    latest_values = {}
-    for token, df in token_results.items():
-        if not df.empty and not df['realized_vol'].isna().all():
-            latest = df['realized_vol'].iloc[-1]
-            regime = df['vol_desc'].iloc[-1]
-            latest_values[token] = (latest, regime)
+    # Create ranking table based on average volatility
+    st.subheader("Volatility Ranking (24-Hour Average, Descending Order)")
     
-    if latest_values:
-        low_vol = sum(1 for v, r in latest_values.values() if v < 0.3)
-        medium_vol = sum(1 for v, r in latest_values.values() if 0.3 <= v < 0.6)
-        high_vol = sum(1 for v, r in latest_values.values() if 0.6 <= v < 1.0)
-        extreme_vol = sum(1 for v, r in latest_values.values() if v >= 1.0)
+    ranking_data = []
+    for token, df in token_results.items():
+        if not df.empty and 'avg_24h_vol' in df.columns and not df['avg_24h_vol'].isna().all():
+            avg_vol = df['avg_24h_vol'].iloc[0]  # All rows have the same avg value
+            vol_regime = df['avg_vol_desc'].iloc[0]
+            max_vol = df['realized_vol'].max()
+            min_vol = df['realized_vol'].min()
+            ranking_data.append({
+                'Token': token,
+                'Avg Vol (%)': (avg_vol * 100).round(1),
+                'Regime': vol_regime,
+                'Max Vol (%)': (max_vol * 100).round(1),
+                'Min Vol (%)': (min_vol * 100).round(1),
+                'Vol Range (%)': ((max_vol - min_vol) * 100).round(1)
+            })
+    
+    if ranking_data:
+        ranking_df = pd.DataFrame(ranking_data)
+        # Sort by average volatility (high to low)
+        ranking_df = ranking_df.sort_values(by='Avg Vol (%)', ascending=False)
+        # Add rank column
+        ranking_df.insert(0, 'Rank', range(1, len(ranking_df) + 1))
+        
+        # Reset the index to remove it
+        ranking_df = ranking_df.reset_index(drop=True)
+        
+        # Format ranking table with colors
+        def color_regime(val):
+            if 'Low' in val:
+                return 'color: green'
+            elif 'Medium' in val:
+                return 'color: #aaaa00'
+            elif 'High' in val:
+                return 'color: orange'
+            elif 'Extreme' in val:
+                return 'color: red'
+            return ''
+        
+        def color_value(val):
+            if pd.isna(val):
+                return ''
+            elif val < 30:
+                return 'color: green'
+            elif val < 60:
+                return 'color: #aaaa00'
+            elif val < 100:
+                return 'color: orange'
+            else:
+                return 'color: red'
+        
+        # Apply styling
+        styled_ranking = ranking_df.style\
+            .applymap(color_regime, subset=['Regime'])\
+            .applymap(color_value, subset=['Avg Vol (%)', 'Max Vol (%)', 'Min Vol (%)'])
+        
+        # Display the styled dataframe
+        st.dataframe(styled_ranking, height=500, use_container_width=True)
+    else:
+        st.warning("No ranking data available.")
+    
+    # Identify and display extreme volatility events
+    st.subheader("Extreme Volatility Events (>= 100% Annualized)")
+    
+    extreme_events = []
+    for token, df in token_results.items():
+        if not df.empty and 'is_extreme' in df.columns:
+            extreme_periods = df[df['is_extreme']]
+            for idx, row in extreme_periods.iterrows():
+                # Safely access values with explicit casting to avoid attribute errors
+                vol_value = float(row['realized_vol']) if not pd.isna(row['realized_vol']) else 0.0
+                time_label = str(row['time_label']) if 'time_label' in row and not pd.isna(row['time_label']) else "Unknown"
+                
+                extreme_events.append({
+                    'Token': token,
+                    'Time': time_label,
+                    'Volatility (%)': round(vol_value * 100, 1),
+                    'Full Timestamp': idx.strftime('%Y-%m-%d %H:%M')
+                })
+    
+    if extreme_events:
+        extreme_df = pd.DataFrame(extreme_events)
+        # Sort by volatility (highest first)
+        extreme_df = extreme_df.sort_values(by='Volatility (%)', ascending=False)
+        
+        # Reset the index to remove it
+        extreme_df = extreme_df.reset_index(drop=True)
+        
+        # Display the dataframe
+        st.dataframe(extreme_df, height=300, use_container_width=True)
+        
+        # Create a more visually appealing list of extreme events
+        st.markdown("### Extreme Volatility Events Detail")
+        
+        # Only process top 10 events if there are any
+        top_events = extreme_events[:min(10, len(extreme_events))]
+        for i, event in enumerate(top_events):
+            token = event['Token']
+            time = event['Time']
+            vol = event['Volatility (%)']
+            date = event['Full Timestamp'].split(' ')[0]
+            
+            st.markdown(f"**{i+1}. {token}** at **{time}** on {date}: <span style='color:red; font-weight:bold;'>{vol}%</span> volatility", unsafe_allow_html=True)
+        
+        if len(extreme_events) > 10:
+            st.markdown(f"*... and {len(extreme_events) - 10} more extreme events*")
+        
+    else:
+        st.info("No extreme volatility events detected in the selected tokens.")
+    
+    # 24-Hour Average Volatility Distribution
+    st.subheader("24-Hour Average Volatility Overview (Singapore Time)")
+    avg_values = {}
+    for token, df in token_results.items():
+        if not df.empty and 'avg_24h_vol' in df.columns and not df['avg_24h_vol'].isna().all():
+            avg = df['avg_24h_vol'].iloc[0]  # All rows have the same avg value
+            regime = df['avg_vol_desc'].iloc[0]
+            avg_values[token] = (avg, regime)
+    
+    if avg_values:
+        low_vol = sum(1 for v, r in avg_values.values() if v < 0.3)
+        medium_vol = sum(1 for v, r in avg_values.values() if 0.3 <= v < 0.6)
+        high_vol = sum(1 for v, r in avg_values.values() if 0.6 <= v < 1.0)
+        extreme_vol = sum(1 for v, r in avg_values.values() if v >= 1.0)
         total = low_vol + medium_vol + high_vol + extreme_vol
         
         col1, col2, col3, col4 = st.columns(4)
@@ -300,7 +427,7 @@ if token_results:
         
         fig = go.Figure(data=[go.Pie(labels=labels, values=values, marker=dict(colors=colors, line=dict(color='#000000', width=2)), textinfo='label+percent', hole=.3)])
         fig.update_layout(
-            title="Current Market Volatility Distribution (Singapore Time)",
+            title="24-Hour Average Volatility Distribution (Singapore Time)",
             height=400,
             font=dict(color="#000000", size=12),
         )
@@ -311,8 +438,8 @@ if token_results:
         col3, col4 = st.columns(2)
         
         with col1:
-            st.markdown("### Low Volatility Tokens")
-            lv_tokens = [(t, v*100, r) for t, (v, r) in latest_values.items() if v < 0.3]
+            st.markdown("### Low Average Volatility Tokens")
+            lv_tokens = [(t, v*100, r) for t, (v, r) in avg_values.items() if v < 0.3]
             lv_tokens.sort(key=lambda x: x[1])
             if lv_tokens:
                 for token, value, regime in lv_tokens:
@@ -321,8 +448,8 @@ if token_results:
                 st.markdown("*No tokens in this category*")
         
         with col2:
-            st.markdown("### Medium Volatility Tokens")
-            mv_tokens = [(t, v*100, r) for t, (v, r) in latest_values.items() if 0.3 <= v < 0.6]
+            st.markdown("### Medium Average Volatility Tokens")
+            mv_tokens = [(t, v*100, r) for t, (v, r) in avg_values.items() if 0.3 <= v < 0.6]
             mv_tokens.sort(key=lambda x: x[1])
             if mv_tokens:
                 for token, value, regime in mv_tokens:
@@ -331,8 +458,8 @@ if token_results:
                 st.markdown("*No tokens in this category*")
         
         with col3:
-            st.markdown("### High Volatility Tokens")
-            hv_tokens = [(t, v*100, r) for t, (v, r) in latest_values.items() if 0.6 <= v < 1.0]
+            st.markdown("### High Average Volatility Tokens")
+            hv_tokens = [(t, v*100, r) for t, (v, r) in avg_values.items() if 0.6 <= v < 1.0]
             hv_tokens.sort(key=lambda x: x[1])
             if hv_tokens:
                 for token, value, regime in hv_tokens:
@@ -341,8 +468,8 @@ if token_results:
                 st.markdown("*No tokens in this category*")
         
         with col4:
-            st.markdown("### Extreme Volatility Tokens")
-            ev_tokens = [(t, v*100, r) for t, (v, r) in latest_values.items() if v >= 1.0]
+            st.markdown("### Extreme Average Volatility Tokens")
+            ev_tokens = [(t, v*100, r) for t, (v, r) in avg_values.items() if v >= 1.0]
             ev_tokens.sort(key=lambda x: x[1], reverse=True)
             if ev_tokens:
                 for token, value, regime in ev_tokens:
@@ -350,7 +477,7 @@ if token_results:
             else:
                 st.markdown("*No tokens in this category*")
     else:
-        st.warning("No data available for the selected tokens.")
+        st.warning("No average volatility data available for the selected tokens.")
 
 with st.expander("Understanding the Volatility Table"):
     st.markdown("""
@@ -368,9 +495,16 @@ with st.expander("Understanding the Volatility Table"):
     - Darker green = Lower volatility
     - Darker red = Higher volatility
     
+    **Ranking Table:**
+    The ranking table sorts tokens by their 24-hour average volatility from highest to lowest.
+    
+    **Extreme Volatility Events:**
+    These are specific 30-minute periods where a token's annualized volatility exceeded 100%.
+    
     **Technical details:**
     - Volatility is calculated as the standard deviation of log returns, annualized to represent the expected price variation over a year
     - Values shown are in percentage (e.g., 50.0 means 50% annualized volatility)
     - The calculation uses a rolling window of 20 one-minute price points
+    - The 24-hour average section shows the mean volatility across all 48 30-minute periods
     - Missing values (light gray cells) indicate insufficient data for calculation
     """)
