@@ -74,24 +74,18 @@ if not selected_tokens:
 
 # Universal Hurst calculation function
 def universal_hurst(ts):
-    """
-    A universal Hurst exponent calculation that works for any asset class.
-    
-    Args:
-        ts: Time series of prices (numpy array or list)
-    
-    Returns:
-        float: Hurst exponent value between 0 and 1, or np.nan if calculation fails
-    """
-    # Convert to numpy array and ensure floating point
+    if ts is None:  # Check for None input
+        return np.nan
+
     try:
         ts = np.array(ts, dtype=float)
     except:
         return np.nan  # Return NaN if conversion fails
-        
-    # Basic data validation
+
     if len(ts) < 10 or np.any(~np.isfinite(ts)):
         return np.nan
+
+    # ... (rest of your Hurst calculation logic) ...
     
     # Convert to returns - using log returns handles any scale of asset
     # Add small epsilon to avoid log(0)
@@ -291,12 +285,18 @@ def fetch_and_calculate_hurst(token):
 
         # Resample to 1-minute timeframe
         one_min_ohlc = df['final_price'].resample('1min').ohlc().dropna()
+        
+        if one_min_ohlc.empty:
+            return None
 
         # Calculate Hurst for each 1-minute interval
         one_min_ohlc['Hurst'] = one_min_ohlc['close'].apply(universal_hurst)
 
         # Resample to 30-minute timeframe and average the 1-minute Hurst values
         thirty_min_hurst = one_min_ohlc['Hurst'].resample('30min').mean().dropna()
+        
+        if thirty_min_hurst.empty:
+            return None
 
         # Filter to last 24 hours (48 x 30min intervals)
         last_24h_hurst = thirty_min_hurst.iloc[-48:]
