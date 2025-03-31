@@ -14,13 +14,16 @@ st.set_page_config(
 )
 
 # --- DB CONFIG ---
-db_config = st.secrets["database"]
-
-db_uri = (
-    f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
-    f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-)
-engine = create_engine(db_uri)
+try:
+    db_config = st.secrets["database"]
+    db_uri = (
+        f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
+        f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+    )
+    engine = create_engine(db_uri)
+except Exception as e:
+    st.error(f"Error connecting to the database: {e}")
+    st.stop()
 
 # --- UI Setup ---
 st.set_option('deprecation.showPyplotGlobalUse', False)
@@ -34,11 +37,14 @@ rolling_window = 20  # Window size for Hurst calculation
 expected_points = 48  # Expected data points per pair over 24 hours
 
 # Fetch all available tokens from DB
-@st.cache_data
+@st.cache_data(show_spinner="Fetching tokens...")
 def fetch_all_tokens():
     query = "SELECT DISTINCT pair_name FROM public.oracle_price_log ORDER BY pair_name"
     try:
         df = pd.read_sql(query, engine)
+        if df.empty:
+            st.error("No tokens found in the database.")
+            return []
         return df['pair_name'].tolist()
     except Exception as e:
         st.error(f"Error fetching tokens: {e}")
@@ -74,31 +80,31 @@ if not selected_tokens:
 
 # Universal Hurst calculation function
 def universal_hurst(ts):
-    print(f"universal_hurst called with ts: {ts}")  # Debug print
-    print(f"Type of ts: {type(ts)}")  # Debug print
+    print(f"universal_hurst called with ts: {ts}")
+    print(f"Type of ts: {type(ts)}")
     if isinstance(ts, (list, np.ndarray, pd.Series)) and len(ts) > 0:
-        print(f"First few values of ts: {ts[:5]}")  # Debug print
+        print(f"First few values of ts: {ts[:5]}")
     
-    if ts is None:  # Check for None input
-        print("ts is None")  # Debug print
+    if ts is None:
+        print("ts is None")
         return np.nan
     
-    if isinstance(ts, pd.Series) and ts.empty:  # Check for empty series
-        print("ts is empty series")  # Debug print
+    if isinstance(ts, pd.Series) and ts.empty:
+        print("ts is empty series")
         return np.nan
         
-    if not isinstance(ts, (list, np.ndarray, pd.Series)): # Added check
+    if not isinstance(ts, (list, np.ndarray, pd.Series)):
         print(f"ts is not a list, NumPy array, or Series. Type: {type(ts)}")
         return np.nan
 
     try:
         ts = np.array(ts, dtype=float)
     except Exception as e:
-        print(f"ts cannot be converted to float: {e}")  # Debug print
-        return np.nan  # Return NaN if conversion fails
+        print(f"ts cannot be converted to float: {e}")
+        return np.nan
 
     if len(ts) < 10 or np.any(~np.isfinite(ts)):
-        print(f"ts length < 10 or non-finite values: {ts}")  # Debug print
+        print(f"ts length < 10 or non-finite values: {ts}")
         return np.nan
 
     # Convert to returns - using log returns handles any scale of asset
@@ -215,6 +221,7 @@ def detailed_regime_classification(hurst):
         return ("TREND", 3, "Strong trending")
 
 # Fetch and calculate Hurst for a token with 30min timeframe
+@st.cache_data(ttl=600, show_spinner="Calculating Hurst exponents...")  # Cache for 10 minutes
 def fetch_and_calculate_hurst(token):
     end_time = datetime.utcnow()
     start_time = end_time - timedelta(days=lookback_days + 1)
@@ -225,24 +232,29 @@ def fetch_and_calculate_hurst(token):
     AND pair_name = '{token}';
     """
     try:
+        print(f"Executing query for token: {token}")  # Debug
         df = pd.read_sql(query, engine)
+        print(f"Query executed successfully for token: {token}")  # Debug
         if df.empty:
-            print(f"No data found for token: {token}")  # Debug print
+            print(f"No data found for token: {token}")
             return None
+        print(f"Data fetched for token {token}: shape = {df.shape}") # Debug
+        print(f"First few rows of data for token {token}:\n{df.head()}") #Debug
+
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.set_index('timestamp').sort_index()
         one_min_ohlc = df['final_price'].resample('1min').ohlc().dropna()
         if one_min_ohlc.empty:
-            print(f"No OHLC data for token: {token}")  # Debug print
+            print(f"No OHLC data for token: {token}")
             return None
             
-        print(f"Token: {token}, one_min_ohlc['close'] type: {type(one_min_ohlc['close'])}") # Add this line
-        print(f"Token: {token}, one_min_ohlc['close'] first 5 values: {one_min_ohlc['close'].head()}") # Add this line
+        print(f"Token: {token}, one_min_ohlc['close'] type: {type(one_min_ohlc['close'])}")
+        print(f"Token: {token}, one_min_ohlc['close'] first 5 values: {one_min_ohlc['close'].head()}")
             
         one_min_ohlc['Hurst'] = one_min_ohlc['close'].apply(universal_hurst)
         thirty_min_hurst = one_min_ohlc['Hurst'].resample('30min').mean().dropna()
         if thirty_min_hurst.empty:
-            print(f"No 30-min Hurst data for token: {token}")  # Debug print
+            print(f"No 30-min Hurst data for token: {token}")
             return None
         last_24h_hurst = thirty_min_hurst.iloc[-48:]
         last_24h_hurst = last_24h_hurst.to_frame()
@@ -253,6 +265,7 @@ def fetch_and_calculate_hurst(token):
         return last_24h_hurst
     except Exception as e:
         st.error(f"Error processing {token}: {e}")
+        print(f"Error processing {token}: {e}")  # Print to console for detailed error
         return None
 
 # Show progress bar while calculating
