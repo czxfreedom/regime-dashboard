@@ -1,3 +1,5 @@
+# Save this as pages/04_Daily_Hurst_Table.py in your Streamlit app folder
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -101,11 +103,14 @@ def universal_hurst(ts):
     adjusted_ts = ts + epsilon
     log_returns = np.diff(np.log(adjusted_ts))
     
-    if len(log_returns) > 0 and np.all(log_returns == 0):
+    # If all returns are exactly zero (completely flat price), return 0.5
+    if np.all(log_returns == 0):
         return 0.5
     
+    # Use multiple methods and average for robustness
     hurst_estimates = []
     
+    # Method 1: Rescaled Range (R/S) Analysis
     try:
         max_lag = min(len(log_returns) // 4, 40)
         lags = range(10, max_lag, max(1, (max_lag - 10) // 10))
@@ -138,6 +143,7 @@ def universal_hurst(ts):
     except Exception as e:
         pass
     
+    # Method 2: Variance Method
     try:
         max_lag = min(len(log_returns) // 4, 40)
         lags = range(10, max_lag, max(1, (max_lag - 10) // 10))
@@ -160,6 +166,7 @@ def universal_hurst(ts):
     except Exception as e:
         pass
     
+    # Fallback to autocorrelation method if other methods fail
     if not hurst_estimates and len(log_returns) > 1:
         try:
             autocorr = np.corrcoef(log_returns[:-1], log_returns[1:])[0, 1]
@@ -168,6 +175,7 @@ def universal_hurst(ts):
         except Exception as e:
             pass
     
+    # If we have estimates, aggregate them and constrain to 0-1 range
     if hurst_estimates:
         valid_estimates = [h for h in hurst_estimates if 0 <= h <= 1]
         if not valid_estimates and hurst_estimates:
@@ -204,6 +212,7 @@ def detailed_regime_classification(hurst):
 @st.cache_data(ttl=600, show_spinner="Calculating Hurst exponents...")
 def fetch_and_calculate_hurst(token):
     end_time_utc = datetime.utcnow()
+    singapore_timezone = pytz.timezone('Asia/Singapore')
     end_time_singapore = end_time_utc.replace(tzinfo=pytz.utc).astimezone(singapore_timezone)
     start_time_singapore = end_time_singapore - timedelta(days=lookback_days)
 
@@ -219,22 +228,20 @@ def fetch_and_calculate_hurst(token):
         if df.empty:
             return None
 
-        # Convert timestamps to Singapore time immediately
-        df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_localize('UTC').dt.tz_convert(singapore_timezone)
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.set_index('timestamp').sort_index()
-
         one_min_ohlc = df['final_price'].resample('1min').ohlc().dropna()
         if one_min_ohlc.empty:
             return None
-
+            
+        # Corrected line: Apply universal_hurst to the 'close' prices directly
         one_min_ohlc['Hurst'] = one_min_ohlc['close'].rolling(window=rolling_window).apply(universal_hurst)
 
         thirty_min_hurst = one_min_ohlc['Hurst'].resample('30min').mean().dropna()
         if thirty_min_hurst.empty:
             return None
-
         last_24h_hurst = thirty_min_hurst.iloc[-48:]
-        last_24h_hurst['time_label'] = last_24h_hurst.index.strftime('%H:%M')  # Time in Singapore time
+        last_24h_hurst['time_label'] = last_24h_hurst.index.tz_localize('UTC').tz_convert(singapore_timezone).strftime('%H:%M') # Convert time here
         last_24h_hurst = last_24h_hurst.to_frame()
         last_24h_hurst['regime_info'] = last_24h_hurst['Hurst'].apply(detailed_regime_classification)
         last_24h_hurst['regime'] = last_24h_hurst['regime_info'].apply(lambda x: x[0])
@@ -251,7 +258,7 @@ status_text = st.empty()
 # Calculate Hurst for each token
 token_results = {}
 for i, token in enumerate(selected_tokens):
-    try:
+    try:  # Added try-except around token processing
         progress_bar.progress((i) / len(selected_tokens))
         status_text.text(f"Processing {token} ({i+1}/{len(selected_tokens)})")
         result = fetch_and_calculate_hurst(token)
