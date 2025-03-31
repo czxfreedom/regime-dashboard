@@ -3,11 +3,11 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from datetime import datetime, timedelta, UTC
 
 st.set_page_config(
-    page_title="Daily Hurst Table (Multi-Window Analysis)",
+    page_title="Daily Hurst Table",
     page_icon="📊",
     layout="wide"
 )
@@ -21,161 +21,141 @@ db_uri = (
 )
 engine = create_engine(db_uri)
 
-def calculate_multi_window_hurst(prices, num_windows=5, window_overlap=0.5):
-    if len(prices) < 20:
+def calculate_hurst(prices):
+    """
+    Simple Hurst exponent calculation
+    """
+    if len(prices) < 10:
         return 0.5
     
-    total_length = len(prices)
-    window_size = total_length // num_windows
-    overlap_size = int(window_size * window_overlap)
-    
-    hurst_estimates = []
-    
-    for i in range(num_windows):
-        start = max(0, i * (window_size - overlap_size))
-        end = min(total_length, start + window_size)
+    try:
+        # Log returns
+        log_returns = np.diff(np.log(prices))
         
-        window_prices = prices[start:end]
+        # Autocorrelation method
+        autocorr = np.corrcoef(log_returns[:-1], log_returns[1:])[0, 1]
         
-        if len(window_prices) < 10:
-            continue
+        # Map to Hurst-like value
+        hurst = 0.5 + (np.sign(autocorr) * min(abs(autocorr), 0.4))
         
-        try:
-            log_returns = np.diff(np.log(window_prices))
-            
-            hurst_methods = []
-            
-            try:
-                autocorr = np.corrcoef(log_returns[:-1], log_returns[1:])[0, 1]
-                hurst_methods.append(0.5 + (np.sign(autocorr) * min(abs(autocorr), 0.4)))
-            except:
-                pass
-            
-            try:
-                lags = [1, 2, 4]
-                var_ratios = []
-                for lag in lags:
-                    var_ratio = np.var(log_returns[lag:]) / np.var(log_returns)
-                    var_ratios.append(var_ratio)
-                
-                hurst_var = 0.5 + np.mean(var_ratios) / 2
-                hurst_methods.append(hurst_var)
-            except:
-                pass
-            
-            try:
-                cumulative_returns = np.cumsum(log_returns)
-                cum_corr = np.corrcoef(cumulative_returns[:-1], cumulative_returns[1:])[0, 1]
-                hurst_methods.append(0.5 + (np.sign(cum_corr) * min(abs(cum_corr), 0.4)))
-            except:
-                pass
-            
-            if hurst_methods:
-                hurst_estimates.append(np.median(hurst_methods))
-        
-        except Exception as e:
-            continue
-    
-    return np.median(hurst_estimates) if hurst_estimates else 0.5
+        return max(0, min(1, hurst))
+    except:
+        return 0.5
 
-def calculate_comprehensive_hurst(token):
+def process_token_data(token):
+    # Get current time and 24 hours ago
     end_time = datetime.now(UTC)
     start_time = end_time - timedelta(days=1)
     
-    # Convert timestamps to strings in the format PostgreSQL expects
-    start_time_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
-    
-    query = text(f"""
-    WITH time_series AS (
+    # Fetch data query
+    query = f"""
+    WITH time_blocks AS (
         SELECT 
             generate_series(
-                date_trunc('day', '{start_time_str}'::timestamp) + INTERVAL '8 hours',
-                date_trunc('day', '{start_time_str}'::timestamp) + INTERVAL '32 hours',
+                date_trunc('day', '{start_time}'::timestamp) + INTERVAL '8 hours',
+                date_trunc('day', '{start_time}'::timestamp) + INTERVAL '32 hours',
                 INTERVAL '30 minutes'
-            ) AS block_time
-    ),
-    token_data AS (
-        SELECT 
-            time_series.block_time,
-            final_price
-        FROM time_series
-        LEFT JOIN public.oracle_price_log ON 
-            pair_name = '{token}' AND
-            created_at >= time_series.block_time AND
-            created_at < time_series.block_time + INTERVAL '30 minutes'
+            ) AS block_start
     )
     SELECT 
-        block_time,
+        time_blocks.block_start AS time_block,
         final_price
-    FROM token_data
-    WHERE final_price IS NOT NULL
-    ORDER BY block_time;
-    """)
+    FROM time_blocks
+    LEFT JOIN public.oracle_price_log ON 
+        pair_name = '{token}' AND
+        created_at >= time_blocks.block_start AND
+        created_at < time_blocks.block_start + INTERVAL '30 minutes'
+    ORDER BY time_block;
+    """
     
-    try:
-        with engine.connect() as connection:
-            df = pd.read_sql(query, connection)
+    # Read data
+    df = pd.read_sql(query, engine)
+    
+    # Group by time blocks and calculate Hurst
+    def block_hurst(block_data):
+        prices = block_data['final_price'].dropna()
+        return calculate_hurst(prices) if len(prices) > 0 else np.nan
+    
+    grouped = df.groupby('time_block').apply(block_hurst).reset_index()
+    grouped.columns = ['time_block', 'Hurst']
+    
+    # Create time labels
+    grouped['time_label'] = grouped['time_block'].dt.strftime('%H:%M')
+    
+    # Classify regime
+    def classify_regime(hurst):
+        if pd.isna(hurst):
+            return "UNKNOWN"
+        elif hurst < 0.4:
+            return "MEAN-REVERT"
+        elif hurst > 0.6:
+            return "TREND"
+        else:
+            return "NOISE"
+    
+    grouped['regime'] = grouped['Hurst'].apply(classify_regime)
+    
+    # Ensure 48 time blocks
+    standard_labels = [f'{h:02d}:{m:02d}' for h in range(24) for m in [0, 30]]
+    result = grouped.set_index('time_label')['Hurst'].reindex(standard_labels)
+    
+    return result
+
+# Fetch available tokens
+def get_available_tokens():
+    query = "SELECT DISTINCT pair_name FROM public.oracle_price_log"
+    return pd.read_sql(query, engine)['pair_name'].tolist()
+
+# Streamlit app
+st.title("Daily Hurst Table")
+st.subheader("Market Regime Analysis")
+
+# Generate button
+if st.button("Generate Hurst Table"):
+    # Get all tokens
+    tokens = get_available_tokens()
+    
+    # Progress tracking
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    # Store results
+    results = {}
+    
+    # Process each token
+    for i, token in enumerate(tokens):
+        progress_bar.progress((i+1)/len(tokens))
+        status_text.text(f"Processing {token} ({i+1}/{len(tokens)})")
         
-        if df.empty:
-            return None
+        try:
+            token_result = process_token_data(token)
+            results[token] = token_result
+        except Exception as e:
+            st.error(f"Error processing {token}: {e}")
+    
+    # Finalize
+    progress_bar.progress(1.0)
+    status_text.text("Processing complete")
+
+    # Create DataFrame
+    if results:
+        hurst_table = pd.DataFrame(results).round(2)
         
-        # Group by time blocks and calculate Hurst
-        grouped_df = df.groupby('block_time').apply(
-            lambda x: calculate_multi_window_hurst(x['final_price'].values)
-        ).reset_index()
-        grouped_df.columns = ['time_block', 'Hurst']
-        
-        grouped_df['time_label'] = grouped_df['time_block'].dt.strftime('%H:%M')
-        
-        def classify_regime(hurst):
-            if pd.isna(hurst):
-                return ("UNKNOWN", 0, "Insufficient data")
-            elif hurst < 0.2:
-                return ("MEAN-REVERT", 3, "Strong mean-reversion")
-            elif hurst < 0.4:
-                return ("MEAN-REVERT", 2, "Moderate mean-reversion")
-            elif hurst <= 0.6:
-                return ("NOISE", 0, "Random walk")
-            elif hurst < 0.8:
-                return ("TREND", 2, "Moderate trending")
+        # Styling
+        def color_cells(val):
+            if pd.isna(val):
+                return 'background-color: #f5f5f5'
+            elif val < 0.4:
+                intensity = max(0, min(255, int(255 * (0.4 - val) / 0.4)))
+                return f'background-color: rgba(255, {255-intensity}, {255-intensity}, 0.7); color: black'
+            elif val > 0.6:
+                intensity = max(0, min(255, int(255 * (val - 0.6) / 0.4)))
+                return f'background-color: rgba({255-intensity}, 255, {255-intensity}, 0.7); color: black'
             else:
-                return ("TREND", 3, "Strong trending")
+                return 'background-color: rgba(200, 200, 200, 0.5); color: black'
         
-        grouped_df['regime_info'] = grouped_df['Hurst'].apply(classify_regime)
-        grouped_df['regime'] = grouped_df['regime_info'].apply(lambda x: x[0])
-        grouped_df['regime_desc'] = grouped_df['regime_info'].apply(lambda x: x[2])
-        
-        standard_labels = [f'{h:02d}:{m:02d}' for h in range(24) for m in [0, 30]]
-        
-        result_df = grouped_df.set_index('time_label')[['Hurst', 'regime', 'regime_desc']]
-        result_df = result_df.reindex(standard_labels)
-        
-        return result_df
-    
-    except Exception as e:
-        st.error(f"Error processing {token}: {e}")
-        return None
-
-def check_data_availability():
-    try:
-        with engine.connect() as connection:
-            query = text("""
-                SELECT 
-                    pair_name, 
-                    COUNT(*) as record_count
-                FROM public.oracle_price_log
-                GROUP BY pair_name
-                ORDER BY record_count DESC
-                LIMIT 100;
-            """)
-            
-            result = connection.execute(query)
-            data = result.fetchall()
-            
-            return [row[0] for row in data]
-    
-    except Exception as e:
-        st.error(f"Error checking data availability: {e}")
-        return []
-
-# (Rest of the code remains the same as in the previous artifact)
+        # Display table
+        styled_table = hurst_table.style.applymap(color_cells)
+        st.dataframe(styled_table, height=700, use_container_width=True)
+    else:
+        st.warning("No data processed")
