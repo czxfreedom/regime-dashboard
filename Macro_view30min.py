@@ -271,43 +271,47 @@ def detailed_regime_classification(hurst):
 def fetch_and_calculate_hurst(token):
     # Fetch data from DB for the last 24 hours
     end_time = datetime.utcnow()
-    start_time = end_time - timedelta(days=lookback_days+1)  # Extra day for calculation buffer
-    
+    start_time = end_time - timedelta(days=lookback_days + 1)  # Extra day for calculation buffer
+
     query = f"""
     SELECT created_at AT TIME ZONE 'UTC' + INTERVAL '8 hours' AS timestamp, final_price, pair_name
     FROM public.oracle_price_log
     WHERE created_at BETWEEN '{start_time}' AND '{end_time}'
     AND pair_name = '{token}';
     """
-    
+
     try:
         df = pd.read_sql(query, engine)
         if df.empty:
             return None
-        
+
         # Preprocess data
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.set_index('timestamp').sort_index()
-        
-        # Resample to 30-minute timeframe
-        ohlc = df['final_price'].resample(timeframe).ohlc().dropna()
-        
-        # Calculate Hurst with rolling window (20 bars)
-        ohlc['Hurst'] = ohlc['close'].rolling(rolling_window).apply(universal_hurst)
-        
-        # Filter to last 24 hours
-        last_24h = ohlc.iloc[-48:]
-        
-        # Add regime classification
-        last_24h['regime_info'] = last_24h['Hurst'].apply(detailed_regime_classification)
-        last_24h['regime'] = last_24h['regime_info'].apply(lambda x: x[0])
-        last_24h['regime_desc'] = last_24h['regime_info'].apply(lambda x: x[2])
-        
+
+        # Resample to 1-minute timeframe
+        one_min_ohlc = df['final_price'].resample('1min').ohlc().dropna()
+
+        # Calculate Hurst for each 1-minute interval
+        one_min_ohlc['Hurst'] = one_min_ohlc['close'].apply(universal_hurst)
+
+        # Resample to 30-minute timeframe and average the 1-minute Hurst values
+        thirty_min_hurst = one_min_ohlc['Hurst'].resample('30min').mean().dropna()
+
+        # Filter to last 24 hours (48 x 30min intervals)
+        last_24h_hurst = thirty_min_hurst.iloc[-48:]
+
         # Create half-hour time labels (00:00, 00:30, 01:00, etc.)
-        last_24h['time_label'] = last_24h.index.strftime('%H:%M')
-        
-        return last_24h
-    
+        last_24h_hurst = last_24h_hurst.to_frame() #Convert Series to DataFrame
+        last_24h_hurst['time_label'] = last_24h_hurst.index.strftime('%H:%M')
+
+        # Add regime classification
+        last_24h_hurst['regime_info'] = last_24h_hurst['Hurst'].apply(detailed_regime_classification)
+        last_24h_hurst['regime'] = last_24h_hurst['regime_info'].apply(lambda x: x[0])
+        last_24h_hurst['regime_desc'] = last_24h_hurst['regime_info'].apply(lambda x: x[2])
+
+        return last_24h_hurst
+
     except Exception as e:
         st.error(f"Error processing {token}: {e}")
         return None
@@ -491,7 +495,7 @@ with st.expander("Understanding the Daily Hurst Table"):
     - Darker green = Stronger trending
     
     **Technical details:**
-    - Each Hurst value is calculated using a rolling window of 20 bars (10 hours of data)
+    - Each Hurst value is calculated by averaging the Hurst values of 30 one-minute bars.
     - Values are calculated using multiple methods (R/S Analysis, Variance Method, and DFA)
     - Missing values (blank cells) indicate insufficient data for calculation
     """)
