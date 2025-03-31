@@ -21,19 +21,9 @@ db_uri = (
 )
 engine = create_engine(db_uri)
 
-# Hurst Calculation Function
+# Hurst Calculation Function (previous implementation remains the same)
 def calculate_rolling_hurst(prices, window=30, min_periods=10):
-    """
-    Calculate rolling Hurst exponent with multiple estimation techniques
-    
-    Args:
-        prices (array-like): Price series
-        window (int): Rolling window size
-        min_periods (int): Minimum periods for calculation
-    
-    Returns:
-        array: Rolling Hurst exponent estimates
-    """
+    # (Previous implementation of rolling Hurst calculation)
     if len(prices) < min_periods:
         return np.full(len(prices), 0.5)
     
@@ -177,7 +167,7 @@ def calculate_comprehensive_hurst(token):
         st.error(f"Error processing {token}: {e}")
         return None
 
-# Fetch tokens and create UI
+# Fetch all tokens
 @st.cache_data
 def fetch_all_tokens():
     query = "SELECT DISTINCT pair_name FROM public.oracle_price_log ORDER BY pair_name"
@@ -186,22 +176,17 @@ def fetch_all_tokens():
         return df['pair_name'].tolist()
     except Exception as e:
         st.error(f"Error fetching tokens: {e}")
-        return ["BTC", "ETH", "SOL", "DOGE", "PEPE", "AI16Z"]
+        return []
 
 # Main Streamlit app
 st.title("Daily Hurst Table (Rolling Analysis)")
 st.subheader("All Trading Pairs - Last 24 Hours")
 
-# Token selection
+# Fetch and display all tokens automatically
 all_tokens = fetch_all_tokens()
-selected_tokens = st.multiselect(
-    "Select Tokens", 
-    all_tokens,
-    default=all_tokens[:5] if len(all_tokens) > 5 else all_tokens
-)
 
-# Calculate Hurst for selected tokens
-if st.button("Calculate Hurst"):
+# Calculate Hurst for all tokens
+if st.button("Generate Hurst Table"):
     # Progress tracking
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -210,10 +195,10 @@ if st.button("Calculate Hurst"):
     token_results = {}
 
     # Calculate for each token
-    for i, token in enumerate(selected_tokens):
+    for i, token in enumerate(all_tokens):
         # Update progress
-        progress_bar.progress((i+1) / len(selected_tokens))
-        status_text.text(f"Processing {token} ({i+1}/{len(selected_tokens)})")
+        progress_bar.progress((i+1) / len(all_tokens))
+        status_text.text(f"Processing {token} ({i+1}/{len(all_tokens)})")
         
         # Calculate Hurst
         result = calculate_comprehensive_hurst(token)
@@ -222,7 +207,7 @@ if st.button("Calculate Hurst"):
 
     # Finalize progress
     progress_bar.progress(1.0)
-    status_text.text(f"Processed {len(token_results)}/{len(selected_tokens)} tokens")
+    status_text.text(f"Processed {len(token_results)}/{len(all_tokens)} tokens")
 
     # Display results if any
     if token_results:
@@ -256,3 +241,5 @@ if st.button("Calculate Hurst"):
         # Display table
         st.markdown("## Hurst Exponent Table")
         st.dataframe(styled_table, height=700, use_container_width=True)
+    else:
+        st.warning("No tokens could be processed.")
