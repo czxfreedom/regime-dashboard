@@ -772,7 +772,7 @@ fig2.update_layout(
     legend=dict(
         orientation="h",  # horizontal orientation
         yanchor="top",
-        y=-0.5,  # position further below the chart (changed from -0.15 to -0.25)
+        y=-0.75,  # position further below the chart (changed from -0.15 to -0.25)
         xanchor="center",
         x=0.5,  # centered
         bgcolor="rgba(255,255,255,0.9)",
