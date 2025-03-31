@@ -652,6 +652,7 @@ for i in range(1, len(df_plot)):
     )
 
 # Create spaced-out regime change labels (limit frequency)
+# Only show labels for significant changes
 # Only show labels for significant changes and ensure they don't overlap
 label_positions = []
 min_label_distance = 5  # Minimum distance between labels in bars
@@ -737,21 +738,47 @@ fig2.add_trace(go.Scatter(
     yaxis='y2'
 ))
 
-# Update layout with better contrast and FIXED LEGEND POSITIONING
+# Add dummy traces for regime legend
+fig2.add_trace(go.Scatter(
+    x=[None], y=[None],
+    mode='markers',
+    marker=dict(size=10, color="rgba(255,0,0,0.7)"),
+    name="Mean-Reversion",
+    showlegend=True
+))
+
+fig2.add_trace(go.Scatter(
+    x=[None], y=[None],
+    mode='markers',
+    marker=dict(size=10, color="rgba(200,200,200,0.5)"),
+    name="Random/Noise",
+    showlegend=True
+))
+
+fig2.add_trace(go.Scatter(
+    x=[None], y=[None],
+    mode='markers',
+    marker=dict(size=10, color="rgba(0,200,0,0.7)"),
+    name="Trending",
+    showlegend=True
+))
+
+# Update layout with legend below the chart
 fig2.update_layout(
     title=f"Price Chart with Regime Overlay for {selected_token} ({timeframe})",
     xaxis_title="Time",
     yaxis_title="Price",
     height=500,
     legend=dict(
-        orientation="h",
-        yanchor="bottom",
-        y=1.02,
-        xanchor="right",
-        x=1,
+        orientation="h",  # horizontal orientation
+        yanchor="top",
+        y=-0.15,  # position below the chart
+        xanchor="center",
+        x=0.5,  # centered
         bgcolor="rgba(255,255,255,0.9)",
         bordercolor="black",
-        borderwidth=1
+        borderwidth=1,
+        title="Regime Types"
     ),
     yaxis2=dict(
         title="Hurst",
@@ -760,7 +787,7 @@ fig2.update_layout(
         anchor="x",
         overlaying="y",
         side="right",
-        range=[0, 1],  # Fixed range for Hurst
+        range=[0, 1],
         showgrid=True,
         gridcolor="rgba(0,0,255,0.1)"
     ),
@@ -768,59 +795,7 @@ fig2.update_layout(
     plot_bgcolor='white',
     paper_bgcolor='white',
     font=dict(size=12),
-    margin=dict(r=180)  # INCREASED right margin to make space for the legend
-)
-
-# FIXED LEGEND PLACEMENT - moved further right to avoid overlap
-# Mean-reversion legend item
-fig2.add_shape(
-    type="rect", xref="paper", yref="paper",
-    x0=1.05, y0=0.80, x1=1.08, y1=0.85,  # Increased x0 and x1 values
-    fillcolor="rgba(255,0,0,0.7)", line=dict(color="black", width=1)
-)
-fig2.add_annotation(
-    xref="paper", yref="paper", x=1.10, y=0.825,  # Increased x value
-    text="Mean-Reversion",
-    showarrow=False,
-    font=dict(size=12),
-    align="left"
-)
-
-# Random/Noise legend item
-fig2.add_shape(
-    type="rect", xref="paper", yref="paper",
-    x0=1.05, y0=0.70, x1=1.08, y1=0.75,  # Increased x0 and x1 values
-    fillcolor="rgba(200,200,200,0.5)", line=dict(color="black", width=1)
-)
-fig2.add_annotation(
-    xref="paper", yref="paper", x=1.10, y=0.725,  # Increased x value
-    text="Random/Noise",
-    showarrow=False,
-    font=dict(size=12),
-    align="left"
-)
-
-# Trending legend item
-fig2.add_shape(
-    type="rect", xref="paper", yref="paper",
-    x0=1.05, y0=0.60, x1=1.08, y1=0.65,  # Increased x0 and x1 values
-    fillcolor="rgba(0,200,0,0.7)", line=dict(color="black", width=1)
-)
-fig2.add_annotation(
-    xref="paper", yref="paper", x=1.10, y=0.625,  # Increased x value
-    text="Trending",
-    showarrow=False,
-    font=dict(size=12),
-    align="left"
-)
-
-# Add legend title
-fig2.add_annotation(
-    xref="paper", yref="paper", x=1.10, y=0.90,  # Increased x value
-    text="<b>Regime Legend</b>",
-    showarrow=False,
-    font=dict(size=14),
-    align="center"
+    margin=dict(b=80)  # Add bottom margin for the legend
 )
 
 # Display both charts
