@@ -3,10 +3,10 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
 import plotly.graph_objects as go
 from sqlalchemy import create_engine
 from datetime import datetime, timedelta
+import pytz
 
 st.set_page_config(
     page_title="Daily Hurst Table",
@@ -15,31 +15,38 @@ st.set_page_config(
 )
 
 # --- DB CONFIG ---
-db_config = st.secrets["database"]
-
-db_uri = (
-    f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
-    f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-)
-engine = create_engine(db_uri)
+try:
+    db_config = st.secrets["database"]
+    db_uri = (
+        f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
+        f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+    )
+    engine = create_engine(db_uri)
+except Exception as e:
+    st.error(f"Error connecting to the database: {e}")
+    st.stop()
 
 # --- UI Setup ---
 st.set_option('deprecation.showPyplotGlobalUse', False)
 st.title("Daily Hurst Table (30min)")
-st.subheader("All Trading Pairs - Last 24 Hours")
+st.subheader("All Trading Pairs - Last 24 Hours (Singapore Time)")
 
 # Define parameters for the 30-minute timeframe
 timeframe = "30min"
 lookback_days = 1  # 24 hours
 rolling_window = 20  # Window size for Hurst calculation
 expected_points = 48  # Expected data points per pair over 24 hours
+singapore_timezone = pytz.timezone('Asia/Singapore')
 
 # Fetch all available tokens from DB
-@st.cache_data
+@st.cache_data(show_spinner="Fetching tokens...")
 def fetch_all_tokens():
     query = "SELECT DISTINCT pair_name FROM public.oracle_price_log ORDER BY pair_name"
     try:
         df = pd.read_sql(query, engine)
+        if df.empty:
+            st.error("No tokens found in the database.")
+            return []
         return df['pair_name'].tolist()
     except Exception as e:
         st.error(f"Error fetching tokens: {e}")
@@ -75,27 +82,34 @@ if not selected_tokens:
 
 # Universal Hurst calculation function
 def universal_hurst(ts):
-    """
-    A universal Hurst exponent calculation that works for any asset class.
+    print(f"universal_hurst called with ts: {ts}")
+    print(f"Type of ts: {type(ts)}")
+    if isinstance(ts, (list, np.ndarray, pd.Series)) and len(ts) > 0:
+        print(f"First few values of ts: {ts[:5]}")
     
-    Args:
-        ts: Time series of prices (numpy array or list)
-    
-    Returns:
-        float: Hurst exponent value between 0 and 1, or np.nan if calculation fails
-    """
-    # Convert to numpy array and ensure floating point
-    try:
-        ts = np.array(ts, dtype=float)
-    except:
-        return np.nan  # Return NaN if conversion fails
-        
-    # Basic data validation
-    if len(ts) < 10 or np.any(~np.isfinite(ts)):
+    if ts is None:
+        print("ts is None")
         return np.nan
     
+    if isinstance(ts, pd.Series) and ts.empty:
+        print("ts is empty series")
+        return np.nan
+        
+    if not isinstance(ts, (list, np.ndarray, pd.Series)):
+        print(f"ts is not a list, NumPy array, or Series. Type: {type(ts)}")
+        return np.nan
+
+    try:
+        ts = np.array(ts, dtype=float)
+    except Exception as e:
+        print(f"ts cannot be converted to float: {e}")
+        return np.nan
+
+    if len(ts) < 10 or np.any(~np.isfinite(ts)):
+        print(f"ts length < 10 or non-finite values: {ts}")
+        return np.nan
+
     # Convert to returns - using log returns handles any scale of asset
-    # Add small epsilon to avoid log(0)
     epsilon = 1e-10
     adjusted_ts = ts + epsilon
     log_returns = np.diff(np.log(adjusted_ts))
@@ -109,208 +123,159 @@ def universal_hurst(ts):
     
     # Method 1: Rescaled Range (R/S) Analysis
     try:
-        # Create range of lags - adaptive based on data length
         max_lag = min(len(log_returns) // 4, 40)
         lags = range(10, max_lag, max(1, (max_lag - 10) // 10))
-        
         rs_values = []
         for lag in lags:
-            # Reshape returns into segments
             segments = len(log_returns) // lag
             if segments < 1:
                 continue
-                
-            # Calculate R/S for each segment
             rs_by_segment = []
             for i in range(segments):
                 segment = log_returns[i*lag:(i+1)*lag]
-                if len(segment) < lag // 2:  # Skip if segment is too short
+                if len(segment) < lag // 2:
                     continue
-                    
-                # Get mean and standard deviation
                 mean_return = np.mean(segment)
                 std_return = np.std(segment)
-                
-                if std_return == 0:  # Skip if no variation
+                if std_return == 0:
                     continue
-                    
-                # Calculate cumulative deviation from mean
                 cumdev = np.cumsum(segment - mean_return)
-                
-                # Calculate R/S statistic
                 r = np.max(cumdev) - np.min(cumdev)
                 s = std_return
-                
                 rs_by_segment.append(r / s)
-            
             if rs_by_segment:
                 rs_values.append((lag, np.mean(rs_by_segment)))
-        
-        # Need at least 4 points for reliable regression
         if len(rs_values) >= 4:
             lags_log = np.log10([x[0] for x in rs_values])
             rs_log = np.log10([x[1] for x in rs_values])
-            
-            # Calculate Hurst exponent from slope
             poly = np.polyfit(lags_log, rs_log, 1)
             h_rs = poly[0]
             hurst_estimates.append(h_rs)
-    except:
+    except Exception as e:
+        print(f"Error in R/S calculation: {e}")
         pass
     
     # Method 2: Variance Method
     try:
-        # Calculate variance at different lags
         max_lag = min(len(log_returns) // 4, 40)
         lags = range(10, max_lag, max(1, (max_lag - 10) // 10))
-        
         var_values = []
         for lag in lags:
             if lag >= len(log_returns):
                 continue
-                
-            # Compute the log returns at different lags
             lagged_returns = np.array([np.mean(log_returns[i:i+lag]) for i in range(0, len(log_returns)-lag+1, lag)])
-            
             if len(lagged_returns) < 2:
                 continue
-                
-            # Calculate variance of the lagged series
             var = np.var(lagged_returns)
             if var > 0:
                 var_values.append((lag, var))
-        
-        # Need at least 4 points for reliable regression
         if len(var_values) >= 4:
             lags_log = np.log10([x[0] for x in var_values])
             var_log = np.log10([x[1] for x in var_values])
-            
-            # For variance, the slope should be 2H-1
             poly = np.polyfit(lags_log, var_log, 1)
             h_var = (poly[0] + 1) / 2
             hurst_estimates.append(h_var)
-    except:
+    except Exception as e:
+        print(f"Error in Variance calculation: {e}")
         pass
     
     # Fallback to autocorrelation method if other methods fail
     if not hurst_estimates and len(log_returns) > 1:
         try:
-            # Calculate lag-1 autocorrelation
             autocorr = np.corrcoef(log_returns[:-1], log_returns[1:])[0, 1]
-            
-            # Convert autocorrelation to Hurst estimate
-            # Strong negative correlation suggests mean reversion (H < 0.5)
-            # Strong positive correlation suggests trending (H > 0.5)
             h_acf = 0.5 + (np.sign(autocorr) * min(abs(autocorr) * 0.4, 0.4))
             hurst_estimates.append(h_acf)
-        except:
+        except Exception as e:
+            print(f"Error in Autocorrelation calculation: {e}")
             pass
     
     # If we have estimates, aggregate them and constrain to 0-1 range
     if hurst_estimates:
-        # Remove any extreme outliers
         valid_estimates = [h for h in hurst_estimates if 0 <= h <= 1]
-        
-        # If no valid estimates remain after filtering, use all estimates but constrain them
         if not valid_estimates and hurst_estimates:
             valid_estimates = [max(0, min(1, h)) for h in hurst_estimates]
-        
-        # If we have valid estimates, return their median (more robust than mean)
         if valid_estimates:
             return np.median(valid_estimates)
     
-    # If all methods fail, return 0.5 (random walk assumption)
     return 0.5
 
 # Detailed regime classification function
 def detailed_regime_classification(hurst):
-    """
-    Provides a more detailed regime classification including intensity levels.
-    
-    Args:
-        hurst: Calculated Hurst exponent value
-        
-    Returns:
-        tuple: (regime category, intensity level, description)
-    """
     if pd.isna(hurst):
         return ("UNKNOWN", 0, "Insufficient data")
-    
-    # Strong mean reversion
     elif hurst < 0.2:
         return ("MEAN-REVERT", 3, "Strong mean-reversion")
-    
-    # Moderate mean reversion
     elif hurst < 0.3:
         return ("MEAN-REVERT", 2, "Moderate mean-reversion")
-    
-    # Mild mean reversion
     elif hurst < 0.4:
         return ("MEAN-REVERT", 1, "Mild mean-reversion")
-    
-    # Noisy/Random zone
     elif hurst < 0.45:
         return ("NOISE", 1, "Slight mean-reversion bias")
     elif hurst <= 0.55:
         return ("NOISE", 0, "Pure random walk")
     elif hurst < 0.6:
         return ("NOISE", 1, "Slight trending bias")
-    
-    # Mild trend
     elif hurst < 0.7:
         return ("TREND", 1, "Mild trending")
-    
-    # Moderate trend
     elif hurst < 0.8:
         return ("TREND", 2, "Moderate trending")
-    
-    # Strong trend
     else:
         return ("TREND", 3, "Strong trending")
 
 # Fetch and calculate Hurst for a token with 30min timeframe
+@st.cache_data(ttl=600, show_spinner="Calculating Hurst exponents...")
 def fetch_and_calculate_hurst(token):
-    # Fetch data from DB for the last 24 hours
-    end_time = datetime.utcnow()
-    start_time = end_time - timedelta(days=lookback_days+1)  # Extra day for calculation buffer
-    
+    end_time_utc = datetime.utcnow()
+    singapore_timezone = pytz.timezone('Asia/Singapore')
+    end_time_singapore = end_time_utc.replace(tzinfo=pytz.utc).astimezone(singapore_timezone)
+    start_time_singapore = end_time_singapore - timedelta(days=lookback_days)
+
     query = f"""
     SELECT created_at AT TIME ZONE 'UTC' + INTERVAL '8 hours' AS timestamp, final_price, pair_name
     FROM public.oracle_price_log
-    WHERE created_at BETWEEN '{start_time}' AND '{end_time}'
+    WHERE created_at BETWEEN '{start_time_singapore.astimezone(pytz.utc)}' AND '{end_time_singapore.astimezone(pytz.utc)}'
     AND pair_name = '{token}';
     """
-    
     try:
+        print(f"[{token}] Executing query: {query}")
         df = pd.read_sql(query, engine)
+        print(f"[{token}] Query executed. DataFrame shape: {df.shape}")
+
         if df.empty:
+            print(f"[{token}] No data found.")
             return None
-        
-        # Preprocess data
+
+        print(f"[{token}] First few rows:\n{df.head()}")
+        print(f"[{token}] DataFrame columns and types:\n{df.info()}")
+
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.set_index('timestamp').sort_index()
-        
-        # Resample to 30-minute timeframe
-        ohlc = df['final_price'].resample(timeframe).ohlc().dropna()
-        
-        # Calculate Hurst with rolling window (20 bars)
-        ohlc['Hurst'] = ohlc['close'].rolling(rolling_window).apply(universal_hurst)
-        
-        # Filter to last 24 hours
-        last_24h = ohlc.iloc[-48:]
-        
-        # Add regime classification
-        last_24h['regime_info'] = last_24h['Hurst'].apply(detailed_regime_classification)
-        last_24h['regime'] = last_24h['regime_info'].apply(lambda x: x[0])
-        last_24h['regime_desc'] = last_24h['regime_info'].apply(lambda x: x[2])
-        
-        # Create half-hour time labels (00:00, 00:30, 01:00, etc.)
-        last_24h['time_label'] = last_24h.index.strftime('%H:%M')
-        
-        return last_24h
-    
+        one_min_ohlc = df['final_price'].resample('1min').ohlc().dropna()
+        if one_min_ohlc.empty:
+            print(f"[{token}] No OHLC data after resampling.")
+            return None
+            
+        print(f"[{token}] one_min_ohlc head:\n{one_min_ohlc.head()}")
+        print(f"[{token}] one_min_ohlc info:\n{one_min_ohlc.info()}")
+
+        # Corrected line: Apply universal_hurst to the 'close' prices directly
+        one_min_ohlc['Hurst'] = one_min_ohlc['close'].rolling(window=rolling_window).apply(universal_hurst)
+
+        thirty_min_hurst = one_min_ohlc['Hurst'].resample('30min').mean().dropna()
+        if thirty_min_hurst.empty:
+            print(f"[{token}] No 30-min Hurst data.")
+            return None
+        last_24h_hurst = thirty_min_hurst.iloc[-48:]
+        last_24h_hurst = last_24h_hurst.to_frame()
+        last_24h_hurst['time_label'] = last_24h_hurst.index.strftime('%H:%M')
+        last_24h_hurst['regime_info'] = last_24h_hurst['Hurst'].apply(detailed_regime_classification)
+        last_24h_hurst['regime'] = last_24h_hurst['regime_info'].apply(lambda x: x[0])
+        last_24h_hurst['regime_desc'] = last_24h_hurst['regime_info'].apply(lambda x: x[2])
+        print(f"[{token}] Successful Calculation")
+        return last_24h_hurst
     except Exception as e:
         st.error(f"Error processing {token}: {e}")
+        print(f"[{token}] Error processing: {e}")
         return None
 
 # Show progress bar while calculating
@@ -320,14 +285,15 @@ status_text = st.empty()
 # Calculate Hurst for each token
 token_results = {}
 for i, token in enumerate(selected_tokens):
-    # Update progress
-    progress_bar.progress((i) / len(selected_tokens))
-    status_text.text(f"Processing {token} ({i+1}/{len(selected_tokens)})")
-    
-    # Calculate Hurst
-    result = fetch_and_calculate_hurst(token)
-    if result is not None:
-        token_results[token] = result
+    try:  # Added try-except around token processing
+        progress_bar.progress((i) / len(selected_tokens))
+        status_text.text(f"Processing {token} ({i+1}/{len(selected_tokens)})")
+        result = fetch_and_calculate_hurst(token)
+        if result is not None:
+            token_results[token] = result
+    except Exception as e:
+        st.error(f"Error processing token {token}: {e}")
+        print(f"Error processing token {token} in main loop: {e}")
 
 # Final progress update
 progress_bar.progress(1.0)
@@ -335,164 +301,104 @@ status_text.text(f"Processed {len(token_results)}/{len(selected_tokens)} tokens 
 
 # Create table for display
 if token_results:
-    # Get all unique time labels
     all_times = set()
     for df in token_results.values():
         all_times.update(df['time_label'].tolist())
-    
-    all_times = sorted(all_times)
-    
-    # Create a multi-index DataFrame for the table
+    all_times = sorted(all_times, reverse=True)  # Sort times in descending order
     table_data = {}
-    
-    # For each token, add its Hurst values
     for token, df in token_results.items():
-        # Create a Series with time_label as index
         hurst_series = df.set_index('time_label')['Hurst']
-        
-        # Add to table data
         table_data[token] = hurst_series
-    
-    # Convert to DataFrame
     hurst_table = pd.DataFrame(table_data)
-    
-    # Reindex to ensure all time labels are present
     hurst_table = hurst_table.reindex(all_times)
-    
-    # Sort by rows (time)
-    hurst_table = hurst_table.sort_index()
-    
-    # Round values for display
+    hurst_table = hurst_table.sort_index(ascending=False)
     hurst_table = hurst_table.round(2)
-    
-    # Create color-coded style function
     def color_cells(val):
         if pd.isna(val):
-            return 'background-color: #f5f5f5'
+            return 'background-color: #f5f5f5; color: #666666;' # Grey for missing
         elif val < 0.4:
-            # Mean reversion: red scale
             intensity = max(0, min(255, int(255 * (0.4 - val) / 0.4)))
             return f'background-color: rgba(255, {255-intensity}, {255-intensity}, 0.7); color: black'
         elif val > 0.6:
-            # Trending: green scale
             intensity = max(0, min(255, int(255 * (val - 0.6) / 0.4)))
             return f'background-color: rgba({255-intensity}, 255, {255-intensity}, 0.7); color: black'
         else:
-            # Random walk: gray scale
-            return 'background-color: rgba(200, 200, 200, 0.5); color: black'
-    
-    # Apply styling
+            return 'background-color: rgba(200, 200, 200, 0.5); color: black' # Lighter gray
     styled_table = hurst_table.style.applymap(color_cells)
-    
-    # Display the table
-    st.markdown("## Hurst Exponent Table (30min timeframe, last 24 hours)")
-    st.markdown("### Color Legend: <span style='color:red'>Red = Mean Reversion</span>, <span style='color:gray'>Gray = Random Walk</span>, <span style='color:green'>Green = Trending</span>", unsafe_allow_html=True)
-    
+    st.markdown("## Hurst Exponent Table (30min timeframe, Last 24 hours, Singapore Time)")
+    st.markdown("### Color Legend: <span style='color:red'>Mean Reversion</span>, <span style='color:gray'>Random Walk</span>, <span style='color:green'>Trending</span>", unsafe_allow_html=True)
     st.dataframe(styled_table, height=700, use_container_width=True)
-    
-    # Add summary statistics
-    st.subheader("Current Market Overview")
-    
-    # Get the most recent Hurst value for each token
+    st.subheader("Current Market Overview (Singapore Time)")
     latest_values = {}
     for token, df in token_results.items():
         if not df.empty and not df['Hurst'].isna().all():
             latest = df['Hurst'].iloc[-1]
             regime = df['regime_desc'].iloc[-1]
             latest_values[token] = (latest, regime)
-    
-    # Calculate statistics
     if latest_values:
         mean_reverting = sum(1 for v, r in latest_values.values() if v < 0.4)
         random_walk = sum(1 for v, r in latest_values.values() if 0.4 <= v <= 0.6)
         trending = sum(1 for v, r in latest_values.values() if v > 0.6)
-        
         total = mean_reverting + random_walk + trending
-        
-        # Display statistics
         col1, col2, col3 = st.columns(3)
-        col1.metric("Mean-Reverting", f"{mean_reverting} ({mean_reverting/total*100:.1f}%)")
-        col2.metric("Random Walk", f"{random_walk} ({random_walk/total*100:.1f}%)")
-        col3.metric("Trending", f"{trending} ({trending/total*100:.1f}%)")
-        
-        # Create a pie chart
+        col1.metric("Mean-Reverting", f"{mean_reverting} ({mean_reverting/total*100:.1f}%)", delta=f"{mean_reverting/total*100:.1f}%")
+        col2.metric("Random Walk", f"{random_walk} ({random_walk/total*100:.1f}%)", delta=f"{random_walk/total*100:.1f}%")
+        col3.metric("Trending", f"{trending} ({trending/total*100:.1f}%)", delta=f"{trending/total*100:.1f}%")
         labels = ['Mean-Reverting', 'Random Walk', 'Trending']
         values = [mean_reverting, random_walk, trending]
-        colors = ['rgba(255,100,100,0.7)', 'rgba(200,200,200,0.7)', 'rgba(100,255,100,0.7)']
-        
-        fig = go.Figure(data=[go.Pie(
-            labels=labels,
-            values=values,
-            marker=dict(colors=colors),
-            textinfo='label+percent',
-            hole=.3,
-        )])
-        
+        colors = ['rgba(255,100,100,0.8)', 'rgba(200,200,200,0.8)', 'rgba(100,255,100,0.8)'] # Slightly more opaque
+        fig = go.Figure(data=[go.Pie(labels=labels, values=values, marker=dict(colors=colors, line=dict(color='#000000', width=2)), textinfo='label+percent', hole=.3)]) # Added black borders
         fig.update_layout(
-            title="Current Market Regime Distribution",
-            height=400
+            title="Current Market Regime Distribution (Singapore Time)",
+            height=400,
+            font=dict(color="#000000", size=12),  # Set default font color and size
         )
-        
         st.plotly_chart(fig, use_container_width=True)
-        
-        # Show tokens in each category
         col1, col2, col3 = st.columns(3)
-        
         with col1:
             st.markdown("### Mean-Reverting Tokens")
             mr_tokens = [(t, v, r) for t, (v, r) in latest_values.items() if v < 0.4]
-            mr_tokens.sort(key=lambda x: x[1])  # Sort by Hurst value
-            
+            mr_tokens.sort(key=lambda x: x[1])
             if mr_tokens:
                 for token, value, regime in mr_tokens:
-                    st.markdown(f"- **{token}**: {value:.2f} ({regime})")
+                    st.markdown(f"- **{token}**: <span style='color:red'>{value:.2f}</span> ({regime})", unsafe_allow_html=True)
             else:
                 st.markdown("*No tokens in this category*")
-        
         with col2:
             st.markdown("### Random Walk Tokens")
             rw_tokens = [(t, v, r) for t, (v, r) in latest_values.items() if 0.4 <= v <= 0.6]
-            rw_tokens.sort(key=lambda x: x[1])  # Sort by Hurst value
-            
+            rw_tokens.sort(key=lambda x: x[1])
             if rw_tokens:
                 for token, value, regime in rw_tokens:
-                    st.markdown(f"- **{token}**: {value:.2f} ({regime})")
+                    st.markdown(f"- **{token}**: <span style='color:gray'>{value:.2f}</span> ({regime})", unsafe_allow_html=True)
             else:
                 st.markdown("*No tokens in this category*")
-        
         with col3:
             st.markdown("### Trending Tokens")
             tr_tokens = [(t, v, r) for t, (v, r) in latest_values.items() if v > 0.6]
-            tr_tokens.sort(key=lambda x: x[1], reverse=True)  # Sort by Hurst value (descending)
-            
+            tr_tokens.sort(key=lambda x: x[1], reverse=True)
             if tr_tokens:
                 for token, value, regime in tr_tokens:
-                    st.markdown(f"- **{token}**: {value:.2f} ({regime})")
+                    st.markdown(f"- **{token}**: <span style='color:green'>{value:.2f}</span> ({regime})", unsafe_allow_html=True)
             else:
                 st.markdown("*No tokens in this category*")
-else:
-    st.warning("No data available for the selected tokens.")
+    else:
+        st.warning("No data available for the selected tokens.")
 
-# Add explanatory info
 with st.expander("Understanding the Daily Hurst Table"):
     st.markdown("""
     ### How to Read This Table
-    
     This table shows the Hurst exponent values for all selected tokens over the last 24 hours using 30-minute bars.
-    
-    Each row represents a specific 30-minute time period, and each column represents a different token.
-    
+    Each row represents a specific 30-minute time period, with times shown in Singapore time. The table is sorted with the most recent 30-minute period at the top.
     **Color coding:**
     - **Red** (Hurst < 0.4): The token is showing mean-reverting behavior during that time period
     - **Gray** (Hurst 0.4-0.6): The token is behaving like a random walk (no clear pattern)
     - **Green** (Hurst > 0.6): The token is showing trending behavior
-    
     **The intensity of the color indicates the strength of the pattern:**
     - Darker red = Stronger mean-reversion
     - Darker green = Stronger trending
-    
     **Technical details:**
-    - Each Hurst value is calculated using a rolling window of 20 bars (10 hours of data)
+    - Each Hurst value is calculated by applying a rolling window of 20 one-minute bars to the closing prices, and then averaging the Hurst values of 30 one-minute bars.
     - Values are calculated using multiple methods (R/S Analysis, Variance Method, and DFA)
-    - Missing values (blank cells) indicate insufficient data for calculation
+    - Missing values (light gray cells) indicate insufficient data for calculation
     """)
