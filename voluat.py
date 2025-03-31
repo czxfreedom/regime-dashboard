@@ -313,6 +313,9 @@ if token_results:
         # Add rank column
         ranking_df.insert(0, 'Rank', range(1, len(ranking_df) + 1))
         
+        # Reset the index to remove it
+        ranking_df = ranking_df.reset_index(drop=True)
+        
         # Format ranking table with colors
         def color_regime(val):
             if 'Low' in val:
@@ -337,13 +340,13 @@ if token_results:
             else:
                 return 'color: red'
         
-        # Apply styling without using hide_index
+        # Apply styling
         styled_ranking = ranking_df.style\
             .applymap(color_regime, subset=['Regime'])\
             .applymap(color_value, subset=['Avg Vol (%)', 'Max Vol (%)', 'Min Vol (%)'])
         
-        # Use index=False parameter instead of hide_index
-        st.dataframe(styled_ranking, height=500, use_container_width=True, index=False)
+        # Display the styled dataframe
+        st.dataframe(styled_ranking, height=500, use_container_width=True)
     else:
         st.warning("No ranking data available.")
     
@@ -371,8 +374,11 @@ if token_results:
         # Sort by volatility (highest first)
         extreme_df = extreme_df.sort_values(by='Volatility (%)', ascending=False)
         
-        # Use index=False parameter instead of hide_index
-        st.dataframe(extreme_df, height=300, use_container_width=True, index=False)
+        # Reset the index to remove it
+        extreme_df = extreme_df.reset_index(drop=True)
+        
+        # Display the dataframe
+        st.dataframe(extreme_df, height=300, use_container_width=True)
         
         # Create a more visually appealing list of extreme events
         st.markdown("### Extreme Volatility Events Detail")
