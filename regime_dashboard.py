@@ -17,7 +17,7 @@ engine = create_engine(db_uri)
 
 # --- UI Setup ---
 st.set_option('deprecation.showPyplotGlobalUse', False)
-st.title("Rolling Factor Dashboard")
+st.title("Single Pair Dashboard")
 
 # --- Fetch token list from DB ---
 @st.cache_data
@@ -737,7 +737,7 @@ fig2.add_trace(go.Scatter(
     yaxis='y2'
 ))
 
-# Update layout with better contrast
+# Update layout with better contrast and FIXED LEGEND POSITIONING
 fig2.update_layout(
     title=f"Price Chart with Regime Overlay for {selected_token} ({timeframe})",
     xaxis_title="Time",
@@ -749,44 +749,37 @@ fig2.update_layout(
         y=1.02,
         xanchor="right",
         x=1,
-        bgcolor="rgba(255,255,255,0.9)",  # Add background to legend
+        bgcolor="rgba(255,255,255,0.9)",
         bordercolor="black",
         borderwidth=1
     ),
     yaxis2=dict(
         title="Hurst",
-        titlefont=dict(color="blue", size=14),  # Larger font
-        tickfont=dict(color="blue", size=12),   # Larger ticks
+        titlefont=dict(color="blue", size=14),
+        tickfont=dict(color="blue", size=12),
         anchor="x",
         overlaying="y",
         side="right",
         range=[0, 1],  # Fixed range for Hurst
         showgrid=True,
-        gridcolor="rgba(0,0,255,0.1)"  # Light blue grid
+        gridcolor="rgba(0,0,255,0.1)"
     ),
     hovermode="x unified",
-    plot_bgcolor='white',  # White background
+    plot_bgcolor='white',
     paper_bgcolor='white',
-    font=dict(size=12)  # Larger default font
+    font=dict(size=12),
+    margin=dict(r=180)  # INCREASED right margin to make space for the legend
 )
 
-# Add an improved, more visible legend box
-
-# Add a clearer legend as a separate box outside the main chart area
-fig2.update_layout(
-    # Other layout settings remain the same...
-    margin=dict(r=130),  # Add right margin to make space for the legend
-)
-
-# Add colored rectangles as shapes to serve as legend keys
+# FIXED LEGEND PLACEMENT - moved further right to avoid overlap
 # Mean-reversion legend item
 fig2.add_shape(
     type="rect", xref="paper", yref="paper",
-    x0=1.02, y0=0.80, x1=1.05, y1=0.85,
+    x0=1.05, y0=0.80, x1=1.08, y1=0.85,  # Increased x0 and x1 values
     fillcolor="rgba(255,0,0,0.7)", line=dict(color="black", width=1)
 )
 fig2.add_annotation(
-    xref="paper", yref="paper", x=1.07, y=0.825, 
+    xref="paper", yref="paper", x=1.10, y=0.825,  # Increased x value
     text="Mean-Reversion",
     showarrow=False,
     font=dict(size=12),
@@ -796,11 +789,11 @@ fig2.add_annotation(
 # Random/Noise legend item
 fig2.add_shape(
     type="rect", xref="paper", yref="paper",
-    x0=1.02, y0=0.70, x1=1.05, y1=0.75,
+    x0=1.05, y0=0.70, x1=1.08, y1=0.75,  # Increased x0 and x1 values
     fillcolor="rgba(200,200,200,0.5)", line=dict(color="black", width=1)
 )
 fig2.add_annotation(
-    xref="paper", yref="paper", x=1.07, y=0.725, 
+    xref="paper", yref="paper", x=1.10, y=0.725,  # Increased x value
     text="Random/Noise",
     showarrow=False,
     font=dict(size=12),
@@ -810,11 +803,11 @@ fig2.add_annotation(
 # Trending legend item
 fig2.add_shape(
     type="rect", xref="paper", yref="paper",
-    x0=1.02, y0=0.60, x1=1.05, y1=0.65,
+    x0=1.05, y0=0.60, x1=1.08, y1=0.65,  # Increased x0 and x1 values
     fillcolor="rgba(0,200,0,0.7)", line=dict(color="black", width=1)
 )
 fig2.add_annotation(
-    xref="paper", yref="paper", x=1.07, y=0.625, 
+    xref="paper", yref="paper", x=1.10, y=0.625,  # Increased x value
     text="Trending",
     showarrow=False,
     font=dict(size=12),
@@ -823,15 +816,16 @@ fig2.add_annotation(
 
 # Add legend title
 fig2.add_annotation(
-    xref="paper", yref="paper", x=1.06, y=0.90, 
+    xref="paper", yref="paper", x=1.10, y=0.90,  # Increased x value
     text="<b>Regime Legend</b>",
     showarrow=False,
     font=dict(size=14),
     align="center"
 )
+
 # Display both charts
 st.plotly_chart(fig, use_container_width=True)
-st.plotly_chart(fig2, use_container_width=False, width=800) #Fixed width
+st.plotly_chart(fig2, use_container_width=False, width=800) # Fixed width
 
 # --- Show Confidence Metrics ---
 col1, col2, col3, col4 = st.columns(4)
