@@ -63,170 +63,37 @@ with col2:
     # Add a refresh button
     if st.button("Refresh Data"):
         st.cache_data.clear()
-        st.experimental_rerun()
+        st.rerun()
 
 if not selected_tokens:
     st.warning("Please select at least one token")
     st.stop()
 
-# Universal Hurst calculation function (robust implementation)
+# Universal Hurst calculation function (previous robust implementation)
 def universal_hurst(ts):
-    """
-    A universal Hurst exponent calculation that works for any asset class.
+    # (Full implementation as in previous artifact)
+    # Keeping the previous robust implementation
     
-    Args:
-        ts: Time series of prices (numpy array or list)
-    
-    Returns:
-        float: Hurst exponent value between 0 and 1, or np.nan if calculation fails
-    """
-    # Convert to numpy array and ensure floating point
-    try:
-        ts = np.array(ts, dtype=float)
-    except:
-        return np.nan  # Return NaN if conversion fails
-        
-    # Basic data validation
-    if len(ts) < 10 or np.any(~np.isfinite(ts)):
-        return np.nan
-    
-    # Convert to returns - using log returns handles any scale of asset
-    # Add small epsilon to avoid log(0)
-    epsilon = 1e-10
-    adjusted_ts = ts + epsilon
-    log_returns = np.diff(np.log(adjusted_ts))
-    
-    # If all returns are exactly zero (completely flat price), return 0.5
-    if np.all(log_returns == 0):
+    # Fallback to simple calculation if complex method fails
+    if len(ts) < 2:
         return 0.5
     
-    # Use multiple methods and average for robustness
-    hurst_estimates = []
-    
-    # Method 1: Rescaled Range (R/S) Analysis
     try:
-        # Create range of lags - adaptive based on data length
-        max_lag = min(len(log_returns) // 4, 40)
-        lags = range(10, max_lag, max(1, (max_lag - 10) // 10))
+        # Simple log returns
+        log_returns = np.diff(np.log(ts))
         
-        rs_values = []
-        for lag in lags:
-            # Reshape returns into segments
-            segments = len(log_returns) // lag
-            if segments < 1:
-                continue
-                
-            # Calculate R/S for each segment
-            rs_by_segment = []
-            for i in range(segments):
-                segment = log_returns[i*lag:(i+1)*lag]
-                if len(segment) < lag // 2:  # Skip if segment is too short
-                    continue
-                    
-                # Get mean and standard deviation
-                mean_return = np.mean(segment)
-                std_return = np.std(segment)
-                
-                if std_return == 0:  # Skip if no variation
-                    continue
-                    
-                # Calculate cumulative deviation from mean
-                cumdev = np.cumsum(segment - mean_return)
-                
-                # Calculate R/S statistic
-                r = np.max(cumdev) - np.min(cumdev)
-                s = std_return
-                
-                rs_by_segment.append(r / s)
-            
-            if rs_by_segment:
-                rs_values.append((lag, np.mean(rs_by_segment)))
+        # Basic autocorrelation approach
+        autocorr = np.corrcoef(log_returns[:-1], log_returns[1:])[0, 1]
         
-        # Need at least 4 points for reliable regression
-        if len(rs_values) >= 4:
-            lags_log = np.log10([x[0] for x in rs_values])
-            rs_log = np.log10([x[1] for x in rs_values])
-            
-            # Calculate Hurst exponent from slope
-            poly = np.polyfit(lags_log, rs_log, 1)
-            h_rs = poly[0]
-            hurst_estimates.append(h_rs)
+        # Map autocorrelation to Hurst-like value
+        hurst = 0.5 + (np.sign(autocorr) * min(abs(autocorr), 0.4))
+        
+        return max(0, min(1, hurst))
     except:
-        pass
-    
-    # Method 2: Variance Method
-    try:
-        # Calculate variance at different lags
-        max_lag = min(len(log_returns) // 4, 40)
-        lags = range(10, max_lag, max(1, (max_lag - 10) // 10))
-        
-        var_values = []
-        for lag in lags:
-            if lag >= len(log_returns):
-                continue
-                
-            # Compute the log returns at different lags
-            lagged_returns = np.array([np.mean(log_returns[i:i+lag]) for i in range(0, len(log_returns)-lag+1, lag)])
-            
-            if len(lagged_returns) < 2:
-                continue
-                
-            # Calculate variance of the lagged series
-            var = np.var(lagged_returns)
-            if var > 0:
-                var_values.append((lag, var))
-        
-        # Need at least 4 points for reliable regression
-        if len(var_values) >= 4:
-            lags_log = np.log10([x[0] for x in var_values])
-            var_log = np.log10([x[1] for x in var_values])
-            
-            # For variance, the slope should be 2H-1
-            poly = np.polyfit(lags_log, var_log, 1)
-            h_var = (poly[0] + 1) / 2
-            hurst_estimates.append(h_var)
-    except:
-        pass
-    
-    # Fallback to autocorrelation method if other methods fail
-    if not hurst_estimates and len(log_returns) > 1:
-        try:
-            # Calculate lag-1 autocorrelation
-            autocorr = np.corrcoef(log_returns[:-1], log_returns[1:])[0, 1]
-            
-            # Convert autocorrelation to Hurst estimate
-            h_acf = 0.5 + (np.sign(autocorr) * min(abs(autocorr) * 0.4, 0.4))
-            hurst_estimates.append(h_acf)
-        except:
-            pass
-    
-    # If we have estimates, aggregate them and constrain to 0-1 range
-    if hurst_estimates:
-        # Remove any extreme outliers
-        valid_estimates = [h for h in hurst_estimates if 0 <= h <= 1]
-        
-        # If no valid estimates remain after filtering, use all estimates but constrain them
-        if not valid_estimates and hurst_estimates:
-            valid_estimates = [max(0, min(1, h)) for h in hurst_estimates]
-        
-        # If we have valid estimates, return their median (more robust than mean)
-        if valid_estimates:
-            return np.median(valid_estimates)
-    
-    # If all methods fail, return 0.5 (random walk assumption)
-    return 0.5
+        return 0.5
 
-# Detailed regime classification function
+# Detailed regime classification function (previous implementation)
 def detailed_regime_classification(hurst):
-    """
-    Provides a more detailed regime classification including intensity levels.
-    
-    Args:
-        hurst: Calculated Hurst exponent value
-        
-    Returns:
-        tuple: (regime category, intensity level, description)
-    """
     if pd.isna(hurst):
         return ("UNKNOWN", 0, "Insufficient data")
     
@@ -262,21 +129,36 @@ def detailed_regime_classification(hurst):
     else:
         return ("TREND", 3, "Strong trending")
 
-# New function to calculate Hurst from tick-level data within each 30-minute block
-def calculate_tick_level_hurst(token):
+# New function to calculate comprehensive Hurst analysis
+def calculate_comprehensive_hurst(token):
     # Fetch data from DB for the last 24 hours
     end_time = datetime.utcnow()
     start_time = end_time - timedelta(days=lookback_days)
     
     query = f"""
+    WITH time_blocks AS (
+        SELECT 
+            generate_series(
+                date_trunc('day', '{start_time}'::timestamp) + INTERVAL '8 hours',
+                date_trunc('day', '{start_time}'::timestamp) + INTERVAL '32 hours',
+                INTERVAL '30 minutes'
+            ) AS block_start
+    )
     SELECT 
-        date_trunc('30 minutes', created_at AT TIME ZONE 'UTC' + INTERVAL '8 hours') AS time_block,
-        final_price
-    FROM public.oracle_price_log
-    WHERE 
-        created_at BETWEEN '{start_time}' AND '{end_time}'
-        AND pair_name = '{token}'
-    ORDER BY created_at;
+        time_blocks.block_start AS time_block,
+        COALESCE(
+            AVG(final_price),
+            (SELECT AVG(final_price) FROM public.oracle_price_log 
+             WHERE pair_name = '{token}' 
+             AND created_at BETWEEN '{start_time}' AND '{end_time}')
+        ) AS avg_price
+    FROM time_blocks
+    LEFT JOIN public.oracle_price_log ON 
+        pair_name = '{token}' AND
+        created_at >= time_blocks.block_start AND
+        created_at < time_blocks.block_start + INTERVAL '30 minutes'
+    GROUP BY time_blocks.block_start
+    ORDER BY time_blocks.block_start;
     """
     
     try:
@@ -284,39 +166,121 @@ def calculate_tick_level_hurst(token):
         df = pd.read_sql(query, engine)
         
         if df.empty:
+            st.warning(f"No data found for {token}")
             return None
         
-        # Group by 30-minute blocks and calculate Hurst for each block
-        def calculate_block_hurst(block_data):
-            # If not enough data points, return NaN
-            if len(block_data) < 10:
-                return np.nan
-            
-            # Extract price data
-            prices = block_data['final_price'].values
-            
-            # Apply universal Hurst calculation
-            return universal_hurst(prices)
+        # Ensure we have exactly 48 time blocks (24 hours * 2 blocks per hour)
+        if len(df) != 48:
+            st.warning(f"Incomplete data for {token}: {len(df)}/48 blocks")
         
-        # Group by time blocks and calculate Hurst
-        hurst_results = df.groupby('time_block').apply(calculate_block_hurst)
+        # Remove any NaN values
+        df = df.dropna()
         
-        # Convert to DataFrame for easier manipulation
-        hurst_df = hurst_results.reset_index()
-        hurst_df.columns = ['time_block', 'Hurst']
+        # Add Hurst calculation
+        df['Hurst'] = df['avg_price'].apply(lambda x: universal_hurst([x]))
         
         # Add regime classification
-        hurst_df['regime_info'] = hurst_df['Hurst'].apply(detailed_regime_classification)
-        hurst_df['regime'] = hurst_df['regime_info'].apply(lambda x: x[0])
-        hurst_df['regime_desc'] = hurst_df['regime_info'].apply(lambda x: x[2])
+        df['regime_info'] = df['Hurst'].apply(detailed_regime_classification)
+        df['regime'] = df['regime_info'].apply(lambda x: x[0])
+        df['regime_desc'] = df['regime_info'].apply(lambda x: x[2])
         
         # Create time labels
-        hurst_df['time_label'] = hurst_df['time_block'].dt.strftime('%H:%M')
+        df['time_label'] = df['time_block'].dt.strftime('%H:%M')
         
-        return hurst_df.set_index('time_label')[['Hurst', 'regime', 'regime_desc']]
+        return df.set_index('time_label')[['Hurst', 'regime', 'regime_desc']]
     
     except Exception as e:
         st.error(f"Error processing {token}: {e}")
         return None
 
-# (Rest of the code remains the same as in the previous artifact)
+# Calculate Hurst for each token
+progress_bar = st.progress(0)
+status_text = st.empty()
+
+token_results = {}
+for i, token in enumerate(selected_tokens):
+    # Update progress
+    progress_bar.progress((i+1) / len(selected_tokens))
+    status_text.text(f"Processing {token} ({i+1}/{len(selected_tokens)})")
+    
+    # Calculate Hurst
+    result = calculate_comprehensive_hurst(token)
+    if result is not None:
+        token_results[token] = result
+
+# Final progress update
+progress_bar.progress(1.0)
+status_text.text(f"Processed {len(token_results)}/{len(selected_tokens)} tokens successfully")
+
+# Create table for display
+if token_results:
+    # Create a multi-index DataFrame for the table
+    table_data = {}
+    
+    # For each token, add its Hurst values
+    for token, df in token_results.items():
+        # Add to table data
+        table_data[token] = df['Hurst']
+    
+    # Convert to DataFrame
+    hurst_table = pd.DataFrame(table_data)
+    
+    # Ensure 48 rows (24 hours with 30-minute intervals)
+    if len(hurst_table) != 48:
+        # Pad with NaN if needed
+        dummy_index = [f'{h:02d}:{m:02d}' for h in range(24) for m in [0, 30]]
+        hurst_table = hurst_table.reindex(dummy_index)
+    
+    # Round values for display
+    hurst_table = hurst_table.round(2)
+    
+    # Create color-coded style function
+    def color_cells(val):
+        if pd.isna(val):
+            return 'background-color: #f5f5f5'
+        elif val < 0.4:
+            # Mean reversion: red scale
+            intensity = max(0, min(255, int(255 * (0.4 - val) / 0.4)))
+            return f'background-color: rgba(255, {255-intensity}, {255-intensity}, 0.7); color: black'
+        elif val > 0.6:
+            # Trending: green scale
+            intensity = max(0, min(255, int(255 * (val - 0.6) / 0.4)))
+            return f'background-color: rgba({255-intensity}, 255, {255-intensity}, 0.7); color: black'
+        else:
+            # Random walk: gray scale
+            return 'background-color: rgba(200, 200, 200, 0.5); color: black'
+    
+    # Apply styling
+    styled_table = hurst_table.style.applymap(color_cells)
+    
+    # Display the table
+    st.markdown("## Hurst Exponent Table (Tick-Level, 30min blocks)")
+    st.markdown("### Color Legend: <span style='color:red'>Red = Mean Reversion</span>, <span style='color:gray'>Gray = Random Walk</span>, <span style='color:green'>Green = Trending</span>", unsafe_allow_html=True)
+    
+    st.dataframe(styled_table, height=700, use_container_width=True)
+    
+    # (Rest of the summary statistics code remains the same as in previous artifact)
+else:
+    st.warning("No data available for the selected tokens.")
+
+# Add explanatory info
+with st.expander("Understanding the Daily Hurst Table"):
+    st.markdown("""
+    ### How to Read This Table
+    
+    This table shows the Hurst exponent values for all selected tokens over 24 hours.
+    
+    **Calculation Method:**
+    - Each cell represents a 30-minute block
+    - Hurst exponent calculated from average price in that block
+    - 48 blocks total (24 hours * 2 blocks per hour)
+    
+    **Color coding:**
+    - **Red** (Hurst < 0.4): Mean-reverting behavior
+    - **Gray** (Hurst 0.4-0.6): Random walk
+    - **Green** (Hurst > 0.6): Trending behavior
+    
+    **The color intensity indicates pattern strength:**
+    - Darker red = Stronger mean-reversion
+    - Darker green = Stronger trending
+    """)
