@@ -288,7 +288,7 @@ if token_results:
     st.dataframe(styled_table, height=700, use_container_width=True)
     
     # Create ranking table based on average volatility
-    st.subheader("Volatility Ranking (24-Hour Average)")
+    st.subheader("Volatility Ranking (24-Hour Average, Descending Order)")
     
     ranking_data = []
     for token, df in token_results.items():
@@ -337,9 +337,11 @@ if token_results:
             else:
                 return 'color: red'
         
+        # Hide the index column (the leftmost numbered column)
         styled_ranking = ranking_df.style\
             .applymap(color_regime, subset=['Regime'])\
-            .applymap(color_value, subset=['Avg Vol (%)', 'Max Vol (%)', 'Min Vol (%)'])
+            .applymap(color_value, subset=['Avg Vol (%)', 'Max Vol (%)', 'Min Vol (%)'])\
+            .hide_index()  # This hides the default index column
         
         st.dataframe(styled_ranking, height=500, use_container_width=True)
     else:
@@ -353,10 +355,14 @@ if token_results:
         if not df.empty and 'is_extreme' in df.columns:
             extreme_periods = df[df['is_extreme']]
             for idx, row in extreme_periods.iterrows():
+                # Safely access values with explicit casting to avoid attribute errors
+                vol_value = float(row['realized_vol']) if not pd.isna(row['realized_vol']) else 0.0
+                time_label = str(row['time_label']) if 'time_label' in row and not pd.isna(row['time_label']) else "Unknown"
+                
                 extreme_events.append({
                     'Token': token,
-                    'Time': row['time_label'],
-                    'Volatility (%)': (row['realized_vol'] * 100).round(1),
+                    'Time': time_label,
+                    'Volatility (%)': round(vol_value * 100, 1),
                     'Full Timestamp': idx.strftime('%Y-%m-%d %H:%M')
                 })
     
@@ -365,12 +371,16 @@ if token_results:
         # Sort by volatility (highest first)
         extreme_df = extreme_df.sort_values(by='Volatility (%)', ascending=False)
         
-        st.dataframe(extreme_df, height=300, use_container_width=True)
+        # Hide the index column for extreme events table too
+        styled_extreme = extreme_df.style.hide_index()
+        st.dataframe(styled_extreme, height=300, use_container_width=True)
         
         # Create a more visually appealing list of extreme events
         st.markdown("### Extreme Volatility Events Detail")
         
-        for i, event in enumerate(extreme_events[:10]):  # Show top 10 most extreme events
+        # Only process top 10 events if there are any
+        top_events = extreme_events[:min(10, len(extreme_events))]
+        for i, event in enumerate(top_events):
             token = event['Token']
             time = event['Time']
             vol = event['Volatility (%)']
