@@ -6,6 +6,7 @@ import numpy as np
 import plotly.graph_objects as go
 from sqlalchemy import create_engine
 from datetime import datetime, timedelta
+import pytz
 
 st.set_page_config(
     page_title="Daily Hurst Table",
@@ -28,13 +29,14 @@ except Exception as e:
 # --- UI Setup ---
 st.set_option('deprecation.showPyplotGlobalUse', False)
 st.title("Daily Hurst Table (30min)")
-st.subheader("All Trading Pairs - Last 24 Hours")
+st.subheader("All Trading Pairs - Last 24 Hours (Singapore Time)")
 
 # Define parameters for the 30-minute timeframe
 timeframe = "30min"
 lookback_days = 1  # 24 hours
 rolling_window = 20  # Window size for Hurst calculation
 expected_points = 48  # Expected data points per pair over 24 hours
+singapore_timezone = pytz.timezone('Asia/Singapore')
 
 # Fetch all available tokens from DB
 @st.cache_data(show_spinner="Fetching tokens...")
@@ -223,12 +225,15 @@ def detailed_regime_classification(hurst):
 # Fetch and calculate Hurst for a token with 30min timeframe
 @st.cache_data(ttl=600, show_spinner="Calculating Hurst exponents...")
 def fetch_and_calculate_hurst(token):
-    end_time = datetime.utcnow()
-    start_time = end_time - timedelta(days=lookback_days + 1)
+    end_time_utc = datetime.utcnow()
+    singapore_timezone = pytz.timezone('Asia/Singapore')
+    end_time_singapore = end_time_utc.replace(tzinfo=pytz.utc).astimezone(singapore_timezone)
+    start_time_singapore = end_time_singapore - timedelta(days=lookback_days)
+
     query = f"""
     SELECT created_at AT TIME ZONE 'UTC' + INTERVAL '8 hours' AS timestamp, final_price, pair_name
     FROM public.oracle_price_log
-    WHERE created_at BETWEEN '{start_time}' AND '{end_time}'
+    WHERE created_at BETWEEN '{start_time_singapore.astimezone(pytz.utc)}' AND '{end_time_singapore.astimezone(pytz.utc)}'
     AND pair_name = '{token}';
     """
     try:
@@ -299,18 +304,18 @@ if token_results:
     all_times = set()
     for df in token_results.values():
         all_times.update(df['time_label'].tolist())
-    all_times = sorted(all_times)
+    all_times = sorted(all_times, reverse=True)  # Sort times in descending order
     table_data = {}
     for token, df in token_results.items():
         hurst_series = df.set_index('time_label')['Hurst']
         table_data[token] = hurst_series
     hurst_table = pd.DataFrame(table_data)
     hurst_table = hurst_table.reindex(all_times)
-    hurst_table = hurst_table.sort_index()
+    hurst_table = hurst_table.sort_index(ascending=False)
     hurst_table = hurst_table.round(2)
     def color_cells(val):
         if pd.isna(val):
-            return 'background-color: #f5f5f5'
+            return 'background-color: #f5f5f5; color: #666666;' # Grey for missing
         elif val < 0.4:
             intensity = max(0, min(255, int(255 * (0.4 - val) / 0.4)))
             return f'background-color: rgba(255, {255-intensity}, {255-intensity}, 0.7); color: black'
@@ -318,12 +323,12 @@ if token_results:
             intensity = max(0, min(255, int(255 * (val - 0.6) / 0.4)))
             return f'background-color: rgba({255-intensity}, 255, {255-intensity}, 0.7); color: black'
         else:
-            return 'background-color: rgba(200, 200, 200, 0.5); color: black'
+            return 'background-color: rgba(200, 200, 200, 0.5); color: black' # Lighter gray
     styled_table = hurst_table.style.applymap(color_cells)
-    st.markdown("## Hurst Exponent Table (30min timeframe, last 24 hours)")
-    st.markdown("### Color Legend: <span style='color:red'>Red = Mean Reversion</span>, <span style='color:gray'>Gray = Random Walk</span>, <span style='color:green'>Green = Trending</span>", unsafe_allow_html=True)
+    st.markdown("## Hurst Exponent Table (30min timeframe, Last 24 hours, Singapore Time)")
+    st.markdown("### Color Legend: <span style='color:red'>Mean Reversion</span>, <span style='color:gray'>Random Walk</span>, <span style='color:green'>Trending</span>", unsafe_allow_html=True)
     st.dataframe(styled_table, height=700, use_container_width=True)
-    st.subheader("Current Market Overview")
+    st.subheader("Current Market Overview (Singapore Time)")
     latest_values = {}
     for token, df in token_results.items():
         if not df.empty and not df['Hurst'].isna().all():
@@ -336,14 +341,18 @@ if token_results:
         trending = sum(1 for v, r in latest_values.values() if v > 0.6)
         total = mean_reverting + random_walk + trending
         col1, col2, col3 = st.columns(3)
-        col1.metric("Mean-Reverting", f"{mean_reverting} ({mean_reverting/total*100:.1f}%)")
-        col2.metric("Random Walk", f"{random_walk} ({random_walk/total*100:.1f}%)")
-        col3.metric("Trending", f"{trending} ({trending/total*100:.1f}%)")
+        col1.metric("Mean-Reverting", f"{mean_reverting} ({mean_reverting/total*100:.1f}%)", delta=f"{mean_reverting/total*100:.1f}%")
+        col2.metric("Random Walk", f"{random_walk} ({random_walk/total*100:.1f}%)", delta=f"{random_walk/total*100:.1f}%")
+        col3.metric("Trending", f"{trending} ({trending/total*100:.1f}%)", delta=f"{trending/total*100:.1f}%")
         labels = ['Mean-Reverting', 'Random Walk', 'Trending']
         values = [mean_reverting, random_walk, trending]
-        colors = ['rgba(255,100,100,0.7)', 'rgba(200,200,200,0.7)', 'rgba(100,255,100,0.7)']
-        fig = go.Figure(data=[go.Pie(labels=labels, values=values, marker=dict(colors=colors), textinfo='label+percent', hole=.3)])
-        fig.update_layout(title="Current Market Regime Distribution", height=400)
+        colors = ['rgba(255,100,100,0.8)', 'rgba(200,200,200,0.8)', 'rgba(100,255,100,0.8)'] # Slightly more opaque
+        fig = go.Figure(data=[go.Pie(labels=labels, values=values, marker=dict(colors=colors, line=dict(color='#000000', width=2)), textinfo='label+percent', hole=.3)]) # Added black borders
+        fig.update_layout(
+            title="Current Market Regime Distribution (Singapore Time)",
+            height=400,
+            font=dict(color="#000000", size=12),  # Set default font color and size
+        )
         st.plotly_chart(fig, use_container_width=True)
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -352,7 +361,7 @@ if token_results:
             mr_tokens.sort(key=lambda x: x[1])
             if mr_tokens:
                 for token, value, regime in mr_tokens:
-                    st.markdown(f"- **{token}**: {value:.2f} ({regime})")
+                    st.markdown(f"- **{token}**: <span style='color:red'>{value:.2f}</span> ({regime})", unsafe_allow_html=True)
             else:
                 st.markdown("*No tokens in this category*")
         with col2:
@@ -361,7 +370,7 @@ if token_results:
             rw_tokens.sort(key=lambda x: x[1])
             if rw_tokens:
                 for token, value, regime in rw_tokens:
-                    st.markdown(f"- **{token}**: {value:.2f} ({regime})")
+                    st.markdown(f"- **{token}**: <span style='color:gray'>{value:.2f}</span> ({regime})", unsafe_allow_html=True)
             else:
                 st.markdown("*No tokens in this category*")
         with col3:
@@ -370,7 +379,7 @@ if token_results:
             tr_tokens.sort(key=lambda x: x[1], reverse=True)
             if tr_tokens:
                 for token, value, regime in tr_tokens:
-                    st.markdown(f"- **{token}**: {value:.2f} ({regime})")
+                    st.markdown(f"- **{token}**: <span style='color:green'>{value:.2f}</span> ({regime})", unsafe_allow_html=True)
             else:
                 st.markdown("*No tokens in this category*")
     else:
@@ -380,7 +389,7 @@ with st.expander("Understanding the Daily Hurst Table"):
     st.markdown("""
     ### How to Read This Table
     This table shows the Hurst exponent values for all selected tokens over the last 24 hours using 30-minute bars.
-    Each row represents a specific 30-minute time period, and each column represents a different token.
+    Each row represents a specific 30-minute time period, with times shown in Singapore time. The table is sorted with the most recent 30-minute period at the top.
     **Color coding:**
     - **Red** (Hurst < 0.4): The token is showing mean-reverting behavior during that time period
     - **Gray** (Hurst 0.4-0.6): The token is behaving like a random walk (no clear pattern)
@@ -389,7 +398,7 @@ with st.expander("Understanding the Daily Hurst Table"):
     - Darker red = Stronger mean-reversion
     - Darker green = Stronger trending
     **Technical details:**
-    - Each Hurst value is calculated by averaging the Hurst values of 30 one-minute bars.
+    - Each Hurst value is calculated by applying a rolling window of 20 one-minute bars to the closing prices, and then averaging the Hurst values of 30 one-minute bars.
     - Values are calculated using multiple methods (R/S Analysis, Variance Method, and DFA)
-    - Missing values (blank cells) indicate insufficient data for calculation
+    - Missing values (light gray cells) indicate insufficient data for calculation
     """)
