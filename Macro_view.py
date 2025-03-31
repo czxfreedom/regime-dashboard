@@ -82,23 +82,34 @@ if not selected_tokens:
 
 # Universal Hurst calculation function
 def universal_hurst(ts):
+    print(f"universal_hurst called with ts: {ts}")
+    print(f"Type of ts: {type(ts)}")
+    if isinstance(ts, (list, np.ndarray, pd.Series)) and len(ts) > 0:
+        print(f"First few values of ts: {ts[:5]}")
+    
     if ts is None:
+        print("ts is None")
         return np.nan
     
     if isinstance(ts, pd.Series) and ts.empty:
+        print("ts is empty series")
         return np.nan
         
     if not isinstance(ts, (list, np.ndarray, pd.Series)):
+        print(f"ts is not a list, NumPy array, or Series. Type: {type(ts)}")
         return np.nan
 
     try:
         ts = np.array(ts, dtype=float)
     except Exception as e:
+        print(f"ts cannot be converted to float: {e}")
         return np.nan
 
     if len(ts) < 10 or np.any(~np.isfinite(ts)):
+        print(f"ts length < 10 or non-finite values: {ts}")
         return np.nan
 
+    # Convert to returns - using log returns handles any scale of asset
     epsilon = 1e-10
     adjusted_ts = ts + epsilon
     log_returns = np.diff(np.log(adjusted_ts))
@@ -141,6 +152,7 @@ def universal_hurst(ts):
             h_rs = poly[0]
             hurst_estimates.append(h_rs)
     except Exception as e:
+        print(f"Error in R/S calculation: {e}")
         pass
     
     # Method 2: Variance Method
@@ -164,6 +176,7 @@ def universal_hurst(ts):
             h_var = (poly[0] + 1) / 2
             hurst_estimates.append(h_var)
     except Exception as e:
+        print(f"Error in Variance calculation: {e}")
         pass
     
     # Fallback to autocorrelation method if other methods fail
@@ -173,6 +186,7 @@ def universal_hurst(ts):
             h_acf = 0.5 + (np.sign(autocorr) * min(abs(autocorr) * 0.4, 0.4))
             hurst_estimates.append(h_acf)
         except Exception as e:
+            print(f"Error in Autocorrelation calculation: {e}")
             pass
     
     # If we have estimates, aggregate them and constrain to 0-1 range
@@ -223,32 +237,45 @@ def fetch_and_calculate_hurst(token):
     AND pair_name = '{token}';
     """
     try:
+        print(f"[{token}] Executing query: {query}")
         df = pd.read_sql(query, engine)
+        print(f"[{token}] Query executed. DataFrame shape: {df.shape}")
 
         if df.empty:
+            print(f"[{token}] No data found.")
             return None
+
+        print(f"[{token}] First few rows:\n{df.head()}")
+        print(f"[{token}] DataFrame columns and types:\n{df.info()}")
 
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.set_index('timestamp').sort_index()
         one_min_ohlc = df['final_price'].resample('1min').ohlc().dropna()
         if one_min_ohlc.empty:
+            print(f"[{token}] No OHLC data after resampling.")
             return None
             
+        print(f"[{token}] one_min_ohlc head:\n{one_min_ohlc.head()}")
+        print(f"[{token}] one_min_ohlc info:\n{one_min_ohlc.info()}")
+
         # Corrected line: Apply universal_hurst to the 'close' prices directly
         one_min_ohlc['Hurst'] = one_min_ohlc['close'].rolling(window=rolling_window).apply(universal_hurst)
 
         thirty_min_hurst = one_min_ohlc['Hurst'].resample('30min').mean().dropna()
         if thirty_min_hurst.empty:
+            print(f"[{token}] No 30-min Hurst data.")
             return None
         last_24h_hurst = thirty_min_hurst.iloc[-48:]
-        last_24h_hurst['time_label'] = last_24h_hurst.index.tz_localize('UTC').tz_convert(singapore_timezone).strftime('%H:%M') # Convert time here
         last_24h_hurst = last_24h_hurst.to_frame()
+        last_24h_hurst['time_label'] = last_24h_hurst.index.strftime('%H:%M')
         last_24h_hurst['regime_info'] = last_24h_hurst['Hurst'].apply(detailed_regime_classification)
         last_24h_hurst['regime'] = last_24h_hurst['regime_info'].apply(lambda x: x[0])
         last_24h_hurst['regime_desc'] = last_24h_hurst['regime_info'].apply(lambda x: x[2])
+        print(f"[{token}] Successful Calculation")
         return last_24h_hurst
     except Exception as e:
         st.error(f"Error processing {token}: {e}")
+        print(f"[{token}] Error processing: {e}")
         return None
 
 # Show progress bar while calculating
@@ -266,6 +293,7 @@ for i, token in enumerate(selected_tokens):
             token_results[token] = result
     except Exception as e:
         st.error(f"Error processing token {token}: {e}")
+        print(f"Error processing token {token} in main loop: {e}")
 
 # Final progress update
 progress_bar.progress(1.0)
@@ -277,21 +305,14 @@ if token_results:
     for df in token_results.values():
         all_times.update(df['time_label'].tolist())
     all_times = sorted(all_times, reverse=True)  # Sort times in descending order
-
-    # Create a complete index for the last 24 hours
-    end_time_singapore = datetime.utcnow().replace(tzinfo=pytz.utc).astimezone(singapore_timezone)
-    start_time_singapore = end_time_singapore - timedelta(days=lookback_days)
-    all_30min_times = pd.date_range(start=start_time_singapore, end=end_time_singapore, freq='30min').strftime('%H:%M').tolist()
-    all_30min_times = sorted(set(all_30min_times), reverse=True)
-
     table_data = {}
     for token, df in token_results.items():
         hurst_series = df.set_index('time_label')['Hurst']
         table_data[token] = hurst_series
-
-    hurst_table = pd.DataFrame(table_data).reindex(all_30min_times)  # Use the complete index
-    hurst_table = hurst_table.sort_index(ascending=False).round(2)
-
+    hurst_table = pd.DataFrame(table_data)
+    hurst_table = hurst_table.reindex(all_times)
+    hurst_table = hurst_table.sort_index(ascending=False)
+    hurst_table = hurst_table.round(2)
     def color_cells(val):
         if pd.isna(val):
             return 'background-color: #f5f5f5; color: #666666;' # Grey for missing
@@ -308,7 +329,6 @@ if token_results:
     st.markdown("### Color Legend: <span style='color:red'>Mean Reversion</span>, <span style='color:gray'>Random Walk</span>, <span style='color:green'>Trending</span>", unsafe_allow_html=True)
     st.dataframe(styled_table, height=700, use_container_width=True)
     st.subheader("Current Market Overview (Singapore Time)")
-
     latest_values = {}
     for token, df in token_results.items():
         if not df.empty and not df['Hurst'].isna().all():
