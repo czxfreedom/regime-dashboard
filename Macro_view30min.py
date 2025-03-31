@@ -4,7 +4,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from sqlalchemy import create_engine
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 
 st.set_page_config(
     page_title="Daily Hurst Table (Multi-Sample)",
@@ -143,7 +143,7 @@ def calculate_hurst(prices, max_samples=50):
 
 def calculate_comprehensive_hurst(token):
     # Fetch data from DB for the last 24 hours
-    end_time = datetime.utcnow()
+    end_time = datetime.now(UTC)
     start_time = end_time - timedelta(days=lookback_days)
     
     query = f"""
@@ -219,5 +219,4 @@ def calculate_comprehensive_hurst(token):
         st.error(f"Error processing {token}: {e}")
         return None
 
-# (Rest of the code remains the same as in the previous artifact, 
-#  including the table display and summary statistics)
+# (Rest of the code remains the same as in the previous artifact)
