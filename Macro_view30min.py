@@ -7,12 +7,12 @@ from sqlalchemy import create_engine
 from datetime import datetime, timedelta, UTC
 
 st.set_page_config(
-    page_title="Daily Hurst Table (Multi-Sample)",
+    page_title="Daily Hurst Table (Rolling Analysis)",
     page_icon="📊",
     layout="wide"
 )
 
-# --- DB CONFIG ---
+# Database configuration
 db_config = st.secrets["database"]
 
 db_uri = (
@@ -21,130 +21,77 @@ db_uri = (
 )
 engine = create_engine(db_uri)
 
-# --- UI Setup ---
-st.set_option('deprecation.showPyplotGlobalUse', False)
-st.title("Daily Hurst Table (Multi-Sample Analysis)")
-st.subheader("All Trading Pairs - Last 24 Hours")
-
-# Define parameters for the 30-minute timeframe
-timeframe = "30min"
-lookback_days = 1  # 24 hours
-
-# Fetch all available tokens from DB
-@st.cache_data
-def fetch_all_tokens():
-    query = "SELECT DISTINCT pair_name FROM public.oracle_price_log ORDER BY pair_name"
-    try:
-        df = pd.read_sql(query, engine)
-        return df['pair_name'].tolist()
-    except Exception as e:
-        st.error(f"Error fetching tokens: {e}")
-        return ["BTC", "ETH", "SOL", "DOGE", "PEPE", "AI16Z"]  # Default fallback
-
-all_tokens = fetch_all_tokens()
-
-# UI Controls
-col1, col2 = st.columns([3, 1])
-
-with col1:
-    # Let user select tokens to display (or select all)
-    select_all = st.checkbox("Select All Tokens", value=True)
-    
-    if select_all:
-        selected_tokens = all_tokens
-    else:
-        selected_tokens = st.multiselect(
-            "Select Tokens", 
-            all_tokens,
-            default=all_tokens[:5] if len(all_tokens) > 5 else all_tokens
-        )
-
-with col2:
-    # Add a refresh button
-    if st.button("Refresh Data"):
-        st.cache_data.clear()
-        st.rerun()
-
-if not selected_tokens:
-    st.warning("Please select at least one token")
-    st.stop()
-
-def calculate_hurst(prices, max_samples=50):
+# Hurst Calculation Function
+def calculate_rolling_hurst(prices, window=30, min_periods=10):
     """
-    Calculate Hurst exponent with multiple sampling strategies.
+    Calculate rolling Hurst exponent with multiple estimation techniques
     
     Args:
         prices (array-like): Price series
-        max_samples (int): Maximum number of samples to use
+        window (int): Rolling window size
+        min_periods (int): Minimum periods for calculation
     
     Returns:
-        float: Estimated Hurst exponent
+        array: Rolling Hurst exponent estimates
     """
-    if len(prices) < 10:
-        return 0.5
+    if len(prices) < min_periods:
+        return np.full(len(prices), 0.5)
     
-    # Ensure we don't oversample
-    sample_size = min(len(prices), max_samples)
-    
-    # Different sampling strategies
-    hurst_estimates = []
-    
-    # 1. Full series log returns
-    try:
-        log_returns = np.diff(np.log(prices))
-        autocorr = np.corrcoef(log_returns[:-1], log_returns[1:])[0, 1]
-        hurst_estimates.append(0.5 + (np.sign(autocorr) * min(abs(autocorr), 0.4)))
-    except:
-        pass
-    
-    # 2. Random sampling of prices
-    try:
-        # Take random samples without replacement
-        np.random.seed(42)  # for reproducibility
-        sample_indices = np.random.choice(len(prices), sample_size, replace=False)
-        sample_prices = prices[sample_indices]
+    def single_hurst(sub_prices):
+        if len(sub_prices) < min_periods:
+            return 0.5
         
-        sample_returns = np.diff(np.log(sample_prices))
-        if len(sample_returns) > 0:
-            sample_autocorr = np.corrcoef(sample_returns[:-1], sample_returns[1:])[0, 1]
-            hurst_estimates.append(0.5 + (np.sign(sample_autocorr) * min(abs(sample_autocorr), 0.4)))
-    except:
-        pass
-    
-    # 3. Sliding window method
-    try:
-        window_sizes = [len(prices) // 4, len(prices) // 2]
-        for window in window_sizes:
-            if window > 10:
-                windowed_returns = [
-                    np.diff(np.log(prices[i:i+window]))
-                    for i in range(0, len(prices)-window, window//2)
-                ]
+        try:
+            # Log returns
+            log_returns = np.diff(np.log(sub_prices))
+            
+            # Multiple Hurst estimation methods
+            hurst_estimates = []
+            
+            # 1. Autocorrelation method
+            try:
+                autocorr = np.corrcoef(log_returns[:-1], log_returns[1:])[0, 1]
+                hurst_estimates.append(0.5 + (np.sign(autocorr) * min(abs(autocorr), 0.4)))
+            except:
+                pass
+            
+            # 2. Variance ratio method
+            try:
+                # Calculate variance at different lags
+                lags = [1, 2, 4, 8]
+                var_ratios = []
+                for lag in lags:
+                    var_ratio = np.var(log_returns[lag:]) / np.var(log_returns)
+                    var_ratios.append(var_ratio)
                 
-                window_correlations = []
-                for returns in windowed_returns:
-                    if len(returns) > 1:
-                        try:
-                            corr = np.corrcoef(returns[:-1], returns[1:])[0, 1]
-                            window_correlations.append(corr)
-                        except:
-                            pass
-                
-                if window_correlations:
-                    avg_corr = np.mean(window_correlations)
-                    hurst_estimates.append(0.5 + (np.sign(avg_corr) * min(abs(avg_corr), 0.4)))
-    except:
-        pass
+                # Estimate Hurst from variance ratios
+                hurst_var = 0.5 + np.mean(var_ratios) / 2
+                hurst_estimates.append(hurst_var)
+            except:
+                pass
+            
+            # Return median estimate or default
+            if hurst_estimates:
+                return float(np.median(hurst_estimates))
+            return 0.5
+        
+        except:
+            return 0.5
     
-    # Return median of estimates or default
-    if hurst_estimates:
-        return float(np.median(hurst_estimates))
-    return 0.5
+    # Calculate rolling Hurst
+    rolling_hurst = []
+    for i in range(len(prices) - window + 1):
+        sub_prices = prices[i:i+window]
+        rolling_hurst.append(single_hurst(sub_prices))
+    
+    # Pad the beginning with initial values
+    padding = [rolling_hurst[0]] * (window - 1)
+    return padding + rolling_hurst
 
 def calculate_comprehensive_hurst(token):
     # Fetch data from DB for the last 24 hours
     end_time = datetime.now(UTC)
-    start_time = end_time - timedelta(days=lookback_days)
+    start_time = end_time - timedelta(days=1)
     
     query = f"""
     WITH time_blocks AS (
@@ -181,18 +128,22 @@ def calculate_comprehensive_hurst(token):
             return None
         
         # Group by time blocks and calculate Hurst
-        def calculate_block_hurst(block_data):
+        def process_block(block_data):
             if len(block_data) < 10:
                 return np.nan
             
             prices = block_data['final_price'].values
-            return calculate_hurst(prices)
+            rolling_hursts = calculate_rolling_hurst(prices)
+            
+            # Return average of rolling Hurst estimates
+            valid_hursts = [h for h in rolling_hursts if not np.isnan(h)]
+            return np.mean(valid_hursts) if valid_hursts else np.nan
         
-        grouped_df = df.groupby('time_block').apply(calculate_block_hurst).reset_index()
+        grouped_df = df.groupby('time_block').apply(process_block).reset_index()
         grouped_df.columns = ['time_block', 'Hurst']
         
-        # Create time labels with index to ensure uniqueness
-        grouped_df['time_label'] = grouped_df['time_block'].dt.strftime('%H:%M') + '_' + grouped_df.index.astype(str)
+        # Create time labels
+        grouped_df['time_label'] = grouped_df['time_block'].dt.strftime('%H:%M')
         
         # Add regime classification
         def classify_regime(hurst):
@@ -213,13 +164,11 @@ def calculate_comprehensive_hurst(token):
         grouped_df['regime'] = grouped_df['regime_info'].apply(lambda x: x[0])
         grouped_df['regime_desc'] = grouped_df['regime_info'].apply(lambda x: x[2])
         
-        # Return DataFrame with unique index
-        result_df = grouped_df.set_index('time_label')[['Hurst', 'regime', 'regime_desc']]
-        
         # Create standard 48-block time labels
         standard_labels = [f'{h:02d}:{m:02d}' for h in range(24) for m in [0, 30]]
         
-        # Reindex with standard labels, filling with NaN
+        # Set index and reindex
+        result_df = grouped_df.set_index('time_label')[['Hurst', 'regime', 'regime_desc']]
         result_df = result_df.reindex(standard_labels)
         
         return result_df
@@ -228,4 +177,82 @@ def calculate_comprehensive_hurst(token):
         st.error(f"Error processing {token}: {e}")
         return None
 
-# (Rest of the code remains the same as in the previous artifact)
+# Fetch tokens and create UI
+@st.cache_data
+def fetch_all_tokens():
+    query = "SELECT DISTINCT pair_name FROM public.oracle_price_log ORDER BY pair_name"
+    try:
+        df = pd.read_sql(query, engine)
+        return df['pair_name'].tolist()
+    except Exception as e:
+        st.error(f"Error fetching tokens: {e}")
+        return ["BTC", "ETH", "SOL", "DOGE", "PEPE", "AI16Z"]
+
+# Main Streamlit app
+st.title("Daily Hurst Table (Rolling Analysis)")
+st.subheader("All Trading Pairs - Last 24 Hours")
+
+# Token selection
+all_tokens = fetch_all_tokens()
+selected_tokens = st.multiselect(
+    "Select Tokens", 
+    all_tokens,
+    default=all_tokens[:5] if len(all_tokens) > 5 else all_tokens
+)
+
+# Calculate Hurst for selected tokens
+if st.button("Calculate Hurst"):
+    # Progress tracking
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    # Store results
+    token_results = {}
+
+    # Calculate for each token
+    for i, token in enumerate(selected_tokens):
+        # Update progress
+        progress_bar.progress((i+1) / len(selected_tokens))
+        status_text.text(f"Processing {token} ({i+1}/{len(selected_tokens)})")
+        
+        # Calculate Hurst
+        result = calculate_comprehensive_hurst(token)
+        if result is not None:
+            token_results[token] = result
+
+    # Finalize progress
+    progress_bar.progress(1.0)
+    status_text.text(f"Processed {len(token_results)}/{len(selected_tokens)} tokens")
+
+    # Display results if any
+    if token_results:
+        # Prepare table data
+        table_data = {}
+        for token, df in token_results.items():
+            table_data[token] = df['Hurst']
+        
+        # Create DataFrame
+        hurst_table = pd.DataFrame(table_data).round(2)
+        
+        # Styling function
+        def color_cells(val):
+            if pd.isna(val):
+                return 'background-color: #f5f5f5'
+            elif val < 0.4:
+                # Mean reversion: red scale
+                intensity = max(0, min(255, int(255 * (0.4 - val) / 0.4)))
+                return f'background-color: rgba(255, {255-intensity}, {255-intensity}, 0.7); color: black'
+            elif val > 0.6:
+                # Trending: green scale
+                intensity = max(0, min(255, int(255 * (val - 0.6) / 0.4)))
+                return f'background-color: rgba({255-intensity}, 255, {255-intensity}, 0.7); color: black'
+            else:
+                # Random walk: gray scale
+                return 'background-color: rgba(200, 200, 200, 0.5); color: black'
+        
+        # Apply styling
+        styled_table = hurst_table.style.applymap(color_cells)
+        
+        # Display table
+        st.markdown("## Hurst Exponent Table")
+        st.dataframe(styled_table, height=700, use_container_width=True)
