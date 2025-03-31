@@ -75,6 +75,9 @@ if not selected_tokens:
 # Universal Hurst calculation function
 def universal_hurst(ts):
     print(f"universal_hurst called with ts: {ts}")  # Debug print
+    print(f"Type of ts: {type(ts)}")  # Debug print
+    if isinstance(ts, (list, np.ndarray, pd.Series)) and len(ts) > 0:
+        print(f"First few values of ts: {ts[:5]}")  # Debug print
     
     if ts is None:  # Check for None input
         print("ts is None")  # Debug print
@@ -86,8 +89,8 @@ def universal_hurst(ts):
 
     try:
         ts = np.array(ts, dtype=float)
-    except:
-        print("ts cannot be converted to float")  # Debug print
+    except Exception as e:
+        print(f"ts cannot be converted to float: {e}")  # Debug print
         return np.nan  # Return NaN if conversion fails
 
     if len(ts) < 10 or np.any(~np.isfinite(ts)):
@@ -220,15 +223,18 @@ def fetch_and_calculate_hurst(token):
     try:
         df = pd.read_sql(query, engine)
         if df.empty:
+            print(f"No data found for token: {token}")  # Debug print
             return None
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.set_index('timestamp').sort_index()
         one_min_ohlc = df['final_price'].resample('1min').ohlc().dropna()
         if one_min_ohlc.empty:
+            print(f"No OHLC data for token: {token}")  # Debug print
             return None
         one_min_ohlc['Hurst'] = one_min_ohlc['close'].apply(universal_hurst)
         thirty_min_hurst = one_min_ohlc['Hurst'].resample('30min').mean().dropna()
         if thirty_min_hurst.empty:
+            print(f"No 30-min Hurst data for token: {token}")  # Debug print
             return None
         last_24h_hurst = thirty_min_hurst.iloc[-48:]
         last_24h_hurst = last_24h_hurst.to_frame()
