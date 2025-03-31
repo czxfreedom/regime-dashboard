@@ -23,22 +23,50 @@ engine = create_engine(db_uri)
 
 def calculate_hurst(prices):
     """
-    Simple Hurst exponent calculation
+    Calculate Hurst-like exponent for a price series
     """
     if len(prices) < 10:
         return 0.5
     
     try:
-        # Log returns
-        log_returns = np.diff(np.log(prices))
+        # Ensure unique prices to avoid calculation issues
+        unique_prices = np.unique(prices)
         
-        # Autocorrelation method
-        autocorr = np.corrcoef(log_returns[:-1], log_returns[1:])[0, 1]
+        # Log returns of unique prices
+        log_returns = np.diff(np.log(unique_prices))
         
-        # Map to Hurst-like value
-        hurst = 0.5 + (np.sign(autocorr) * min(abs(autocorr), 0.4))
+        # Multiple estimation methods
+        hurst_estimates = []
         
-        return max(0, min(1, hurst))
+        # 1. Basic autocorrelation method
+        try:
+            if len(log_returns) > 1:
+                autocorr = np.corrcoef(log_returns[:-1], log_returns[1:])[0, 1]
+                hurst_estimates.append(0.5 + (np.sign(autocorr) * min(abs(autocorr), 0.4)))
+        except:
+            pass
+        
+        # 2. Variance ratio method
+        try:
+            # Calculate variance at different lags
+            lags = [1, 2, 4]
+            var_ratios = []
+            for lag in lags:
+                if len(log_returns) > lag:
+                    var_ratio = np.var(log_returns[lag:]) / np.var(log_returns)
+                    var_ratios.append(var_ratio)
+            
+            if var_ratios:
+                hurst_var = 0.5 + np.mean(var_ratios) / 2
+                hurst_estimates.append(hurst_var)
+        except:
+            pass
+        
+        # Return median estimate or default
+        if hurst_estimates:
+            return float(np.median(hurst_estimates))
+        return 0.5
+    
     except:
         return 0.5
 
@@ -59,45 +87,73 @@ def process_token_data(token):
     )
     SELECT 
         time_blocks.block_start AS time_block,
-        final_price
+        final_price,
+        created_at
     FROM time_blocks
-    LEFT JOIN public.oracle_price_log ON 
+    JOIN public.oracle_price_log ON 
         pair_name = '{token}' AND
         created_at >= time_blocks.block_start AND
         created_at < time_blocks.block_start + INTERVAL '30 minutes'
-    ORDER BY time_block;
+    ORDER BY created_at;
     """
     
     # Read data
     df = pd.read_sql(query, engine)
     
-    # Group by time blocks and calculate Hurst
-    def block_hurst(block_data):
-        prices = block_data['final_price'].dropna()
-        return calculate_hurst(prices) if len(prices) > 0 else np.nan
+    # If no data, return NaN
+    if df.empty:
+        return None
     
-    grouped = df.groupby('time_block').apply(block_hurst).reset_index()
-    grouped.columns = ['time_block', 'Hurst']
+    # Convert to datetime
+    df['created_at'] = pd.to_datetime(df['created_at'])
+    
+    # Group data into 5-minute windows within 30-minute block
+    def calculate_block_hurst(block_data):
+        # If not enough data, return NaN
+        if len(block_data) < 10:
+            return np.nan
+        
+        # Divide the block into 5-minute windows
+        windows = []
+        start_time = block_data['created_at'].min()
+        end_time = start_time + timedelta(minutes=30)
+        
+        current_window_start = start_time
+        current_window_end = current_window_start + timedelta(minutes=5)
+        
+        window_hursts = []
+        
+        while current_window_start < end_time:
+            # Select data for this 5-minute window
+            window_data = block_data[
+                (block_data['created_at'] >= current_window_start) & 
+                (block_data['created_at'] < current_window_end)
+            ]
+            
+            # Calculate Hurst for this window
+            if len(window_data) >= 10:
+                window_hurst = calculate_hurst(window_data['final_price'].values)
+                window_hursts.append(window_hurst)
+            
+            # Move to next window
+            current_window_start = current_window_end
+            current_window_end = current_window_start + timedelta(minutes=5)
+        
+        # Return average of window Hursts
+        return np.nanmean(window_hursts) if window_hursts else np.nan
+    
+    # Group by 30-minute blocks and calculate multi-window Hurst
+    grouped_df = df.groupby(pd.Grouper(key='created_at', freq='30min')).apply(calculate_block_hurst).reset_index()
+    grouped_df.columns = ['time_block', 'Hurst']
     
     # Create time labels
-    grouped['time_label'] = grouped['time_block'].dt.strftime('%H:%M')
+    grouped_df['time_label'] = grouped_df['time_block'].dt.strftime('%H:%M')
     
-    # Classify regime
-    def classify_regime(hurst):
-        if pd.isna(hurst):
-            return "UNKNOWN"
-        elif hurst < 0.4:
-            return "MEAN-REVERT"
-        elif hurst > 0.6:
-            return "TREND"
-        else:
-            return "NOISE"
-    
-    grouped['regime'] = grouped['Hurst'].apply(classify_regime)
-    
-    # Ensure 48 time blocks
+    # Ensure all 48 time blocks are present
     standard_labels = [f'{h:02d}:{m:02d}' for h in range(24) for m in [0, 30]]
-    result = grouped.set_index('time_label')['Hurst'].reindex(standard_labels)
+    
+    # Reindex to ensure all time blocks are present
+    result = grouped_df.set_index('time_label')['Hurst'].reindex(standard_labels)
     
     return result
 
@@ -129,7 +185,8 @@ if st.button("Generate Hurst Table"):
         
         try:
             token_result = process_token_data(token)
-            results[token] = token_result
+            if token_result is not None:
+                results[token] = token_result
         except Exception as e:
             st.error(f"Error processing {token}: {e}")
     
