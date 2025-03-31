@@ -266,8 +266,8 @@ def fetch_and_calculate_hurst(token):
             print(f"[{token}] No 30-min Hurst data.")
             return None
         last_24h_hurst = thirty_min_hurst.iloc[-48:]
+        last_24h_hurst['time_label'] = last_24h_hurst.index.tz_localize('UTC').tz_convert(singapore_timezone).strftime('%H:%M') # Convert time here
         last_24h_hurst = last_24h_hurst.to_frame()
-        last_24h_hurst['time_label'] = last_24h_hurst.index.strftime('%H:%M')
         last_24h_hurst['regime_info'] = last_24h_hurst['Hurst'].apply(detailed_regime_classification)
         last_24h_hurst['regime'] = last_24h_hurst['regime_info'].apply(lambda x: x[0])
         last_24h_hurst['regime_desc'] = last_24h_hurst['regime_info'].apply(lambda x: x[2])
