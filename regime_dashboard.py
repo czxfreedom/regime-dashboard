@@ -803,7 +803,7 @@ fig2.add_annotation(
     xref="paper",
     yref="paper",
     x=0.5,  # Center of x-axis
-    y=-0.05,  # Just below the chart (adjust as needed)
+    y=-0.10,  # Just below the chart (adjust as needed)
     text="Time",
     showarrow=False,
     font=dict(size=14)
