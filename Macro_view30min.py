@@ -86,6 +86,10 @@ def universal_hurst(ts):
     if isinstance(ts, pd.Series) and ts.empty:  # Check for empty series
         print("ts is empty series")  # Debug print
         return np.nan
+        
+    if not isinstance(ts, (list, np.ndarray, pd.Series)): # Added check
+        print(f"ts is not a list, NumPy array, or Series. Type: {type(ts)}")
+        return np.nan
 
     try:
         ts = np.array(ts, dtype=float)
@@ -231,6 +235,10 @@ def fetch_and_calculate_hurst(token):
         if one_min_ohlc.empty:
             print(f"No OHLC data for token: {token}")  # Debug print
             return None
+            
+        print(f"Token: {token}, one_min_ohlc['close'] type: {type(one_min_ohlc['close'])}") # Add this line
+        print(f"Token: {token}, one_min_ohlc['close'] first 5 values: {one_min_ohlc['close'].head()}") # Add this line
+            
         one_min_ohlc['Hurst'] = one_min_ohlc['close'].apply(universal_hurst)
         thirty_min_hurst = one_min_ohlc['Hurst'].resample('30min').mean().dropna()
         if thirty_min_hurst.empty:
