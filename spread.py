@@ -14,6 +14,42 @@ st.set_page_config(
     layout="wide"
 )
 
+# Apply some custom CSS for better styling
+st.markdown("""
+<style>
+    .big-font {
+        font-size:24px !important;
+        font-weight: bold;
+    }
+    .medium-font {
+        font-size:18px !important;
+    }
+    .header-style {
+        font-size:28px !important;
+        font-weight: bold;
+        color: #1E88E5;
+        background-color: #f0f2f6;
+        padding: 10px;
+        border-radius: 5px;
+    }
+    .subheader-style {
+        font-size:22px !important;
+        font-weight: bold;
+        color: #1976D2;
+        padding: 5px 0;
+    }
+    .info-box {
+        background-color: #e1f5fe;
+        padding: 10px;
+        border-radius: 5px;
+        margin-bottom: 15px;
+    }
+    .stDataFrame {
+        font-size: 18px !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # --- DB CONFIG ---
 try:
     db_config = st.secrets["database"]
@@ -27,9 +63,8 @@ except Exception as e:
     st.stop()
 
 # --- UI Setup ---
-st.set_option('deprecation.showPyplotGlobalUse', False)
-st.title("Exchange Fee Comparison (10min Intervals)")
-st.subheader("Transaction Fees Across Exchanges - Last 24 Hours (Singapore Time)")
+st.markdown('<div class="header-style">Exchange Fee Comparison</div>', unsafe_allow_html=True)
+st.markdown('<div class="medium-font">Transaction Fees Across All Exchanges - Last 24 Hours (Singapore Time)</div>', unsafe_allow_html=True)
 
 # Define parameters
 lookback_days = 1  # 24 hours
@@ -69,6 +104,7 @@ def fetch_all_tokens():
 all_tokens = fetch_all_tokens()
 
 # UI Controls
+st.markdown('<div class="medium-font">Select Tokens to Compare</div>', unsafe_allow_html=True)
 col1, col2 = st.columns([3, 1])
 
 with col1:
@@ -86,7 +122,7 @@ with col1:
 
 with col2:
     # Add a refresh button
-    if st.button("Refresh Data"):
+    if st.button("Refresh Data", use_container_width=True):
         st.cache_data.clear()
         st.experimental_rerun()
 
@@ -99,9 +135,9 @@ def time_to_minutes(time_str):
     hours, minutes = map(int, time_str.split(':'))
     return hours * 60 + minutes
 
-# Fetch fee data for a token with proper interval calculation
+# Fetch fee data for each token over time
 @st.cache_data(ttl=600, show_spinner="Calculating exchange fees...")
-def fetch_fee_data(token):
+def fetch_token_fee_data(token):
     try:
         # Get current time in Singapore timezone
         now_utc = datetime.now(pytz.utc)
@@ -129,24 +165,13 @@ def fetch_fee_data(token):
             source
         """
         
-        print(f"Executing query for {token}...")
         df = pd.read_sql(query, engine)
-        print(f"Query executed for {token}. Results: {len(df)} rows")
         
         if df.empty:
-            print(f"[{token}] No fee data found.")
             return None, None
 
         # Convert timestamp to datetime and set as index
         df['timestamp'] = pd.to_datetime(df['timestamp'])
-        
-        # Debug: Check what data we got
-        print(f"[{token}] Data fetched. Shape: {df.shape}")
-        print(f"[{token}] Unique sources: {df['source'].unique()}")
-        if not df.empty:
-            print(f"[{token}] First few rows: {df.head()}")
-        else:
-            print(f"[{token}] DataFrame is empty")
         
         # Prepare data structure for interval processing
         fee_data = {}
@@ -182,7 +207,6 @@ def fetch_fee_data(token):
                 
         # If no valid data found for any exchange
         if not fee_data:
-            print(f"[{token}] No valid data after processing.")
             return None, None
             
         # Calculate average fee across all exchanges
@@ -205,153 +229,303 @@ def fetch_fee_data(token):
         return result_df, daily_avgs
             
     except Exception as e:
-        st.error(f"Error processing {token}: {e}")
         print(f"[{token}] Error processing: {e}")
         import traceback
         traceback.print_exc()
         return None, None
+
+# Fetch summary fee data for all tokens
+@st.cache_data(ttl=600, show_spinner="Calculating total fees...")
+def fetch_summary_fee_data(token):
+    try:
+        # Get current time in Singapore timezone
+        now_utc = datetime.now(pytz.utc)
+        now_sg = now_utc.astimezone(singapore_timezone)
+        start_time_sg = now_sg - timedelta(days=lookback_days)
+        
+        # Convert back to UTC for database query
+        start_time_utc = start_time_sg.astimezone(pytz.utc)
+        end_time_utc = now_sg.astimezone(pytz.utc)
+
+        # Query to get the fee data
+        query = f"""
+        SELECT 
+            source,
+            SUM(total_fee) as total_fee
+        FROM 
+            oracle_exchange_fee
+        WHERE 
+            pair_name = '{token}'
+            AND time_group BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+        GROUP BY 
+            source
+        ORDER BY 
+            source
+        """
+        
+        df = pd.read_sql(query, engine)
+        
+        if df.empty:
+            return None
+
+        # Process each exchange separately
+        fee_data = {}
+        
+        for _, row in df.iterrows():
+            exchange = row['source']
+            if exchange in exchanges:
+                fee_data[exchanges_display[exchange]] = row['total_fee']
+        
+        # If no valid data found for any exchange
+        if not fee_data:
+            return None
+            
+        # Calculate average fee across all exchanges (excluding SurfFuture)
+        non_surf_fees = [v for k, v in fee_data.items() if k != 'SurfFuture']
+        if non_surf_fees:
+            fee_data['Avg (Non-Surf)'] = sum(non_surf_fees) / len(non_surf_fees)
+        
+        return fee_data
+            
+    except Exception as e:
+        print(f"[{token}] Error processing summary: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 # Show progress bar while calculating
 progress_bar = st.progress(0)
 status_text = st.empty()
 
 # Calculate fees for each token
-token_results = {}
+token_summary_results = {}
+token_detailed_results = {}
 token_daily_avgs = {}
+
 for i, token in enumerate(selected_tokens):
     try:
-        progress_bar.progress((i) / len(selected_tokens))
+        progress_bar.progress(i / len(selected_tokens))
         status_text.text(f"Processing {token} ({i+1}/{len(selected_tokens)})")
-        result, daily_avgs = fetch_fee_data(token)
-        if result is not None and daily_avgs is not None:
-            token_results[token] = result
+        
+        # Get summary data for overview table
+        summary_result = fetch_summary_fee_data(token)
+        if summary_result is not None:
+            token_summary_results[token] = summary_result
+        
+        # Get detailed data for individual token tables
+        detailed_result, daily_avgs = fetch_token_fee_data(token)
+        if detailed_result is not None and daily_avgs is not None:
+            token_detailed_results[token] = detailed_result
             token_daily_avgs[token] = daily_avgs
+            
     except Exception as e:
         st.error(f"Error processing token {token}: {e}")
         print(f"Error processing token {token} in main loop: {e}")
 
 # Final progress update
 progress_bar.progress(1.0)
-status_text.text(f"Processed {len(token_results)}/{len(selected_tokens)} tokens successfully")
-
-# Color function for fee values
-def color_fee(val):
-    if pd.isna(val):
-        return 'background-color: #f5f5f5; color: #666666;'  # Grey for missing
-    elif val < 0.01:  # Very low fee
-        return 'background-color: rgba(0, 200, 0, 0.7); color: black'
-    elif val < 0.05:  # Low fee
-        return 'background-color: rgba(100, 255, 100, 0.7); color: black'
-    elif val < 0.1:  # Medium fee
-        return 'background-color: rgba(255, 255, 0, 0.7); color: black'
-    elif val < 0.5:  # High fee
-        return 'background-color: rgba(255, 165, 0, 0.7); color: black'
-    else:  # Very high fee
-        return 'background-color: rgba(255, 0, 0, 0.7); color: white'
-
-# Color function for daily average cells (different color scheme)
-def color_daily_avg(val):
-    if pd.isna(val):
-        return 'background-color: #f5f5f5; color: #666666;'  # Grey for missing
-    elif val < 0.01:  # Excellent
-        return 'background-color: rgba(75, 0, 130, 0.7); color: white'  # Purple
-    elif val < 0.05:  # Very good
-        return 'background-color: rgba(0, 0, 255, 0.7); color: white'  # Blue
-    elif val < 0.1:  # Good
-        return 'background-color: rgba(0, 128, 128, 0.7); color: white'  # Teal
-    elif val < 0.5:  # Average
-        return 'background-color: rgba(210, 105, 30, 0.7); color: white'  # Brown
-    else:  # Poor
-        return 'background-color: rgba(128, 0, 0, 0.7); color: white'  # Maroon
+status_text.text(f"Processed {len(token_summary_results)}/{len(selected_tokens)} tokens successfully")
 
 # Create a consolidated summary table at the top
-if token_daily_avgs:
-    st.markdown("## Overall Daily Average Fees by Token and Exchange")
+if token_summary_results:
+    st.markdown('<div class="header-style">Overall Exchange Fee Comparison</div>', unsafe_allow_html=True)
     
-    # Create a DataFrame to hold all daily averages
-    all_averages_data = []
+    # Create a DataFrame to hold all fees
+    all_fees_data = []
     
-    for token, averages in token_daily_avgs.items():
+    for token, fees in token_summary_results.items():
         row_data = {'Token': token}
-        
-        # Add each exchange's average
-        for exchange, avg in averages.items():
-            if exchange != 'Average':  # Skip the overall average for now
-                row_data[exchange] = avg
-        
-        # Calculate and add the non-surf average (average excluding 'SurfFuture')
-        exchange_avgs = [v for k, v in averages.items() 
-                         if k != 'Average' and k != 'SurfFuture' and not pd.isna(v)]
-        if exchange_avgs:
-            row_data['Non-Surf Avg'] = sum(exchange_avgs) / len(exchange_avgs)
-        else:
-            row_data['Non-Surf Avg'] = float('nan')
-            
-        all_averages_data.append(row_data)
+        row_data.update(fees)
+        all_fees_data.append(row_data)
     
     # Create DataFrame and sort by token name
-    all_averages_df = pd.DataFrame(all_averages_data)
-    if not all_averages_df.empty and 'Token' in all_averages_df.columns:
-        all_averages_df = all_averages_df.sort_values(by='Token')
+    all_fees_df = pd.DataFrame(all_fees_data)
+    
+    if not all_fees_df.empty and 'Token' in all_fees_df.columns:
+        all_fees_df = all_fees_df.sort_values(by='Token')
         
-        # Ensure all exchange columns are present, fill with NaN if missing
-        exchange_cols = []
-        for ex in exchanges:
-            display_name = exchanges_display[ex]
-            if display_name != 'SurfFuture':
-                exchange_cols.append(display_name)
-        exchange_cols.append('Non-Surf Avg')
+        # Find if we need to scale the values for better readability
+        fee_values = all_fees_df.select_dtypes(include=[np.number])
+        mean_fee = fee_values.mean().mean()
         
-        for col in exchange_cols:
-            if col not in all_averages_df.columns:
-                all_averages_df[col] = float('nan')
+        # Determine scale factor based on mean fee value
+        scale_factor = 1
+        scale_label = ""
         
-        # Reorder columns to put Token first, then exchanges
-        cols_order = ['Token'] + [col for col in exchange_cols if col in all_averages_df.columns]
-        all_averages_df = all_averages_df[cols_order]
+        if mean_fee < 0.001:
+            scale_factor = 1000
+            scale_label = "× 1,000"
+        elif mean_fee < 0.0001:
+            scale_factor = 10000
+            scale_label = "× 10,000"
+        elif mean_fee < 0.00001:
+            scale_factor = 100000
+            scale_label = "× 100,000"
         
-        # Format numbers and apply styling
-        styled_averages = all_averages_df.style.applymap(
-            color_daily_avg, 
-            subset=[col for col in exchange_cols if col in all_averages_df.columns]
-        )
+        # Apply scaling if needed
+        if scale_factor > 1:
+            for col in all_fees_df.columns:
+                if col != 'Token' and all_fees_df[col].dtype != 'object':
+                    all_fees_df[col] = all_fees_df[col] * scale_factor
+            
+            st.markdown(f"<div class='info-box'><b>Note:</b> All fee values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
+        
+        # Define a beautiful color palette for the heatmap
+        def color_fee(val):
+            if pd.isna(val) or not isinstance(val, (int, float)):
+                return 'background-color: #f5f5f5; color: #666666;'  # Grey for non-numeric
+            
+            # Create a colorful gradient based on the value
+            # Lower is better (green), higher is worse (red)
+            # Normalize to 0-1 range for better color mapping
+            max_val = all_fees_df.select_dtypes(include=[np.number]).max().max()
+            norm_val = val / max_val if max_val > 0 else 0
+            
+            if norm_val < 0.2:  # Very low fee
+                return 'background-color: #1a9850; color: white; font-weight: bold; font-size: 16px;'  # Dark green
+            elif norm_val < 0.4:  # Low fee
+                return 'background-color: #66bd63; color: white; font-weight: bold; font-size: 16px;'  # Light green
+            elif norm_val < 0.6:  # Medium fee
+                return 'background-color: #fee08b; color: black; font-weight: bold; font-size: 16px;'  # Yellow
+            elif norm_val < 0.8:  # High fee
+                return 'background-color: #f46d43; color: white; font-weight: bold; font-size: 16px;'  # Orange
+            else:  # Very high fee
+                return 'background-color: #d73027; color: white; font-weight: bold; font-size: 16px;'  # Red
+        
+        # Style the table
+        styled_fees = all_fees_df.style.applymap(
+            color_fee, 
+            subset=[col for col in all_fees_df.columns if col != 'Token']
+        ).format("{:.2f}", subset=[col for col in all_fees_df.columns if col != 'Token'])
         
         # Display the summary table
-        st.dataframe(styled_averages, height=min(600, 80 + 35 * len(all_averages_df)), use_container_width=True)
+        st.dataframe(styled_fees, height=min(600, 100 + 35 * len(all_fees_df)), use_container_width=True)
         
         # Calculate and display the best exchange based on average fees
         exchange_overall_avgs = {}
-        for col in exchange_cols:
-            if col != 'Non-Surf Avg' and col in all_averages_df.columns:
-                avg_value = all_averages_df[col].mean()
+        for col in all_fees_df.columns:
+            if col not in ['Token', 'Avg (Non-Surf)']:
+                avg_value = all_fees_df[col].mean()
                 if not pd.isna(avg_value):
                     exchange_overall_avgs[col] = avg_value
         
         if exchange_overall_avgs:
             best_exchange = min(exchange_overall_avgs.items(), key=lambda x: x[1])
-            st.info(f"Best exchange overall based on average fees: **{best_exchange[0]}** (Average fee: {best_exchange[1]:.4f})")
+            st.info(f"🏆 **Best exchange overall**: {best_exchange[0]} (Average fee: {best_exchange[1]:.2f})")
 
-        # Add some explanation
-        st.markdown("""
-        This table shows the daily average fee for each token across different exchanges. 
-        The 'Non-Surf Avg' column shows the average fee excluding SurfFuture.
+        # Add visualization - Bar chart comparing average fees by exchange
+        st.markdown('<div class="subheader-style">Average Fee by Exchange</div>', unsafe_allow_html=True)
         
-        **Color coding**:
-        - **Purple** (< 0.01): Excellent
-        - **Blue** (0.01-0.05): Very good
-        - **Teal** (0.05-0.1): Good
-        - **Brown** (0.1-0.5): Average
-        - **Maroon** (> 0.5): Poor
-        """)
+        avg_by_exchange = {}
+        for col in all_fees_df.columns:
+            if col not in ['Token', 'Avg (Non-Surf)']:
+                avg_by_exchange[col] = all_fees_df[col].mean()
         
-        st.markdown("---")  # Add a separator before individual token tables
-        st.markdown("## Detailed Analysis by Token")
-        st.markdown("Each token has its own table showing fees at 10-minute intervals.")
+        if avg_by_exchange:
+            # Sort exchanges by average fee
+            sorted_exchanges = sorted(avg_by_exchange.items(), key=lambda x: x[1])
+            exchanges_sorted = [x[0] for x in sorted_exchanges]
+            fees_sorted = [x[1] for x in sorted_exchanges]
+            
+            # Create a colorful bar chart
+            colors = ['#1a9850', '#66bd63', '#fee08b', '#f46d43', '#d73027']
+            exchange_colors = [colors[min(i, len(colors)-1)] for i in range(len(sorted_exchanges))]
+            
+            fig = go.Figure(data=[
+                go.Bar(
+                    x=exchanges_sorted,
+                    y=fees_sorted,
+                    marker_color=exchange_colors,
+                    text=[f"{x:.2f}" for x in fees_sorted],
+                    textposition='auto'
+                )
+            ])
+            
+            fig.update_layout(
+                title=f"Average Fee Comparison Across Exchanges {scale_label}",
+                xaxis_title="Exchange",
+                yaxis_title=f"Average Fee {scale_label}",
+                height=400,
+                font=dict(size=14)
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Add visualization - Heatmap of fees by token and exchange
+        st.markdown('<div class="subheader-style">Fee Comparison Heatmap</div>', unsafe_allow_html=True)
+        
+        # Prepare data for heatmap
+        heatmap_data = all_fees_df.copy()
+        heatmap_data = heatmap_data.set_index('Token')
+        if 'Avg (Non-Surf)' in heatmap_data.columns:
+            heatmap_data = heatmap_data.drop(columns=['Avg (Non-Surf)'])
+        
+        # Create a heatmap
+        fig = go.Figure(data=go.Heatmap(
+                z=heatmap_data.values,
+                x=heatmap_data.columns,
+                y=heatmap_data.index,
+                colorscale=[
+                    [0, '#1a9850'],      # Dark green for low values
+                    [0.25, '#66bd63'],   # Light green
+                    [0.5, '#fee08b'],    # Yellow
+                    [0.75, '#f46d43'],   # Orange
+                    [1, '#d73027']       # Red for high values
+                ],
+                text=heatmap_data.round(2).values,
+                texttemplate="%{text}",
+                textfont={"size":12}
+            ))
+        
+        fig.update_layout(
+            title=f"Fee Comparison Heatmap {scale_label}",
+            xaxis_title="Exchange",
+            yaxis_title="Token",
+            height=max(400, 50 * len(heatmap_data) + 150),
+            font=dict(size=14)
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Add visualization - Best exchange for each token
+        st.markdown('<div class="subheader-style">Best Exchange by Token</div>', unsafe_allow_html=True)
+        
+        best_exchanges = {}
+        for token, row in heatmap_data.iterrows():
+            min_fee = row.min()
+            best_ex = row.idxmin()
+            best_exchanges[token] = (best_ex, min_fee)
+        
+        # Count the number of "wins" for each exchange
+        exchange_wins = {}
+        for ex in heatmap_data.columns:
+            exchange_wins[ex] = sum(1 for _, (best_ex, _) in best_exchanges.items() if best_ex == ex)
+        
+        # Create a pie chart of wins
+        fig = go.Figure(data=[go.Pie(
+            labels=list(exchange_wins.keys()),
+            values=list(exchange_wins.values()),
+            textinfo='label+percent',
+            marker=dict(colors=[
+                '#1a9850', '#66bd63', '#fee08b', '#f46d43', '#d73027', '#8c510a'
+            ]),
+            hole=.3
+        )])
+        
+        fig.update_layout(
+            title="Exchange with Lowest Fees (Number of Tokens)",
+            height=400,
+            font=dict(size=14)
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
 
-# Create display for each token
-if token_results:
-    # For each token, create a table showing all exchanges
-    for token, df in token_results.items():
+# Display individual token tables with modified styling        
+if token_detailed_results:
+    st.markdown('<div class="header-style">Detailed Analysis by Token</div>', unsafe_allow_html=True)
+    
+    # For each token, create a table showing all exchanges - with better styling
+    for token, df in token_detailed_results.items():
         st.markdown(f"## {token} Exchange Fee Comparison")
         
         # Set the time_label as index to display in rows
@@ -361,11 +535,37 @@ if token_results:
         all_times = sorted(table_df.index, key=time_to_minutes, reverse=True)
         table_df = table_df.reindex(all_times)
         
-        # Format with 4 decimal places
-        formatted_df = table_df.applymap(lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A")
+        # Find if we need to scale the values for better readability
+        mean_fee = table_df.mean().mean()
         
-        # Apply styling
-        styled_df = table_df.style.applymap(color_fee)
+        # Determine scale factor based on mean fee value
+        scale_factor = 1
+        scale_label = ""
+        
+        if mean_fee < 0.001:
+            scale_factor = 1000
+            scale_label = "× 1,000"
+        elif mean_fee < 0.0001:
+            scale_factor = 10000
+            scale_label = "× 10,000"
+        elif mean_fee < 0.00001:
+            scale_factor = 100000
+            scale_label = "× 100,000"
+        
+        # Apply scaling if needed
+        if scale_factor > 1:
+            table_df = table_df * scale_factor
+            st.markdown(f"<div class='info-box'><b>Note:</b> All fee values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
+        
+        # Style function using a more subtle approach - highlighting the lowest fee in each row with blue
+        def highlight_min(s):
+            is_min = s == s.min()
+            return ['background-color: #e3f2fd; font-weight: bold' if v else '' for v in is_min]
+        
+        # Apply styling - highlighting min values in each row
+        styled_df = table_df.style.\
+            apply(highlight_min, axis=1).\
+            format("{:.6f}")  # Show more decimal places
         
         # Display the table
         st.dataframe(styled_df, height=500, use_container_width=True)
@@ -381,7 +581,7 @@ if token_results:
             col_data = table_df[column].dropna()
             if not col_data.empty:
                 summary_data[column] = {
-                    'Daily Average Fee': daily_avgs[column],
+                    'Average Fee': col_data.mean(),
                     'Min Fee': col_data.min(),
                     'Max Fee': col_data.max(),
                     'Data Points': len(col_data)
@@ -389,17 +589,26 @@ if token_results:
                 
         if summary_data:
             summary_df = pd.DataFrame(summary_data).T
-            summary_df = summary_df.round(4)
+            summary_df = summary_df.round(6)  # More decimal places
                 
             # Reset index to display exchange names as a column
             summary_df = summary_df.reset_index()
-            summary_df.columns = ['Exchange', 'Daily Average Fee', 'Min Fee', 'Max Fee', 'Data Points']
+            summary_df.columns = ['Exchange', 'Average Fee', 'Min Fee', 'Max Fee', 'Data Points']
             
-            # Style the summary table with special colors for the daily average
-            styled_summary = summary_df.style.applymap(
-                color_daily_avg, 
-                subset=['Daily Average Fee']
-            )
+            # Highlight the best exchange (lowest average fee)
+            def highlight_min_fee(df):
+                min_avg_fee = df['Average Fee'].min()
+                return ['background-color: #e3f2fd; font-weight: bold' 
+                        if v == min_avg_fee else '' for v in df['Average Fee']]
+            
+            # Apply styling
+            styled_summary = summary_df.style.\
+                apply(highlight_min_fee, axis=0).\
+                format({
+                    'Average Fee': '{:.6f}', 
+                    'Min Fee': '{:.6f}', 
+                    'Max Fee': '{:.6f}'
+                })
             
             # Display the summary table
             st.dataframe(styled_summary, height=200, use_container_width=True)
@@ -409,62 +618,11 @@ if token_results:
             if exchanges_in_data:
                 best_exchange = min(
                     exchanges_in_data,
-                    key=lambda x: summary_data[x]['Daily Average Fee']
+                    key=lambda x: summary_data[x]['Average Fee']
                 )
-                st.info(f"Best exchange for {token} based on daily average fee: **{best_exchange}**")
+                st.info(f"Best exchange for {token} based on average fee: **{best_exchange}**")
         
         st.markdown("---")  # Add a separator between tokens
-    
-    # Create an overall comparison of all tokens
-    st.markdown("## Overall Token Fee Comparison")
-    
-    all_token_averages = {}
-    for token, avgs in token_daily_avgs.items():
-        if 'Average' in avgs:
-            all_token_averages[token] = avgs['Average']
-    
-    if all_token_averages:
-        # Create and sort the overall comparison DataFrame
-        overall_df = pd.DataFrame.from_dict(all_token_averages, orient='index', columns=['Daily Average Fee'])
-        overall_df = overall_df.sort_values(by='Daily Average Fee')
-        
-        # Reset index to display token names as a column
-        overall_df = overall_df.reset_index()
-        overall_df.columns = ['Token', 'Daily Average Fee']
-        
-        # Style the overall table
-        styled_overall = overall_df.style.applymap(
-            color_daily_avg, 
-            subset=['Daily Average Fee']
-        )
-        
-        # Display the overall comparison
-        st.dataframe(styled_overall, height=400, use_container_width=True)
-        
-        # Create a bar chart to visualize the comparison
-        tokens = list(all_token_averages.keys())
-        values = list(all_token_averages.values())
-        
-        # Sort for better visualization
-        sorted_data = sorted(zip(tokens, values), key=lambda x: x[1])
-        sorted_tokens, sorted_values = zip(*sorted_data)
-        
-        fig = go.Figure(data=[
-            go.Bar(
-                x=sorted_tokens,
-                y=sorted_values,
-                marker_color='lightseagreen'
-            )
-        ])
-        
-        fig.update_layout(
-            title="Daily Average Fee Comparison Across Tokens",
-            xaxis_title="Token",
-            yaxis_title="Daily Average Fee",
-            height=500
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
         
 else:
     st.warning("No valid fee data available for the selected tokens.")
@@ -474,39 +632,28 @@ else:
     st.write("2. Verify the exchange names and column names in the database")
     st.write("3. Check the logs for more detailed error messages")
 
-with st.expander("Understanding the Exchange Fee Table"):
+with st.expander("Understanding the Exchange Fee Comparison"):
     st.markdown("""
-    ### How to Read This Table
-    This table shows the average fee rates for each exchange and trading pair over the last 24 hours at 10-minute intervals.
+    ### About This Dashboard
     
-    **Fee Rate Calculation**: 
-    Each value represents the average fee over a 10-minute window. For example, the value at 15:20 is the average of fees from 15:11 to 15:20.
+    This dashboard compares the fees charged by different exchanges for trading various cryptocurrency pairs. 
     
-    **Time Intervals**:
-    Data points occur at 10-minute marks (XX:00, XX:10, XX:20, XX:30, XX:40, XX:50).
+    ### Key Features:
     
-    **Color coding for intervals**:
-    - **Dark Green** (< 0.01): Very low fees
-    - **Light Green** (0.01-0.05): Low fees
-    - **Yellow** (0.05-0.1): Medium fees
-    - **Orange** (0.1-0.5): High fees
-    - **Red** (> 0.5): Very high fees
+    - **Summary Table**: Shows total fees for each token and exchange, with color-coding from green (lowest fees) to red (highest fees).
     
-    **Color coding for daily averages** (different color scheme):
-    - **Purple** (< 0.01): Excellent
-    - **Blue** (0.01-0.05): Very good
-    - **Teal** (0.05-0.1): Good
-    - **Brown** (0.1-0.5): Average
-    - **Maroon** (> 0.5): Poor
+    - **Detailed Token Tables**: For each token, you can see the fees at 10-minute intervals throughout the day.
     
-    **Average Column**: 
-    The "Average" column represents the mean fee rate across all exchanges for each time period.
+    - **Highlighting**: In the detailed tables, the lowest fee in each row is highlighted in light blue.
     
-    **Summary Table**:
-    For each token, a summary table shows:
-    - Daily average fee across all time periods
-    - Minimum and maximum fees observed
-    - Number of data points available
+    - **Visualizations**:
+      - The bar chart shows the average fee across all tokens for each exchange
+      - The heatmap provides a comparative view of fees across all exchanges and tokens
+      - The pie chart shows which exchange offers the lowest fees for the most tokens
     
-    **Missing values (light gray cells)** indicate periods where no data was available for that exchange.
+    - **Best Exchange**: For each token and overall, the exchange with the lowest fees is identified.
+    
+    ### Note on Scaling:
+    
+    If fee values are very small, they may be multiplied by a scaling factor for better readability. The scaling factor is indicated with each table.
     """)
