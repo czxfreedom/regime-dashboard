@@ -101,7 +101,7 @@ def universal_hurst(ts):
     adjusted_ts = ts + epsilon
     log_returns = np.diff(np.log(adjusted_ts))
     
-    if np.all(log_returns == 0):
+    if len(log_returns) > 0 and np.all(log_returns == 0):
         return 0.5
     
     hurst_estimates = []
