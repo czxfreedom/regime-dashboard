@@ -29,13 +29,23 @@ except Exception as e:
 # --- UI Setup ---
 st.set_option('deprecation.showPyplotGlobalUse', False)
 st.title("Exchange Fee Comparison (10min Intervals)")
-st.subheader("Transaction Fees Across Binance, Hyperliquid, and Gate - Last 24 Hours (Singapore Time)")
+st.subheader("Transaction Fees Across Exchanges - Last 24 Hours (Singapore Time)")
 
 # Define parameters
 lookback_days = 1  # 24 hours
 interval_minutes = 10  # 10-minute intervals
 singapore_timezone = pytz.timezone('Asia/Singapore')
-exchanges = ["Binance", "Hyperliquid", "Gate"]
+
+# Correct exchange names from the database
+exchanges = ["binanceFuture", "gateFuture", "hyperliquidFuture", "mexcFuture", "okxFuture", "surfFuture"]
+exchanges_display = {
+    "binanceFuture": "Binance",
+    "gateFuture": "Gate",
+    "hyperliquidFuture": "Hyperliquid",
+    "mexcFuture": "MEXC",
+    "okxFuture": "OKX",
+    "surfFuture": "SurfFuture"
+}
 
 # Fetch all available tokens from DB
 @st.cache_data(show_spinner="Fetching tokens...")
@@ -127,6 +137,11 @@ def fetch_fee_data(token):
         # Convert timestamp to datetime and set as index
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         
+        # Debug: Check what data we got
+        print(f"[{token}] Data fetched. Shape: {df.shape}")
+        print(f"[{token}] Unique sources: {df['source'].unique()}")
+        print(f"[{token}] First few rows: {df.head()}")
+        
         # Prepare data structure for interval processing
         fee_data = {}
         avg_data = []
@@ -150,7 +165,7 @@ def fetch_fee_data(token):
                 if not interval_points.empty:
                     # Get last 24 hours
                     last_24h = interval_points.iloc[-144:]  # 144 10-minute intervals in 24 hours
-                    fee_data[exchange] = last_24h
+                    fee_data[exchanges_display[exchange]] = last_24h
                     
                     # Prepare data for average calculation
                     exchange_avg_df = pd.DataFrame(last_24h)
@@ -161,6 +176,7 @@ def fetch_fee_data(token):
                 
         # If no valid data found for any exchange
         if not fee_data:
+            print(f"[{token}] No valid data after processing.")
             return None
             
         # Calculate average fee across all exchanges
@@ -179,6 +195,8 @@ def fetch_fee_data(token):
     except Exception as e:
         st.error(f"Error processing {token}: {e}")
         print(f"[{token}] Error processing: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 # Show progress bar while calculating
@@ -269,9 +287,10 @@ if token_results:
             st.dataframe(summary_df, height=200, use_container_width=True)
             
             # Calculate best exchange (lowest average fee rate)
-            if 'Average' in summary_data:
+            exchanges_in_data = [ex for ex in summary_data.keys() if ex != 'Average']
+            if 'Average' in summary_data and exchanges_in_data:
                 best_exchange = min(
-                    [ex for ex in summary_data.keys() if ex != 'Average'], 
+                    exchanges_in_data,
                     key=lambda x: summary_data[x]['Average Fee Rate']
                 )
                 st.info(f"Best exchange for {token} based on average fee rate: **{best_exchange}**")
@@ -329,6 +348,11 @@ if token_results:
         
 else:
     st.warning("No valid fee data available for the selected tokens.")
+    # Add more diagnostic information
+    st.error("Please check the following:")
+    st.write("1. Make sure the oracle_exchange_fee table has data for the selected time period")
+    st.write("2. Verify the exchange names and column names in the database")
+    st.write("3. Check the logs for more detailed error messages")
 
 with st.expander("Understanding the Exchange Fee Table"):
     st.markdown("""
