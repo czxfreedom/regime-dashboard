@@ -138,7 +138,7 @@ def fetch_trade_counts(pair_name):
         COUNT(*) AS trade_count
     FROM public.trade_fill_fresh
     WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
-    AND pair_name = '{pair_name}'
+    AND pair_id IN (SELECT pair_id FROM public.trade_pool_pairs WHERE pair_name = '{pair_name}')
     GROUP BY
         date_trunc('hour', created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
         INTERVAL '30 min' * (EXTRACT(MINUTE FROM created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore')::INT / 30)
