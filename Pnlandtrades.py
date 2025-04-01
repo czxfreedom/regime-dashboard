@@ -419,24 +419,24 @@ if pair_results:
     pnl_table = pnl_table.reindex(ordered_times)
     
     # Round to 2 decimal places for display
-    pnl_table = pnl_table.round(2)
+    pnl_table = pnl_table.round(0).astype(int)
     
     def color_pnl_cells(val):
         if pd.isna(val) or val == 0:
             return 'background-color: #f5f5f5; color: #666666;'  # Grey for missing/zero
         elif val < low_pnl_threshold:  # Large negative PNL (loss) - red
-            return f'background-color: rgba(255, 0, 0, 0.7); color: white'
+            return f'background-color: rgba(255, 0, 0, 0.9); color: white'
         elif val < 0:  # Small negative PNL (loss) - light red
             intensity = max(0, min(255, int(255 * abs(val) / abs(low_pnl_threshold))))
-            return f'background-color: rgba(255, {255-intensity}, {255-intensity}, 0.7); color: black'
+            return f'background-color: rgba(255, {100-intensity}, {100-intensity}, 0.9); color: black'
         elif val < high_pnl_threshold:  # Small positive PNL (profit) - light green
             intensity = max(0, min(255, int(255 * val / high_pnl_threshold)))
-            return f'background-color: rgba({255-intensity}, 255, {255-intensity}, 0.7); color: black'
+            return f'background-color: rgba({100-intensity}, 180, {100-intensity}, 0.9); color: black'
         else:  # Large positive PNL (profit) - green
-            return 'background-color: rgba(0, 255, 0, 0.7); color: black'
+            return 'background-color: rgba(0, 120, 0, 0.7); color: black'
     
     styled_pnl_table = pnl_table.style.applymap(color_pnl_cells)
-    st.markdown("## Platform PNL Table (30min timeframe, Last 24 hours, Singapore Time)")
+    st.markdown("## Platform PNL Table (USD, 30min timeframe, Last 24 hours, Singapore Time)")
     st.markdown("### Color Legend: <span style='color:red'>Loss</span>, <span style='color:#ff9999'>Small Loss</span>, <span style='color:#99ff99'>Small Profit</span>, <span style='color:green'>Large Profit</span>", unsafe_allow_html=True)
     st.markdown("Values shown in USD")
     st.dataframe(styled_pnl_table, height=700, use_container_width=True)
@@ -640,13 +640,18 @@ if pair_results:
                     )
                     
                     # Add trend line for all data points
-                    fig.add_traces(
-                        px.scatter(
-                            scatter_df, 
-                            x='Trade Count', 
-                            y='Platform PNL (USD)',
-                            trendline="ols"
-                        ).data[1]
+                    fig = px.scatter(
+                        scatter_df, 
+                        x='Trade Count', 
+                        y='Platform PNL (USD)',
+                        color='Pair',
+                        title='Trade Count vs. Platform PNL Correlation',
+                        hover_data=['Pair', 'Trade Count', 'Platform PNL (USD)']
+                    )
+                    fig.update_layout(
+                        height=500,
+                        xaxis_title="Number of Trades",
+                        yaxis_title="Platform PNL (USD)",
                     )
                     
                     st.plotly_chart(fig, use_container_width=True)
