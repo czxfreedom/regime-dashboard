@@ -457,7 +457,7 @@ if token_results:
             
             with col3:
                 st.markdown("### Trending Tokens")
-                tr_tokens = [(t, v, r) for t, (v, r) in latest_values.values() if v > 0.6]
+                tr_tokens = [(t, v, r) for t, (v, r) in latest_values.items() if v > 0.6]
                 tr_tokens.sort(key=lambda x: x[1], reverse=True)
                 if tr_tokens:
                     for token, value, regime in tr_tokens:
