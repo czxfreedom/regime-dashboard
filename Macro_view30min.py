@@ -38,6 +38,11 @@ rolling_window = 20  # Window size for Hurst calculation
 expected_points = 48  # Expected data points per pair over 24 hours
 singapore_timezone = pytz.timezone('Asia/Singapore')
 
+# Get current time in Singapore timezone
+now_utc = datetime.now(pytz.utc)
+now_sg = now_utc.astimezone(singapore_timezone)
+st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
+
 # Fetch all available tokens from DB
 @st.cache_data(show_spinner="Fetching tokens...")
 def fetch_all_tokens():
@@ -222,10 +227,32 @@ def detailed_regime_classification(hurst):
     else:
         return ("TREND", 3, "Strong trending")
 
-# Function to convert time string to sortable minutes value
-def time_to_minutes(time_str):
-    hours, minutes = map(int, time_str.split(':'))
-    return hours * 60 + minutes
+# Function to generate proper 30-minute time blocks for the past 24 hours
+def generate_aligned_time_blocks(current_time):
+    """
+    Generate fixed 30-minute time blocks for past 24 hours,
+    aligned with standard 30-minute intervals (e.g., 4:00-4:30, 4:30-5:00)
+    """
+    # Round down to the nearest 30-minute mark
+    if current_time.minute < 30:
+        # Round down to XX:00
+        latest_complete_block_end = current_time.replace(minute=0, second=0, microsecond=0)
+    else:
+        # Round down to XX:30
+        latest_complete_block_end = current_time.replace(minute=30, second=0, microsecond=0)
+    
+    # Generate block labels for display
+    blocks = []
+    for i in range(48):  # 24 hours of 30-minute blocks
+        block_end = latest_complete_block_end - timedelta(minutes=i*30)
+        block_start = block_end - timedelta(minutes=30)
+        block_label = f"{block_start.strftime('%H:%M')}"
+        blocks.append(block_label)
+    
+    return blocks
+
+# Generate aligned time blocks
+aligned_time_blocks = generate_aligned_time_blocks(now_sg)
 
 # Fetch and calculate Hurst for a token with 30min timeframe
 @st.cache_data(ttl=600, show_spinner="Calculating Hurst exponents...")
@@ -273,18 +300,27 @@ def fetch_and_calculate_hurst(token):
         # Apply universal_hurst to the 'close' prices directly
         one_min_ohlc['Hurst'] = one_min_ohlc['close'].rolling(window=rolling_window).apply(universal_hurst)
 
-        thirty_min_hurst = one_min_ohlc['Hurst'].resample('30min').mean().dropna()
+        # Resample to exactly 30min intervals aligned with clock
+        thirty_min_hurst = one_min_ohlc['Hurst'].resample('30min', closed='left', label='left').mean().dropna()
+        
         if thirty_min_hurst.empty:
             print(f"[{token}] No 30-min Hurst data.")
             return None
-        last_24h_hurst = thirty_min_hurst.iloc[-48:]
+            
+        last_24h_hurst = thirty_min_hurst.tail(48)  # Get up to last 48 periods (24 hours)
         last_24h_hurst = last_24h_hurst.to_frame()
-        # Store original datetime index for sorting
+        
+        # Store original datetime index for reference
         last_24h_hurst['original_datetime'] = last_24h_hurst.index
+        
+        # Format time label to match our aligned blocks (HH:MM format)
         last_24h_hurst['time_label'] = last_24h_hurst.index.strftime('%H:%M')
+        
+        # Calculate regime information
         last_24h_hurst['regime_info'] = last_24h_hurst['Hurst'].apply(detailed_regime_classification)
         last_24h_hurst['regime'] = last_24h_hurst['regime_info'].apply(lambda x: x[0])
         last_24h_hurst['regime_desc'] = last_24h_hurst['regime_info'].apply(lambda x: x[2])
+        
         print(f"[{token}] Successful Calculation")
         return last_24h_hurst
     except Exception as e:
@@ -315,29 +351,25 @@ status_text.text(f"Processed {len(token_results)}/{len(selected_tokens)} tokens 
 
 # Create table for display
 if token_results:
-    # Get all datetimes from all tokens
-    combined_datetime_df = pd.DataFrame()
-    for token, df in token_results.items():
-        if 'original_datetime' in df.columns:
-            token_dt = df[['original_datetime', 'time_label']].copy()
-            token_dt['token'] = token
-            combined_datetime_df = pd.concat([combined_datetime_df, token_dt])
-    
-    # Group by time_label and find the latest datetime for each time slot 
-    # (in case different tokens have slightly different timestamps)
-    time_mapping = combined_datetime_df.groupby('time_label')['original_datetime'].max()
-    
-    # Now create the hurst table using time_labels
-    all_times = sorted(time_mapping.index, key=time_to_minutes, reverse=True)
-    
+    # Create table data
     table_data = {}
     for token, df in token_results.items():
         hurst_series = df.set_index('time_label')['Hurst']
         table_data[token] = hurst_series
     
+    # Create DataFrame with all tokens
     hurst_table = pd.DataFrame(table_data)
-    # Use the sorted time labels
-    hurst_table = hurst_table.reindex(all_times)
+    
+    # Apply the time blocks in the proper order (most recent first)
+    available_times = set(hurst_table.index)
+    ordered_times = [t for t in aligned_time_blocks if t in available_times]
+    
+    # If no matches are found in aligned blocks, fallback to the available times
+    if not ordered_times and available_times:
+        ordered_times = sorted(list(available_times), reverse=True)
+    
+    # Reindex with the ordered times
+    hurst_table = hurst_table.reindex(ordered_times)
     hurst_table = hurst_table.round(2)
     
     def color_cells(val):
@@ -358,12 +390,25 @@ if token_results:
     st.dataframe(styled_table, height=700, use_container_width=True)
     
     st.subheader("Current Market Overview (Singapore Time)")
+    
+    # Use the first aligned time block that has data for each token
     latest_values = {}
     for token, df in token_results.items():
         if not df.empty and not df['Hurst'].isna().all():
-            latest = df['Hurst'].iloc[-1]
-            regime = df['regime_desc'].iloc[-1]
-            latest_values[token] = (latest, regime)
+            # Try to find the most recent time block in our aligned blocks
+            for block_time in aligned_time_blocks[:5]:  # Check the 5 most recent blocks
+                latest_data = df[df['time_label'] == block_time]
+                if not latest_data.empty:
+                    latest = latest_data['Hurst'].iloc[0]
+                    regime = latest_data['regime_desc'].iloc[0]
+                    latest_values[token] = (latest, regime)
+                    break
+            
+            # If no match in aligned blocks, use the most recent data point
+            if token not in latest_values:
+                latest = df['Hurst'].iloc[-1]
+                regime = df['regime_desc'].iloc[-1]
+                latest_values[token] = (latest, regime)
     
     if latest_values:
         mean_reverting = sum(1 for v, r in latest_values.values() if v < 0.4)
@@ -371,53 +416,56 @@ if token_results:
         trending = sum(1 for v, r in latest_values.values() if v > 0.6)
         total = mean_reverting + random_walk + trending
         
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Mean-Reverting", f"{mean_reverting} ({mean_reverting/total*100:.1f}%)", delta=f"{mean_reverting/total*100:.1f}%")
-        col2.metric("Random Walk", f"{random_walk} ({random_walk/total*100:.1f}%)", delta=f"{random_walk/total*100:.1f}%")
-        col3.metric("Trending", f"{trending} ({trending/total*100:.1f}%)", delta=f"{trending/total*100:.1f}%")
-        
-        labels = ['Mean-Reverting', 'Random Walk', 'Trending']
-        values = [mean_reverting, random_walk, trending]
-        colors = ['rgba(255,100,100,0.8)', 'rgba(200,200,200,0.8)', 'rgba(100,255,100,0.8)'] # Slightly more opaque
-        
-        fig = go.Figure(data=[go.Pie(labels=labels, values=values, marker=dict(colors=colors, line=dict(color='#000000', width=2)), textinfo='label+percent', hole=.3)]) # Added black borders
-        fig.update_layout(
-            title="Current Market Regime Distribution (Singapore Time)",
-            height=400,
-            font=dict(color="#000000", size=12),  # Set default font color and size
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown("### Mean-Reverting Tokens")
-            mr_tokens = [(t, v, r) for t, (v, r) in latest_values.items() if v < 0.4]
-            mr_tokens.sort(key=lambda x: x[1])
-            if mr_tokens:
-                for token, value, regime in mr_tokens:
-                    st.markdown(f"- **{token}**: <span style='color:red'>{value:.2f}</span> ({regime})", unsafe_allow_html=True)
-            else:
-                st.markdown("*No tokens in this category*")
-        
-        with col2:
-            st.markdown("### Random Walk Tokens")
-            rw_tokens = [(t, v, r) for t, (v, r) in latest_values.items() if 0.4 <= v <= 0.6]
-            rw_tokens.sort(key=lambda x: x[1])
-            if rw_tokens:
-                for token, value, regime in rw_tokens:
-                    st.markdown(f"- **{token}**: <span style='color:gray'>{value:.2f}</span> ({regime})", unsafe_allow_html=True)
-            else:
-                st.markdown("*No tokens in this category*")
-        
-        with col3:
-            st.markdown("### Trending Tokens")
-            tr_tokens = [(t, v, r) for t, (v, r) in latest_values.items() if v > 0.6]
-            tr_tokens.sort(key=lambda x: x[1], reverse=True)
-            if tr_tokens:
-                for token, value, regime in tr_tokens:
-                    st.markdown(f"- **{token}**: <span style='color:green'>{value:.2f}</span> ({regime})", unsafe_allow_html=True)
-            else:
-                st.markdown("*No tokens in this category*")
+        if total > 0:  # Avoid division by zero
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Mean-Reverting", f"{mean_reverting} ({mean_reverting/total*100:.1f}%)", delta=f"{mean_reverting/total*100:.1f}%")
+            col2.metric("Random Walk", f"{random_walk} ({random_walk/total*100:.1f}%)", delta=f"{random_walk/total*100:.1f}%")
+            col3.metric("Trending", f"{trending} ({trending/total*100:.1f}%)", delta=f"{trending/total*100:.1f}%")
+            
+            labels = ['Mean-Reverting', 'Random Walk', 'Trending']
+            values = [mean_reverting, random_walk, trending]
+            colors = ['rgba(255,100,100,0.8)', 'rgba(200,200,200,0.8)', 'rgba(100,255,100,0.8)'] # Slightly more opaque
+            
+            fig = go.Figure(data=[go.Pie(labels=labels, values=values, marker=dict(colors=colors, line=dict(color='#000000', width=2)), textinfo='label+percent', hole=.3)]) # Added black borders
+            fig.update_layout(
+                title="Current Market Regime Distribution (Singapore Time)",
+                height=400,
+                font=dict(color="#000000", size=12),  # Set default font color and size
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown("### Mean-Reverting Tokens")
+                mr_tokens = [(t, v, r) for t, (v, r) in latest_values.items() if v < 0.4]
+                mr_tokens.sort(key=lambda x: x[1])
+                if mr_tokens:
+                    for token, value, regime in mr_tokens:
+                        st.markdown(f"- **{token}**: <span style='color:red'>{value:.2f}</span> ({regime})", unsafe_allow_html=True)
+                else:
+                    st.markdown("*No tokens in this category*")
+            
+            with col2:
+                st.markdown("### Random Walk Tokens")
+                rw_tokens = [(t, v, r) for t, (v, r) in latest_values.items() if 0.4 <= v <= 0.6]
+                rw_tokens.sort(key=lambda x: x[1])
+                if rw_tokens:
+                    for token, value, regime in rw_tokens:
+                        st.markdown(f"- **{token}**: <span style='color:gray'>{value:.2f}</span> ({regime})", unsafe_allow_html=True)
+                else:
+                    st.markdown("*No tokens in this category*")
+            
+            with col3:
+                st.markdown("### Trending Tokens")
+                tr_tokens = [(t, v, r) for t, (v, r) in latest_values.values() if v > 0.6]
+                tr_tokens.sort(key=lambda x: x[1], reverse=True)
+                if tr_tokens:
+                    for token, value, regime in tr_tokens:
+                        st.markdown(f"- **{token}**: <span style='color:green'>{value:.2f}</span> ({regime})", unsafe_allow_html=True)
+                else:
+                    st.markdown("*No tokens in this category*")
+        else:
+            st.warning("No valid data found for analysis.")
     else:
         st.warning("No data available for the selected tokens.")
 
@@ -435,6 +483,11 @@ with st.expander("Understanding the Daily Hurst Table"):
     - Darker green = Stronger trending
     **Technical details:**
     - Each Hurst value is calculated by applying a rolling window of 20 one-minute bars to the closing prices, and then averaging the Hurst values of 30 one-minute bars.
-    - Values are calculated using multiple methods (R/S Analysis, Variance Method, and DFA)
+    - Values are calculated using multiple methods (R/S Analysis, Variance Method, and Autocorrelation)
     - Missing values (light gray cells) indicate insufficient data for calculation
     """)
+
+# Add an expandable section to view the exact time blocks being analyzed
+with st.expander("View Time Blocks Being Analyzed"):
+    time_blocks_df = pd.DataFrame(aligned_time_blocks, columns=['Block Start Time'])
+    st.dataframe(time_blocks_df)
