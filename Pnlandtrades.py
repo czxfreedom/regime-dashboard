@@ -410,7 +410,8 @@ if pair_results:
     pnl_data = {}
     for pair_name, df in pair_results.items():
         if 'platform_pnl' in df.columns:
-            pnl_data[pair_name] = df['platform_pnl']
+            if df['platform_pnl'].abs().sum() > 0:
+              pnl_data[pair_name] = df['platform_pnl']
     
     # Create DataFrame with all pairs
     pnl_table = pd.DataFrame(pnl_data)
