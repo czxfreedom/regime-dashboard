@@ -1,5 +1,5 @@
 # Save this as pages/06_Trades_PNL_Table.py in your Streamlit app folder
-
+pip install statsmodels
 import streamlit as st
 import pandas as pd
 import numpy as np
