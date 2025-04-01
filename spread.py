@@ -225,16 +225,29 @@ def fetch_token_fee_data(token):
         
         # Calculate non-surf average (Binance, Gate, Hyperliquid)
         non_surf_columns = ['Binance', 'Gate', 'Hyperliquid']
+        # Only include columns that exist in the DataFrame
         non_surf_columns = [col for col in non_surf_columns if col in result_df.columns]
         
         if non_surf_columns:
-            result_df['Avg (Non-Surf)'] = result_df[non_surf_columns].mean(axis=1)
+            # Calculate row by row to avoid operating on all columns
+            non_surf_avg = []
+            for idx, row in result_df.iterrows():
+                values = [row[col] for col in non_surf_columns if not pd.isna(row[col])]
+                if values:
+                    non_surf_avg.append(sum(values) / len(values))
+                else:
+                    non_surf_avg.append(np.nan)
+            result_df['Avg (Non-Surf)'] = non_surf_avg
         
-        # Calculate daily average for each exchange
+        # Calculate daily average for each exchange - column by column
         daily_avgs = {}
         for column in result_df.columns:
             if column != 'time_label':
-                daily_avgs[column] = result_df[column].mean()
+                values = result_df[column].dropna().values
+                if len(values) > 0:
+                    daily_avgs[column] = sum(values) / len(values)
+                else:
+                    daily_avgs[column] = np.nan
         
         return result_df, daily_avgs
             
@@ -359,29 +372,45 @@ if token_summary_results:
     if not all_fees_df.empty and 'Token' in all_fees_df.columns:
         all_fees_df = all_fees_df.sort_values(by='Token')
         
-        # Find if we need to scale the values for better readability
-        fee_values = all_fees_df.select_dtypes(include=[np.number])
-        mean_fee = fee_values.mean().mean()
-        
-        # Determine scale factor based on mean fee value
+        # Calculate scaling factor based on selected columns
         scale_factor = 1
         scale_label = ""
         
-        if mean_fee < 0.001:
-            scale_factor = 1000
-            scale_label = "× 1,000"
-        elif mean_fee < 0.0001:
-            scale_factor = 10000
-            scale_label = "× 10,000"
-        elif mean_fee < 0.00001:
-            scale_factor = 100000
-            scale_label = "× 100,000"
+        # Find numeric columns
+        numeric_cols = []
+        for col in all_fees_df.columns:
+            if col != 'Token':
+                try:
+                    # Check if column can be treated as numeric
+                    all_fees_df[col] = pd.to_numeric(all_fees_df[col], errors='coerce')
+                    numeric_cols.append(col)
+                except:
+                    pass
+        
+        # Calculate mean for scaling
+        if numeric_cols:
+            values = []
+            for col in numeric_cols:
+                values.extend(all_fees_df[col].dropna().tolist())
+            
+            if values:
+                mean_fee = sum(values) / len(values)
+                
+                # Determine scale factor based on mean fee value
+                if mean_fee < 0.001:
+                    scale_factor = 1000
+                    scale_label = "× 1,000"
+                elif mean_fee < 0.0001:
+                    scale_factor = 10000
+                    scale_label = "× 10,000"
+                elif mean_fee < 0.00001:
+                    scale_factor = 100000
+                    scale_label = "× 100,000"
         
         # Apply scaling if needed
         if scale_factor > 1:
-            for col in all_fees_df.columns:
-                if col != 'Token' and all_fees_df[col].dtype != 'object':
-                    all_fees_df[col] = all_fees_df[col] * scale_factor
+            for col in numeric_cols:
+                all_fees_df[col] = all_fees_df[col] * scale_factor
             
             st.markdown(f"<div class='info-box'><b>Note:</b> All fee values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
         
@@ -393,8 +422,8 @@ if token_summary_results:
         all_fees_df = all_fees_df[ordered_columns]
         
         # Round values to 2 decimal places for display
-        for col in all_fees_df.columns:
-            if col != 'Token' and all_fees_df[col].dtype != 'object':
+        for col in numeric_cols:
+            if col in all_fees_df.columns:
                 all_fees_df[col] = all_fees_df[col].round(2)
         
         # Display the summary table with dynamic height to show all tokens without scrolling
@@ -402,31 +431,36 @@ if token_summary_results:
         table_height = max(100 + 35 * token_count, 200)  # Minimum height of 200px
         st.dataframe(all_fees_df, height=table_height, use_container_width=True)
         
-        # Calculate and display the best exchange based on average fees
-        exchange_overall_avgs = {}
-        for col in all_fees_df.columns:
-            if col not in ['Token', 'Avg (Non-Surf)']:
-                avg_value = all_fees_df[col].mean()
-                if not pd.isna(avg_value):
-                    exchange_overall_avgs[col] = avg_value
-        
         # Check if SurfFuture has lower fees than average
-        if 'SurfFuture' in exchange_overall_avgs and 'Avg (Non-Surf)' in all_fees_df.columns:
-            surf_avg = all_fees_df['SurfFuture'].mean()
-            non_surf_avg = all_fees_df['Avg (Non-Surf)'].mean()
+        if 'SurfFuture' in all_fees_df.columns and 'Avg (Non-Surf)' in all_fees_df.columns:
+            # Extract values for comparison, skipping NaN
+            surf_values = []
+            nonsurf_values = []
             
-            if surf_avg < non_surf_avg:
-                st.success(f"🏆 **SurfFuture has tighter spreads overall**: SurfFuture ({surf_avg:.2f}) vs Other Exchanges ({non_surf_avg:.2f})")
-            else:
-                st.info(f"SurfFuture average: {surf_avg:.2f}, Other Exchanges average: {non_surf_avg:.2f}")
+            for idx, row in all_fees_df.iterrows():
+                if not pd.isna(row['SurfFuture']) and not pd.isna(row['Avg (Non-Surf)']):
+                    surf_values.append(row['SurfFuture'])
+                    nonsurf_values.append(row['Avg (Non-Surf)'])
+            
+            if surf_values and nonsurf_values:
+                surf_avg = sum(surf_values) / len(surf_values)
+                non_surf_avg = sum(nonsurf_values) / len(nonsurf_values)
+                
+                if surf_avg < non_surf_avg:
+                    st.success(f"🏆 **SurfFuture has tighter spreads overall**: SurfFuture ({surf_avg:.2f}) vs Other Exchanges ({non_surf_avg:.2f})")
+                else:
+                    st.info(f"SurfFuture average: {surf_avg:.2f}, Other Exchanges average: {non_surf_avg:.2f}")
 
         # Add visualization - Bar chart comparing average fees by exchange
         st.markdown('<div class="subheader-style">Average Fee by Exchange</div>', unsafe_allow_html=True)
         
+        # Calculate average by exchange
         avg_by_exchange = {}
         for col in all_fees_df.columns:
-            if col not in ['Token', 'Avg (Non-Surf)']:
-                avg_by_exchange[col] = all_fees_df[col].mean()
+            if col not in ['Token', 'Avg (Non-Surf)'] and col in numeric_cols:
+                values = all_fees_df[col].dropna().tolist()
+                if values:
+                    avg_by_exchange[col] = sum(values) / len(values)
         
         if avg_by_exchange:
             # Sort exchanges by average fee
@@ -461,36 +495,43 @@ if token_summary_results:
         # Add visualization - Best exchange for each token
         st.markdown('<div class="subheader-style">Best Exchange by Token</div>', unsafe_allow_html=True)
         
+        # Calculate best exchange for each token
         best_exchanges = {}
         for idx, row in all_fees_df.iterrows():
-            fee_cols = [c for c in row.index if c != 'Token' and c != 'Avg (Non-Surf)']
-            if fee_cols:
-                fees = row[fee_cols]
-                min_fee = fees.min()
-                best_ex = fees.idxmin()
-                best_exchanges[row['Token']] = (best_ex, min_fee)
+            exchange_cols = [c for c in row.index if c not in ['Token', 'Avg (Non-Surf)'] and c in numeric_cols]
+            if exchange_cols:
+                # Extract values and exchanges, skipping NaN
+                valid_fees = {}
+                for col in exchange_cols:
+                    if not pd.isna(row[col]):
+                        valid_fees[col] = row[col]
+                
+                if valid_fees:
+                    best_ex = min(valid_fees.items(), key=lambda x: x[1])
+                    best_exchanges[row['Token']] = best_ex
         
         # Count the number of "wins" for each exchange
         exchange_wins = {}
-        for ex in [c for c in all_fees_df.columns if c != 'Token' and c != 'Avg (Non-Surf)']:
+        for ex in [c for c in all_fees_df.columns if c not in ['Token', 'Avg (Non-Surf)'] and c in numeric_cols]:
             exchange_wins[ex] = sum(1 for _, (best_ex, _) in best_exchanges.items() if best_ex == ex)
         
         # Create a pie chart of wins
-        fig = go.Figure(data=[go.Pie(
-            labels=list(exchange_wins.keys()),
-            values=list(exchange_wins.values()),
-            textinfo='label+percent',
-            marker=dict(colors=['#66bd63', '#fee08b', '#f46d43', '#1a9850']),
-            hole=.3
-        )])
-        
-        fig.update_layout(
-            title="Exchange with Lowest Fees (Number of Tokens)",
-            height=400,
-            font=dict(size=14)
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
+        if exchange_wins:
+            fig = go.Figure(data=[go.Pie(
+                labels=list(exchange_wins.keys()),
+                values=list(exchange_wins.values()),
+                textinfo='label+percent',
+                marker=dict(colors=['#66bd63', '#fee08b', '#f46d43', '#1a9850']),
+                hole=.3
+            )])
+            
+            fig.update_layout(
+                title="Exchange with Lowest Fees (Number of Tokens)",
+                height=400,
+                font=dict(size=14)
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
 
 # Display individual token tables with modified layout
 if token_detailed_results:
@@ -503,28 +544,45 @@ if token_detailed_results:
         # Set the time_label as index to display in rows
         table_df = df.copy()
         
-        # Find if we need to scale the values for better readability
-        mean_fee = table_df.mean().mean()
-        
-        # Determine scale factor based on mean fee value
+        # Determine scale factor
         scale_factor = 1
         scale_label = ""
         
-        if mean_fee < 0.001:
-            scale_factor = 1000
-            scale_label = "× 1,000"
-        elif mean_fee < 0.0001:
-            scale_factor = 10000
-            scale_label = "× 10,000"
-        elif mean_fee < 0.00001:
-            scale_factor = 100000
-            scale_label = "× 100,000"
+        # Find numeric columns
+        numeric_cols = []
+        for col in table_df.columns:
+            if col != 'time_label':
+                try:
+                    # Check if column can be treated as numeric
+                    table_df[col] = pd.to_numeric(table_df[col], errors='coerce')
+                    numeric_cols.append(col)
+                except:
+                    pass
+        
+        # Calculate mean for scaling
+        if numeric_cols:
+            values = []
+            for col in numeric_cols:
+                values.extend(table_df[col].dropna().tolist())
+            
+            if values:
+                mean_fee = sum(values) / len(values)
+                
+                # Determine scale factor based on mean fee value
+                if mean_fee < 0.001:
+                    scale_factor = 1000
+                    scale_label = "× 1,000"
+                elif mean_fee < 0.0001:
+                    scale_factor = 10000
+                    scale_label = "× 10,000"
+                elif mean_fee < 0.00001:
+                    scale_factor = 100000
+                    scale_label = "× 100,000"
         
         # Apply scaling if needed
         if scale_factor > 1:
-            for col in table_df.columns:
-                if col not in ['time_label']:
-                    table_df[col] = table_df[col] * scale_factor
+            for col in numeric_cols:
+                table_df[col] = table_df[col] * scale_factor
             st.markdown(f"<div class='info-box'><b>Note:</b> All fee values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
         
         # Reorder columns to the specified layout
@@ -539,8 +597,8 @@ if token_detailed_results:
         
         # Format to 6 decimal places
         formatted_df = table_df.copy()
-        for col in formatted_df.columns:
-            if col != 'time_label':
+        for col in numeric_cols:
+            if col in formatted_df.columns:
                 formatted_df[col] = formatted_df[col].round(6)
         
         # Display the table with the time_label as the first column
@@ -548,13 +606,23 @@ if token_detailed_results:
         
         # Check if SurfFuture has tighter spread than the average of the other exchanges
         if 'SurfFuture' in table_df.columns and 'Avg (Non-Surf)' in table_df.columns:
-            surf_avg = table_df['SurfFuture'].mean()
-            non_surf_avg = table_df['Avg (Non-Surf)'].mean()
+            # Extract values for comparison, skipping NaN
+            surf_values = []
+            nonsurf_values = []
             
-            if surf_avg < non_surf_avg:
-                st.success(f"✅ SURF Spread tighter: SurfFuture ({surf_avg:.6f}) < Non-Surf Average ({non_surf_avg:.6f})")
-            else:
-                st.info(f"SurfFuture ({surf_avg:.6f}) ≥ Non-Surf Average ({non_surf_avg:.6f})")
+            for idx, row in table_df.iterrows():
+                if not pd.isna(row['SurfFuture']) and not pd.isna(row['Avg (Non-Surf)']):
+                    surf_values.append(row['SurfFuture'])
+                    nonsurf_values.append(row['Avg (Non-Surf)'])
+            
+            if surf_values and nonsurf_values:
+                surf_avg = sum(surf_values) / len(surf_values)
+                non_surf_avg = sum(nonsurf_values) / len(nonsurf_values)
+                
+                if surf_avg < non_surf_avg:
+                    st.success(f"✅ SURF Spread tighter: SurfFuture ({surf_avg:.6f}) < Non-Surf Average ({non_surf_avg:.6f})")
+                else:
+                    st.info(f"SurfFuture ({surf_avg:.6f}) ≥ Non-Surf Average ({non_surf_avg:.6f})")
         
         # Create a summary for this token
         st.markdown("### Exchange Comparison Summary")
@@ -562,26 +630,29 @@ if token_detailed_results:
         # Get the daily averages for this token
         daily_avgs = token_daily_avgs[token]
         
+        # Build summary data manually
         summary_data = []
-        for column in ordered_columns:
-            if column != 'time_label' and column in daily_avgs:
-                summary_data.append({
-                    'Exchange': column,
-                    'Average Fee': daily_avgs[column]
-                })
-                
+        for exchange in ordered_columns:
+            if exchange != 'time_label' and exchange in daily_avgs:
+                row_data = {
+                    'Exchange': exchange,
+                    'Average Fee': daily_avgs[exchange]
+                }
+                if not pd.isna(row_data['Average Fee']):
+                    # Apply scaling
+                    if scale_factor > 1:
+                        row_data['Average Fee'] = row_data['Average Fee'] * scale_factor
+                    
+                    # Round
+                    row_data['Average Fee'] = round(row_data['Average Fee'], 6)
+                    
+                    summary_data.append(row_data)
+        
         if summary_data:
-            # Create a summary dataframe
+            # Create a DataFrame from the data
             summary_df = pd.DataFrame(summary_data)
             
-            # Apply scaling if needed
-            if scale_factor > 1:
-                summary_df['Average Fee'] = summary_df['Average Fee'] * scale_factor
-            
-            # Round to 6 decimal places
-            summary_df['Average Fee'] = summary_df['Average Fee'].round(6)
-            
-            # Display the summary dataframe
+            # Display it
             st.dataframe(summary_df, height=200, use_container_width=True)
         
         st.markdown("---")  # Add a separator between tokens
