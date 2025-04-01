@@ -71,14 +71,14 @@ lookback_days = 1  # 24 hours
 interval_minutes = 10  # 10-minute intervals
 singapore_timezone = pytz.timezone('Asia/Singapore')
 
-# Correct exchange names from the database
-exchanges = ["binanceFuture", "gateFuture", "hyperliquidFuture", "mexcFuture", "okxFuture", "surfFuture"]
+# Correct exchange names from the database - reordered to put SurfFuture last
+exchanges = ["binanceFuture", "gateFuture", "hyperliquidFuture", "okxFuture", "mexcFuture", "surfFuture"]
 exchanges_display = {
     "binanceFuture": "Binance",
     "gateFuture": "Gate",
     "hyperliquidFuture": "Hyperliquid",
-    "mexcFuture": "MEXC",
     "okxFuture": "OKX",
+    "mexcFuture": "MEXC",
     "surfFuture": "SurfFuture"
 }
 
@@ -392,14 +392,29 @@ if token_summary_results:
             else:  # Very high fee
                 return 'background-color: #d73027; color: white; font-weight: bold; font-size: 16px;'  # Red
         
+        # Make sure columns are in the desired order with SurfFuture at the end
+        desired_order = ['Token']
+        for ex in exchanges:
+            display_name = exchanges_display[ex]
+            if display_name in all_fees_df.columns:
+                desired_order.append(display_name)
+        if 'Avg (Non-Surf)' in all_fees_df.columns:
+            desired_order.append('Avg (Non-Surf)')
+        
+        # Reorder columns according to the specified order
+        ordered_columns = [col for col in desired_order if col in all_fees_df.columns]
+        all_fees_df = all_fees_df[ordered_columns]
+        
         # Style the table
         styled_fees = all_fees_df.style.applymap(
             color_fee, 
             subset=[col for col in all_fees_df.columns if col != 'Token']
         ).format("{:.2f}", subset=[col for col in all_fees_df.columns if col != 'Token'])
         
-        # Display the summary table
-        st.dataframe(styled_fees, height=min(600, 100 + 35 * len(all_fees_df)), use_container_width=True)
+        # Display the summary table with dynamic height to show all tokens without scrolling
+        token_count = len(all_fees_df)
+        table_height = max(100 + 35 * token_count, 200)  # Minimum height of 200px
+        st.dataframe(styled_fees, height=table_height, use_container_width=True)
         
         # Calculate and display the best exchange based on average fees
         exchange_overall_avgs = {}
@@ -451,54 +466,21 @@ if token_summary_results:
             
             st.plotly_chart(fig, use_container_width=True)
         
-        # Add visualization - Heatmap of fees by token and exchange
-        st.markdown('<div class="subheader-style">Fee Comparison Heatmap</div>', unsafe_allow_html=True)
-        
-        # Prepare data for heatmap
-        heatmap_data = all_fees_df.copy()
-        heatmap_data = heatmap_data.set_index('Token')
-        if 'Avg (Non-Surf)' in heatmap_data.columns:
-            heatmap_data = heatmap_data.drop(columns=['Avg (Non-Surf)'])
-        
-        # Create a heatmap
-        fig = go.Figure(data=go.Heatmap(
-                z=heatmap_data.values,
-                x=heatmap_data.columns,
-                y=heatmap_data.index,
-                colorscale=[
-                    [0, '#1a9850'],      # Dark green for low values
-                    [0.25, '#66bd63'],   # Light green
-                    [0.5, '#fee08b'],    # Yellow
-                    [0.75, '#f46d43'],   # Orange
-                    [1, '#d73027']       # Red for high values
-                ],
-                text=heatmap_data.round(2).values,
-                texttemplate="%{text}",
-                textfont={"size":12}
-            ))
-        
-        fig.update_layout(
-            title=f"Fee Comparison Heatmap {scale_label}",
-            xaxis_title="Exchange",
-            yaxis_title="Token",
-            height=max(400, 50 * len(heatmap_data) + 150),
-            font=dict(size=14)
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
         # Add visualization - Best exchange for each token
         st.markdown('<div class="subheader-style">Best Exchange by Token</div>', unsafe_allow_html=True)
         
         best_exchanges = {}
-        for token, row in heatmap_data.iterrows():
-            min_fee = row.min()
-            best_ex = row.idxmin()
-            best_exchanges[token] = (best_ex, min_fee)
+        for token_name, row in all_fees_df.iterrows():
+            fee_cols = [c for c in row.index if c != 'Token' and c != 'Avg (Non-Surf)']
+            if fee_cols:
+                fees = row[fee_cols]
+                min_fee = fees.min()
+                best_ex = fees.idxmin()
+                best_exchanges[row['Token']] = (best_ex, min_fee)
         
         # Count the number of "wins" for each exchange
         exchange_wins = {}
-        for ex in heatmap_data.columns:
+        for ex in [c for c in all_fees_df.columns if c != 'Token' and c != 'Avg (Non-Surf)']:
             exchange_wins[ex] = sum(1 for _, (best_ex, _) in best_exchanges.items() if best_ex == ex)
         
         # Create a pie chart of wins
@@ -556,6 +538,19 @@ if token_detailed_results:
         if scale_factor > 1:
             table_df = table_df * scale_factor
             st.markdown(f"<div class='info-box'><b>Note:</b> All fee values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
+        
+        # Reorder columns to put SurfFuture at the end
+        desired_order = []
+        for ex in exchanges:
+            display_name = exchanges_display[ex]
+            if display_name in table_df.columns:
+                desired_order.append(display_name)
+        if 'Average' in table_df.columns:
+            desired_order.append('Average')
+        
+        # Reorder columns according to the specified order
+        ordered_columns = [col for col in desired_order if col in table_df.columns]
+        table_df = table_df[ordered_columns]
         
         # Style function using a more subtle approach - highlighting the lowest fee in each row with blue
         def highlight_min(s):
@@ -648,7 +643,6 @@ with st.expander("Understanding the Exchange Fee Comparison"):
     
     - **Visualizations**:
       - The bar chart shows the average fee across all tokens for each exchange
-      - The heatmap provides a comparative view of fees across all exchanges and tokens
       - The pie chart shows which exchange offers the lowest fees for the most tokens
     
     - **Best Exchange**: For each token and overall, the exchange with the lowest fees is identified.
