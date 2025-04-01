@@ -44,6 +44,10 @@ st.markdown("""
         border-radius: 5px;
         margin-bottom: 15px;
     }
+    .highlight-text {
+        color: #1E88E5;
+        font-weight: bold;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -68,14 +72,12 @@ lookback_days = 1  # 24 hours
 interval_minutes = 10  # 10-minute intervals
 singapore_timezone = pytz.timezone('Asia/Singapore')
 
-# Correct exchange names from the database - reordered to put SurfFuture last
-exchanges = ["binanceFuture", "gateFuture", "hyperliquidFuture", "okxFuture", "mexcFuture", "surfFuture"]
+# Modified exchange list: Remove MEXC and OKX, put SurfFuture at the end
+exchanges = ["binanceFuture", "gateFuture", "hyperliquidFuture", "surfFuture"]
 exchanges_display = {
     "binanceFuture": "Binance",
     "gateFuture": "Gate",
     "hyperliquidFuture": "Hyperliquid",
-    "okxFuture": "OKX",
-    "mexcFuture": "MEXC",
     "surfFuture": "SurfFuture"
 }
 
@@ -157,6 +159,7 @@ def fetch_token_fee_data(token):
         WHERE 
             pair_name = '{token}'
             AND time_group BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+            AND source IN ('binanceFuture', 'gateFuture', 'hyperliquidFuture', 'surfFuture')
         ORDER BY 
             timestamp ASC,
             source
@@ -206,22 +209,32 @@ def fetch_token_fee_data(token):
         if not fee_data:
             return None, None
             
-        # Calculate average fee across all exchanges
-        if avg_data:
-            all_exchanges_df = pd.concat(avg_data)
-            all_exchanges_df = all_exchanges_df.set_index('timestamp')
-            avg_fee = all_exchanges_df.groupby(all_exchanges_df.index)['total_fee'].mean()
-            fee_data['Average'] = avg_fee
-            
         # Create time labels
-        result_df = pd.DataFrame(fee_data)
+        timestamps = []
+        for exchange, series in fee_data.items():
+            timestamps.extend(series.index)
+        unique_timestamps = sorted(set(timestamps))
+        
+        # Create DataFrame with all timestamps and exchanges
+        result_df = pd.DataFrame(index=unique_timestamps)
+        for exchange, series in fee_data.items():
+            result_df[exchange] = pd.Series(series.values, index=series.index)
+        
+        # Add time label
         result_df['time_label'] = result_df.index.strftime('%H:%M')
+        
+        # Calculate non-surf average (Binance, Gate, Hyperliquid)
+        non_surf_columns = ['Binance', 'Gate', 'Hyperliquid']
+        non_surf_columns = [col for col in non_surf_columns if col in result_df.columns]
+        
+        if non_surf_columns:
+            result_df['Avg (Non-Surf)'] = result_df[non_surf_columns].mean(axis=1)
         
         # Calculate daily average for each exchange
         daily_avgs = {}
-        for exchange in result_df.columns:
-            if exchange != 'time_label':
-                daily_avgs[exchange] = result_df[exchange].mean()
+        for column in result_df.columns:
+            if column != 'time_label':
+                daily_avgs[column] = result_df[column].mean()
         
         return result_df, daily_avgs
             
@@ -244,7 +257,7 @@ def fetch_summary_fee_data(token):
         start_time_utc = start_time_sg.astimezone(pytz.utc)
         end_time_utc = now_sg.astimezone(pytz.utc)
 
-        # Query to get the fee data
+        # Query to get the fee data - only for the exchanges we want
         query = f"""
         SELECT 
             source,
@@ -254,6 +267,7 @@ def fetch_summary_fee_data(token):
         WHERE 
             pair_name = '{token}'
             AND time_group BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+            AND source IN ('binanceFuture', 'gateFuture', 'hyperliquidFuture', 'surfFuture')
         GROUP BY 
             source
         ORDER BY 
@@ -277,8 +291,12 @@ def fetch_summary_fee_data(token):
         if not fee_data:
             return None
             
-        # Calculate average fee across all exchanges (excluding SurfFuture)
-        non_surf_fees = [v for k, v in fee_data.items() if k != 'SurfFuture']
+        # Calculate average fee across non-SurfFuture exchanges
+        non_surf_fees = []
+        for k, v in fee_data.items():
+            if k in ['Binance', 'Gate', 'Hyperliquid']:
+                non_surf_fees.append(v)
+        
         if non_surf_fees:
             fee_data['Avg (Non-Surf)'] = sum(non_surf_fees) / len(non_surf_fees)
         
@@ -368,13 +386,7 @@ if token_summary_results:
             st.markdown(f"<div class='info-box'><b>Note:</b> All fee values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
         
         # Make sure columns are in the desired order with SurfFuture at the end
-        desired_order = ['Token']
-        for ex in exchanges:
-            display_name = exchanges_display[ex]
-            if display_name in all_fees_df.columns:
-                desired_order.append(display_name)
-        if 'Avg (Non-Surf)' in all_fees_df.columns:
-            desired_order.append('Avg (Non-Surf)')
+        desired_order = ['Token', 'Binance', 'Gate', 'Hyperliquid', 'Avg (Non-Surf)', 'SurfFuture']
         
         # Reorder columns according to the specified order
         ordered_columns = [col for col in desired_order if col in all_fees_df.columns]
@@ -398,9 +410,15 @@ if token_summary_results:
                 if not pd.isna(avg_value):
                     exchange_overall_avgs[col] = avg_value
         
-        if exchange_overall_avgs:
-            best_exchange = min(exchange_overall_avgs.items(), key=lambda x: x[1])
-            st.info(f"🏆 **Best exchange overall**: {best_exchange[0]} (Average fee: {best_exchange[1]:.2f})")
+        # Check if SurfFuture has lower fees than average
+        if 'SurfFuture' in exchange_overall_avgs and 'Avg (Non-Surf)' in all_fees_df.columns:
+            surf_avg = all_fees_df['SurfFuture'].mean()
+            non_surf_avg = all_fees_df['Avg (Non-Surf)'].mean()
+            
+            if surf_avg < non_surf_avg:
+                st.success(f"🏆 **SurfFuture has tighter spreads overall**: SurfFuture ({surf_avg:.2f}) vs Other Exchanges ({non_surf_avg:.2f})")
+            else:
+                st.info(f"SurfFuture average: {surf_avg:.2f}, Other Exchanges average: {non_surf_avg:.2f}")
 
         # Add visualization - Bar chart comparing average fees by exchange
         st.markdown('<div class="subheader-style">Average Fee by Exchange</div>', unsafe_allow_html=True)
@@ -417,7 +435,7 @@ if token_summary_results:
             fees_sorted = [x[1] for x in sorted_exchanges]
             
             # Create a colorful bar chart
-            colors = ['#1a9850', '#66bd63', '#fee08b', '#f46d43', '#d73027']
+            colors = ['#1a9850', '#66bd63', '#fee08b', '#f46d43']
             exchange_colors = [colors[min(i, len(colors)-1)] for i in range(len(sorted_exchanges))]
             
             fig = go.Figure(data=[
@@ -462,9 +480,7 @@ if token_summary_results:
             labels=list(exchange_wins.keys()),
             values=list(exchange_wins.values()),
             textinfo='label+percent',
-            marker=dict(colors=[
-                '#1a9850', '#66bd63', '#fee08b', '#f46d43', '#d73027', '#8c510a'
-            ]),
+            marker=dict(colors=['#66bd63', '#fee08b', '#f46d43', '#1a9850']),
             hole=.3
         )])
         
@@ -476,7 +492,7 @@ if token_summary_results:
         
         st.plotly_chart(fig, use_container_width=True)
 
-# Display individual token tables with minimal formatting        
+# Display individual token tables with modified layout
 if token_detailed_results:
     st.markdown('<div class="header-style">Detailed Analysis by Token</div>', unsafe_allow_html=True)
     
@@ -486,11 +502,6 @@ if token_detailed_results:
         
         # Set the time_label as index to display in rows
         table_df = df.copy()
-        table_df = table_df.set_index('time_label')
-        
-        # Sort time labels
-        all_times = sorted(table_df.index, key=time_to_minutes, reverse=True)
-        table_df = table_df.reindex(all_times)
         
         # Find if we need to scale the values for better readability
         mean_fee = table_df.mean().mean()
@@ -512,27 +523,38 @@ if token_detailed_results:
         # Apply scaling if needed
         if scale_factor > 1:
             for col in table_df.columns:
-                table_df[col] = table_df[col] * scale_factor
+                if col not in ['time_label']:
+                    table_df[col] = table_df[col] * scale_factor
             st.markdown(f"<div class='info-box'><b>Note:</b> All fee values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
         
-        # Reorder columns to put SurfFuture at the end
-        desired_order = []
-        for ex in exchanges:
-            display_name = exchanges_display[ex]
-            if display_name in table_df.columns:
-                desired_order.append(display_name)
-        if 'Average' in table_df.columns:
-            desired_order.append('Average')
+        # Reorder columns to the specified layout
+        desired_order = ['time_label', 'Binance', 'Gate', 'Hyperliquid', 'Avg (Non-Surf)', 'SurfFuture']
         
-        # Reorder columns according to the specified order
+        # Filter only columns that exist
         ordered_columns = [col for col in desired_order if col in table_df.columns]
         table_df = table_df[ordered_columns]
         
-        # Format to 6 decimal places
-        formatted_df = table_df.round(6)
+        # Sort by time label in descending order
+        table_df = table_df.sort_values(by='time_label', key=lambda x: x.map(time_to_minutes), ascending=False)
         
-        # Display the table with minimal formatting
+        # Format to 6 decimal places
+        formatted_df = table_df.copy()
+        for col in formatted_df.columns:
+            if col != 'time_label':
+                formatted_df[col] = formatted_df[col].round(6)
+        
+        # Display the table with the time_label as the first column
         st.dataframe(formatted_df, height=500, use_container_width=True)
+        
+        # Check if SurfFuture has tighter spread than the average of the other exchanges
+        if 'SurfFuture' in table_df.columns and 'Avg (Non-Surf)' in table_df.columns:
+            surf_avg = table_df['SurfFuture'].mean()
+            non_surf_avg = table_df['Avg (Non-Surf)'].mean()
+            
+            if surf_avg < non_surf_avg:
+                st.success(f"✅ SURF Spread tighter: SurfFuture ({surf_avg:.6f}) < Non-Surf Average ({non_surf_avg:.6f})")
+            else:
+                st.info(f"SurfFuture ({surf_avg:.6f}) ≥ Non-Surf Average ({non_surf_avg:.6f})")
         
         # Create a summary for this token
         st.markdown("### Exchange Comparison Summary")
@@ -540,41 +562,27 @@ if token_detailed_results:
         # Get the daily averages for this token
         daily_avgs = token_daily_avgs[token]
         
-        summary_data = {}
-        for column in table_df.columns:
-            col_data = table_df[column].dropna()
-            if not col_data.empty:
-                summary_data[column] = {
-                    'Average Fee': col_data.mean(),
-                    'Min Fee': col_data.min(),
-                    'Max Fee': col_data.max(),
-                    'Data Points': len(col_data)
-                }
+        summary_data = []
+        for column in ordered_columns:
+            if column != 'time_label' and column in daily_avgs:
+                summary_data.append({
+                    'Exchange': column,
+                    'Average Fee': daily_avgs[column]
+                })
                 
         if summary_data:
             # Create a summary dataframe
-            summary_rows = []
-            for exchange, metrics in summary_data.items():
-                summary_rows.append({
-                    'Exchange': exchange,
-                    'Average Fee': round(metrics['Average Fee'], 6),
-                    'Min Fee': round(metrics['Min Fee'], 6),
-                    'Max Fee': round(metrics['Max Fee'], 6),
-                    'Data Points': metrics['Data Points']
-                })
-            summary_df = pd.DataFrame(summary_rows)
+            summary_df = pd.DataFrame(summary_data)
+            
+            # Apply scaling if needed
+            if scale_factor > 1:
+                summary_df['Average Fee'] = summary_df['Average Fee'] * scale_factor
+            
+            # Round to 6 decimal places
+            summary_df['Average Fee'] = summary_df['Average Fee'].round(6)
             
             # Display the summary dataframe
             st.dataframe(summary_df, height=200, use_container_width=True)
-            
-            # Calculate best exchange (lowest average fee)
-            exchanges_in_data = [ex for ex in summary_data.keys() if ex != 'Average']
-            if exchanges_in_data:
-                best_exchange = min(
-                    exchanges_in_data,
-                    key=lambda x: summary_data[x]['Average Fee']
-                )
-                st.info(f"Best exchange for {token} based on average fee: **{best_exchange}**")
         
         st.markdown("---")  # Add a separator between tokens
         
@@ -598,11 +606,13 @@ with st.expander("Understanding the Exchange Fee Comparison"):
     
     - **Detailed Token Tables**: For each token, you can see the fees at 10-minute intervals throughout the day.
     
+    - **Column Order**: The tables display data in this order: Time, Binance, Gate, Hyperliquid, Average (Non-Surf), SurfFuture
+    
+    - **SURF Spread Indicator**: For each token, we indicate when SurfFuture has tighter spreads than the average of other exchanges.
+    
     - **Visualizations**:
       - The bar chart shows the average fee across all tokens for each exchange
       - The pie chart shows which exchange offers the lowest fees for the most tokens
-    
-    - **Best Exchange**: For each token and overall, the exchange with the lowest fees is identified.
     
     ### Note on Scaling:
     
