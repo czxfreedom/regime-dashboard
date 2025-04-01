@@ -233,11 +233,14 @@ def fetch_and_calculate_hurst(token):
     # Get current time in Singapore timezone
     now_utc = datetime.now(pytz.utc)
     now_sg = now_utc.astimezone(singapore_timezone)
-    start_time_sg = now_sg - timedelta(days=lookback_days)
+    
+    # Calculate start and end times, rounded to the nearest 30-minute interval
+    end_time_sg = now_sg.replace(minute=now_sg.minute // 30 * 30, second=0, microsecond=0)
+    start_time_sg = end_time_sg - timedelta(days=lookback_days)
     
     # Convert back to UTC for database query
     start_time_utc = start_time_sg.astimezone(pytz.utc)
-    end_time_utc = now_sg.astimezone(pytz.utc)
+    end_time_utc = end_time_sg.astimezone(pytz.utc)
 
     query = f"""
     SELECT 
@@ -266,7 +269,7 @@ def fetch_and_calculate_hurst(token):
         if one_min_ohlc.empty:
             print(f"[{token}] No OHLC data after resampling.")
             return None
-            
+                
         print(f"[{token}] one_min_ohlc head:\n{one_min_ohlc.head()}")
         print(f"[{token}] one_min_ohlc info:\n{one_min_ohlc.info()}")
 
@@ -277,8 +280,15 @@ def fetch_and_calculate_hurst(token):
         if thirty_min_hurst.empty:
             print(f"[{token}] No 30-min Hurst data.")
             return None
-        last_24h_hurst = thirty_min_hurst.iloc[-48:]
+            
+        # Generate expected 30-minute intervals for the last 24 hours
+        expected_intervals = [end_time_sg - timedelta(minutes=30 * i) for i in range(expected_points)]
+        expected_intervals.reverse()  # Reverse to start from the oldest
+
+        # Reindex the Hurst data to match the expected intervals
+        last_24h_hurst = thirty_min_hurst.reindex(expected_intervals)
         last_24h_hurst = last_24h_hurst.to_frame()
+        
         # Store original datetime index for sorting
         last_24h_hurst['original_datetime'] = last_24h_hurst.index
         last_24h_hurst['time_label'] = last_24h_hurst.index.strftime('%H:%M')
