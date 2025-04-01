@@ -130,13 +130,14 @@ def fetch_trade_counts(pair_name):
     start_time_utc = start_time_sg.astimezone(pytz.utc)
     end_time_utc = now_sg.astimezone(pytz.utc)
 
+    # Updated query to use trade_fill_fresh
     query = f"""
     SELECT
         date_trunc('hour', created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
         INTERVAL '30 min' * (EXTRACT(MINUTE FROM created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore')::INT / 30) 
         AS timestamp,
         COUNT(*) AS trade_count
-    FROM public.surfv2_trade
+    FROM public.trade_fill_fresh
     WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
     AND pair_name = '{pair_name}'
     GROUP BY
@@ -165,7 +166,7 @@ def fetch_trade_counts(pair_name):
         st.error(f"Error processing trade counts for {pair_name}: {e}")
         print(f"[{pair_name}] Error processing trade counts: {e}")
         return None
-
+    
 # Fetch platform PNL data for the past 24 hours in 30min intervals
 @st.cache_data(ttl=600, show_spinner="Calculating platform PNL...")
 def fetch_platform_pnl(pair_name):
