@@ -768,39 +768,48 @@ if pair_results:
             
             profit_distribution.append({
                 'Pair': pair_name,
-                'Total PNL (USD)': round(pair_pnl, 2),
+                'Total PNL (USD)': round(pair_pnl, 0),
                 'Contribution (%)': round(contribution_pct, 2)
             })
     
     if profit_distribution:
         # Sort by total PNL (highest first)
         profit_distribution_df = pd.DataFrame(profit_distribution)
-        profit_distribution_df = profit_distribution_df.sort_values(by='Total PNL (USD)', ascending=False)
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("### Profit Contribution by Pair")
-            st.dataframe(profit_distribution_df, height=300, use_container_width=True)
-        
-        with col2:
-            # Create pie chart of profit distribution
-            fig = go.Figure(data=[go.Pie(
-                labels=profit_distribution_df['Pair'],
-                values=profit_distribution_df['Total PNL (USD)'],
-                hole=.3,
-                textinfo='label+percent',
-                marker=dict(
-                    colors=px.colors.qualitative.Plotly
-                )
-            )])
-            
-            fig.update_layout(
-                title="Platform PNL Distribution by Pair",
-                height=500
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
+        profit_distribution_df = profit_distribution_df.sort_values(by='Total PNL (USD)', ascending=False)       
+        st.markdown("### Profit Contribution by Pair")
+        # Apply styling to make numbers clearer
+        styled_profit_df = profit_distribution_df.style.format({
+            'Total PNL (USD)': '{:,.0f}',  # Format as integers with comma for thousands
+            'Contribution (%)': '{:+.2f}%'  # Show with + or - sign and 2 decimal places
+        })
+    
+        # Conditionally color the cells based on values
+        def color_pnl_and_contribution(val, column):
+            if column == 'Total PNL (USD)':
+                if val > 0:
+                    return 'color: green; font-weight: bold'
+                elif val < 0:
+                    return 'color: red; font-weight: bold'
+                return ''
+            elif column == 'Contribution (%)':
+                if val > 0:
+                    return 'color: green; font-weight: bold'
+                elif val < 0:
+                    return 'color: red; font-weight: bold'
+                return ''
+            return ''
+    
+        # Apply the styling function
+        styled_profit_df = styled_profit_df.applymap(
+            lambda x: color_pnl_and_contribution(x, 'Total PNL (USD)'), 
+            subset=['Total PNL (USD)']
+         ).applymap(
+            lambda x: color_pnl_and_contribution(x, 'Contribution (%)'), 
+            subset=['Contribution (%)']
+        )
+    
+    # Display the styled dataframe
+    st.dataframe(styled_profit_df, height=500, use_container_width=True)
     
     # Identify Most Profitable Time Periods
     st.subheader("Most Profitable Time Periods")
