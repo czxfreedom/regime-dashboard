@@ -38,6 +38,11 @@ rolling_window = 20  # Window size for Hurst calculation
 expected_points = 48  # Expected data points per pair over 24 hours
 singapore_timezone = pytz.timezone('Asia/Singapore')
 
+# Get current time in Singapore timezone
+now_utc = datetime.now(pytz.utc)
+now_sg = now_utc.astimezone(singapore_timezone)
+st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
+
 # Fetch all available tokens from DB
 @st.cache_data(show_spinner="Fetching tokens...")
 def fetch_all_tokens():
@@ -222,42 +227,44 @@ def detailed_regime_classification(hurst):
     else:
         return ("TREND", 3, "Strong trending")
 
-# Function to generate fixed 30-minute time blocks for the past 24 hours
-def generate_fixed_time_blocks(current_time):
-    # Round down to the nearest 30-minute mark (e.g., 3:40 PM becomes 3:30 PM)
-    current_minute = current_time.minute
-    current_hour = current_time.hour
-    
-    if current_minute < 30:
+# Function to generate proper 30-minute time blocks for the past 24 hours
+def generate_aligned_time_blocks(current_time):
+    """
+    Generate fixed 30-minute time blocks for past 24 hours,
+    aligned with standard 30-minute intervals (e.g., 4:00-4:30, 4:30-5:00)
+    """
+    # Round down to the nearest 30-minute mark
+    if current_time.minute < 30:
         # Round down to XX:00
-        latest_block_end = current_time.replace(minute=0, second=0, microsecond=0)
+        latest_complete_block_end = current_time.replace(minute=0, second=0, microsecond=0)
     else:
         # Round down to XX:30
-        latest_block_end = current_time.replace(minute=30, second=0, microsecond=0)
+        latest_complete_block_end = current_time.replace(minute=30, second=0, microsecond=0)
     
-    # Generate 48 blocks (24 hours with 30-minute blocks)
-    time_blocks = []
-    for i in range(48):
-        block_end = latest_block_end - timedelta(minutes=i*30)
+    # Generate block labels for display
+    blocks = []
+    for i in range(48):  # 24 hours of 30-minute blocks
+        block_end = latest_complete_block_end - timedelta(minutes=i*30)
         block_start = block_end - timedelta(minutes=30)
-        block_label = f"{block_start.strftime('%H:%M')}-{block_end.strftime('%H:%M')}"
-        time_blocks.append((block_start, block_end, block_label))
+        block_label = f"{block_start.strftime('%H:%M')}"
+        blocks.append(block_label)
     
-    return time_blocks
+    return blocks
 
-# Fetch and calculate Hurst for a token with fixed 30min timeframe blocks
+# Generate aligned time blocks
+aligned_time_blocks = generate_aligned_time_blocks(now_sg)
+
+# Fetch and calculate Hurst for a token with 30min timeframe
 @st.cache_data(ttl=600, show_spinner="Calculating Hurst exponents...")
-def fetch_and_calculate_hurst(token, time_blocks):
+def fetch_and_calculate_hurst(token):
     # Get current time in Singapore timezone
     now_utc = datetime.now(pytz.utc)
     now_sg = now_utc.astimezone(singapore_timezone)
+    start_time_sg = now_sg - timedelta(days=lookback_days)
     
-    # Get the earliest time needed (24 hours back from now)
-    earliest_time_sg = time_blocks[-1][0]
-    
-    # Convert to UTC for database query
-    earliest_time_utc = earliest_time_sg.astimezone(pytz.utc)
-    latest_time_utc = now_sg.astimezone(pytz.utc)
+    # Convert back to UTC for database query
+    start_time_utc = start_time_sg.astimezone(pytz.utc)
+    end_time_utc = now_sg.astimezone(pytz.utc)
 
     query = f"""
     SELECT 
@@ -265,7 +272,7 @@ def fetch_and_calculate_hurst(token, time_blocks):
         final_price, 
         pair_name
     FROM public.oracle_price_log
-    WHERE created_at BETWEEN '{earliest_time_utc}' AND '{latest_time_utc}'
+    WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
     AND pair_name = '{token}';
     """
     try:
@@ -278,7 +285,8 @@ def fetch_and_calculate_hurst(token, time_blocks):
             return None
 
         print(f"[{token}] First few rows:\n{df.head()}")
-        
+        print(f"[{token}] DataFrame columns and types:\n{df.info()}")
+
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.set_index('timestamp').sort_index()
         one_min_ohlc = df['final_price'].resample('1min').ohlc().dropna()
@@ -287,54 +295,38 @@ def fetch_and_calculate_hurst(token, time_blocks):
             return None
             
         print(f"[{token}] one_min_ohlc head:\n{one_min_ohlc.head()}")
+        print(f"[{token}] one_min_ohlc info:\n{one_min_ohlc.info()}")
+
+        # Apply universal_hurst to the 'close' prices directly
+        one_min_ohlc['Hurst'] = one_min_ohlc['close'].rolling(window=rolling_window).apply(universal_hurst)
+
+        # Resample to exactly 30min intervals aligned with clock
+        thirty_min_hurst = one_min_ohlc['Hurst'].resample('30min', closed='left', label='left').mean().dropna()
         
-        # Create a DataFrame to store Hurst values for each 30-min block
-        result_df = pd.DataFrame(columns=['block_start', 'block_end', 'block_label', 'Hurst'])
-        
-        # Calculate Hurst for each fixed time block
-        for block_start, block_end, block_label in time_blocks:
-            # Extract data for this time block
-            block_data = one_min_ohlc.loc[block_start:block_end]
-            
-            if len(block_data) >= rolling_window:  # Only compute if enough data
-                # Apply universal_hurst to the 'close' prices
-                hurst_value = universal_hurst(block_data['close'].values)
-                
-                # Add to results DataFrame
-                result_df = pd.concat([result_df, pd.DataFrame({
-                    'block_start': [block_start],
-                    'block_end': [block_end],
-                    'block_label': [block_label],
-                    'Hurst': [hurst_value]
-                })])
-        
-        if result_df.empty:
-            print(f"[{token}] No Hurst values calculated for any time block.")
+        if thirty_min_hurst.empty:
+            print(f"[{token}] No 30-min Hurst data.")
             return None
             
-        # Add regime information
-        result_df['regime_info'] = result_df['Hurst'].apply(detailed_regime_classification)
-        result_df['regime'] = result_df['regime_info'].apply(lambda x: x[0])
-        result_df['regime_desc'] = result_df['regime_info'].apply(lambda x: x[2])
+        last_24h_hurst = thirty_min_hurst.tail(48)  # Get up to last 48 periods (24 hours)
+        last_24h_hurst = last_24h_hurst.to_frame()
         
-        print(f"[{token}] Successful Calculation with {len(result_df)} time blocks")
-        return result_df
+        # Store original datetime index for reference
+        last_24h_hurst['original_datetime'] = last_24h_hurst.index
+        
+        # Format time label to match our aligned blocks (HH:MM format)
+        last_24h_hurst['time_label'] = last_24h_hurst.index.strftime('%H:%M')
+        
+        # Calculate regime information
+        last_24h_hurst['regime_info'] = last_24h_hurst['Hurst'].apply(detailed_regime_classification)
+        last_24h_hurst['regime'] = last_24h_hurst['regime_info'].apply(lambda x: x[0])
+        last_24h_hurst['regime_desc'] = last_24h_hurst['regime_info'].apply(lambda x: x[2])
+        
+        print(f"[{token}] Successful Calculation")
+        return last_24h_hurst
     except Exception as e:
         st.error(f"Error processing {token}: {e}")
         print(f"[{token}] Error processing: {e}")
         return None
-
-# Get current time in Singapore timezone
-current_time_sg = datetime.now(pytz.utc).astimezone(singapore_timezone)
-st.write(f"Current Singapore Time: {current_time_sg.strftime('%Y-%m-%d %H:%M:%S')}")
-
-# Generate fixed 30-minute time blocks
-time_blocks = generate_fixed_time_blocks(current_time_sg)
-
-# Show the blocks we're analyzing
-with st.expander("View Time Blocks Being Analyzed"):
-    time_blocks_df = pd.DataFrame(time_blocks, columns=['Start Time', 'End Time', 'Block Label'])
-    st.dataframe(time_blocks_df)
 
 # Show progress bar while calculating
 progress_bar = st.progress(0)
@@ -346,7 +338,7 @@ for i, token in enumerate(selected_tokens):
     try:  # Added try-except around token processing
         progress_bar.progress((i) / len(selected_tokens))
         status_text.text(f"Processing {token} ({i+1}/{len(selected_tokens)})")
-        result = fetch_and_calculate_hurst(token, time_blocks)
+        result = fetch_and_calculate_hurst(token)
         if result is not None:
             token_results[token] = result
     except Exception as e:
@@ -359,23 +351,25 @@ status_text.text(f"Processed {len(token_results)}/{len(selected_tokens)} tokens 
 
 # Create table for display
 if token_results:
-    # Create a pivoted table with time blocks as rows and tokens as columns
-    hurst_table = pd.DataFrame()
+    # Create table data
+    table_data = {}
+    for token, df in token_results.items():
+        hurst_series = df.set_index('time_label')['Hurst']
+        table_data[token] = hurst_series
     
-    # Extract block labels and use them as index
-    if token_results:
-        first_token = list(token_results.keys())[0]
-        # Use the block labels from time_blocks to ensure proper order
-        block_labels = [block[2] for block in time_blocks]
-        hurst_table['time_block'] = block_labels
-        hurst_table = hurst_table.set_index('time_block')
-        
-        # Fill in Hurst values for each token
-        for token, df in token_results.items():
-            token_hurst = dict(zip(df['block_label'], df['Hurst']))
-            hurst_table[token] = hurst_table.index.map(lambda x: token_hurst.get(x, np.nan))
+    # Create DataFrame with all tokens
+    hurst_table = pd.DataFrame(table_data)
     
-    # Round to 2 decimal places
+    # Apply the time blocks in the proper order (most recent first)
+    available_times = set(hurst_table.index)
+    ordered_times = [t for t in aligned_time_blocks if t in available_times]
+    
+    # If no matches are found in aligned blocks, fallback to the available times
+    if not ordered_times and available_times:
+        ordered_times = sorted(list(available_times), reverse=True)
+    
+    # Reindex with the ordered times
+    hurst_table = hurst_table.reindex(ordered_times)
     hurst_table = hurst_table.round(2)
     
     def color_cells(val):
@@ -396,17 +390,24 @@ if token_results:
     st.dataframe(styled_table, height=700, use_container_width=True)
     
     st.subheader("Current Market Overview (Singapore Time)")
-    # Use the most recent time block for each token
+    
+    # Use the first aligned time block that has data for each token
     latest_values = {}
     for token, df in token_results.items():
         if not df.empty and not df['Hurst'].isna().all():
-            # Take the first time block's data (should be the most recent)
-            latest_block_label = time_blocks[0][2]
-            latest_data = df[df['block_label'] == latest_block_label]
+            # Try to find the most recent time block in our aligned blocks
+            for block_time in aligned_time_blocks[:5]:  # Check the 5 most recent blocks
+                latest_data = df[df['time_label'] == block_time]
+                if not latest_data.empty:
+                    latest = latest_data['Hurst'].iloc[0]
+                    regime = latest_data['regime_desc'].iloc[0]
+                    latest_values[token] = (latest, regime)
+                    break
             
-            if not latest_data.empty:
-                latest = latest_data['Hurst'].iloc[0]
-                regime = latest_data['regime_desc'].iloc[0]
+            # If no match in aligned blocks, use the most recent data point
+            if token not in latest_values:
+                latest = df['Hurst'].iloc[-1]
+                regime = df['regime_desc'].iloc[-1]
                 latest_values[token] = (latest, regime)
     
     if latest_values:
@@ -456,7 +457,7 @@ if token_results:
             
             with col3:
                 st.markdown("### Trending Tokens")
-                tr_tokens = [(t, v, r) for t, (v, r) in latest_values.items() if v > 0.6]
+                tr_tokens = [(t, v, r) for t, (v, r) in latest_values.values() if v > 0.6]
                 tr_tokens.sort(key=lambda x: x[1], reverse=True)
                 if tr_tokens:
                     for token, value, regime in tr_tokens:
@@ -471,8 +472,8 @@ if token_results:
 with st.expander("Understanding the Daily Hurst Table"):
     st.markdown("""
     ### How to Read This Table
-    This table shows the Hurst exponent values for all selected tokens over the last 24 hours using fixed 30-minute blocks.
-    Each row represents a specific 30-minute time period (like 3:00-3:30 PM), with times shown in Singapore time. The table is sorted with the most recent 30-minute period at the top.
+    This table shows the Hurst exponent values for all selected tokens over the last 24 hours using 30-minute bars.
+    Each row represents a specific 30-minute time period, with times shown in Singapore time. The table is sorted with the most recent 30-minute period at the top.
     **Color coding:**
     - **Red** (Hurst < 0.4): The token is showing mean-reverting behavior during that time period
     - **Gray** (Hurst 0.4-0.6): The token is behaving like a random walk (no clear pattern)
@@ -481,7 +482,12 @@ with st.expander("Understanding the Daily Hurst Table"):
     - Darker red = Stronger mean-reversion
     - Darker green = Stronger trending
     **Technical details:**
-    - Each Hurst value is calculated using price data strictly within each 30-minute block
+    - Each Hurst value is calculated by applying a rolling window of 20 one-minute bars to the closing prices, and then averaging the Hurst values of 30 one-minute bars.
     - Values are calculated using multiple methods (R/S Analysis, Variance Method, and Autocorrelation)
     - Missing values (light gray cells) indicate insufficient data for calculation
     """)
+
+# Add an expandable section to view the exact time blocks being analyzed
+with st.expander("View Time Blocks Being Analyzed"):
+    time_blocks_df = pd.DataFrame(aligned_time_blocks, columns=['Block Start Time'])
+    st.dataframe(time_blocks_df)
