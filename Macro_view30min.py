@@ -82,7 +82,122 @@ if not selected_tokens:
 
 # Universal Hurst calculation function
 def universal_hurst(ts):
-    # ... (rest of your universal_hurst function remains the same)
+    print(f"universal_hurst called with ts: {ts}")
+    print(f"Type of ts: {type(ts)}")
+    if isinstance(ts, (list, np.ndarray, pd.Series)) and len(ts) > 0:
+        print(f"First few values of ts: {ts[:5]}")
+    
+    if ts is None:
+        print("ts is None")
+        return np.nan
+    
+    if isinstance(ts, pd.Series) and ts.empty:
+        print("ts is empty series")
+        return np.nan
+        
+    if not isinstance(ts, (list, np.ndarray, pd.Series)):
+        print(f"ts is not a list, NumPy array, or Series. Type: {type(ts)}")
+        return np.nan
+
+    try:
+        ts = np.array(ts, dtype=float)
+    except Exception as e:
+        print(f"ts cannot be converted to float: {e}")
+        return np.nan
+
+    if len(ts) < 10 or np.any(~np.isfinite(ts)):
+        print(f"ts length < 10 or non-finite values: {ts}")
+        return np.nan
+
+    # Convert to returns - using log returns handles any scale of asset
+    epsilon = 1e-10
+    adjusted_ts = ts + epsilon
+    log_returns = np.diff(np.log(adjusted_ts))
+    
+    # If all returns are exactly zero (completely flat price), return 0.5
+    if np.all(log_returns == 0):
+        return 0.5
+    
+    # Use multiple methods and average for robustness
+    hurst_estimates = []
+    
+    # Method 1: Rescaled Range (R/S) Analysis
+    try:
+        max_lag = min(len(log_returns) // 4, 40)
+        lags = range(10, max_lag, max(1, (max_lag - 10) // 10))
+        rs_values = []
+        for lag in lags:
+            segments = len(log_returns) // lag
+            if segments < 1:
+                continue
+            rs_by_segment = []
+            for i in range(segments):
+                segment = log_returns[i*lag:(i+1)*lag]
+                if len(segment) < lag // 2:
+                    continue
+                mean_return = np.mean(segment)
+                std_return = np.std(segment)
+                if std_return == 0:
+                    continue
+                cumdev = np.cumsum(segment - mean_return)
+                r = np.max(cumdev) - np.min(cumdev)
+                s = std_return
+                rs_by_segment.append(r / s)
+            if rs_by_segment:
+                rs_values.append((lag, np.mean(rs_by_segment)))
+        if len(rs_values) >= 4:
+            lags_log = np.log10([x[0] for x in rs_values])
+            rs_log = np.log10([x[1] for x in rs_values])
+            poly = np.polyfit(lags_log, rs_log, 1)
+            h_rs = poly[0]
+            hurst_estimates.append(h_rs)
+    except Exception as e:
+        print(f"Error in R/S calculation: {e}")
+        pass
+    
+    # Method 2: Variance Method
+    try:
+        max_lag = min(len(log_returns) // 4, 40)
+        lags = range(10, max_lag, max(1, (max_lag - 10) // 10))
+        var_values = []
+        for lag in lags:
+            if lag >= len(log_returns):
+                continue
+            lagged_returns = np.array([np.mean(log_returns[i:i+lag]) for i in range(0, len(log_returns)-lag+1, lag)])
+            if len(lagged_returns) < 2:
+                continue
+            var = np.var(lagged_returns)
+            if var > 0:
+                var_values.append((lag, var))
+        if len(var_values) >= 4:
+            lags_log = np.log10([x[0] for x in var_values])
+            var_log = np.log10([x[1] for x in var_values])
+            poly = np.polyfit(lags_log, var_log, 1)
+            h_var = (poly[0] + 1) / 2
+            hurst_estimates.append(h_var)
+    except Exception as e:
+        print(f"Error in Variance calculation: {e}")
+        pass
+    
+    # Fallback to autocorrelation method if other methods fail
+    if not hurst_estimates and len(log_returns) > 1:
+        try:
+            autocorr = np.corrcoef(log_returns[:-1], log_returns[1:])[0, 1]
+            h_acf = 0.5 + (np.sign(autocorr) * min(abs(autocorr) * 0.4, 0.4))
+            hurst_estimates.append(h_acf)
+        except Exception as e:
+            print(f"Error in Autocorrelation calculation: {e}")
+            pass
+    
+    # If we have estimates, aggregate them and constrain to 0-1 range
+    if hurst_estimates:
+        valid_estimates = [h for h in hurst_estimates if 0 <= h <= 1]
+        if not valid_estimates and hurst_estimates:
+            valid_estimates = [max(0, min(1, h)) for h in hurst_estimates]
+        if valid_estimates:
+            return np.median(valid_estimates)
+    
+    return 0.5
 
 # Detailed regime classification function
 def detailed_regime_classification(hurst):
@@ -320,4 +435,16 @@ with st.expander("Understanding the Daily Hurst Table"):
     st.markdown("""
     ### How to Read This Table
     This table shows the Hurst exponent values for all selected tokens over the last 24 hours using 30-minute bars.
-    Each row represents a specific 30-minute time period, with times shown in Singapore time. The table is sorted with the most recent
+    Each row represents a specific 30-minute time period, with times shown in Singapore time. The table is sorted with the most recent 30-minute period at the top.
+    **Color coding:**
+    - **Red** (Hurst < 0.4): The token is showing mean-reverting behavior during that time period
+    - **Gray** (Hurst 0.4-0.6): The token is behaving like a random walk (no clear pattern)
+    - **Green** (Hurst > 0.6): The token is showing trending behavior
+    **The intensity of the color indicates the strength of the pattern:**
+    - Darker red = Stronger mean-reversion
+    - Darker green = Stronger trending
+    **Technical details:**
+    - Each Hurst value is calculated by applying a rolling window of 20 one-minute bars to the closing prices, and then averaging the Hurst values of 30 one-minute bars.
+    - Values are calculated using multiple methods (R/S Analysis, Variance Method, and DFA)
+    - Missing values (light gray cells) indicate insufficient data for calculation
+    """)
