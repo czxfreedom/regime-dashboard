@@ -63,7 +63,7 @@ with col1:
 
 with col2:
     if st.button("Refresh Data"):
-        st.experimental_rerun()
+        st.rerun()
 
 if not selected_tokens:
     st.warning("Please select at least one token")
