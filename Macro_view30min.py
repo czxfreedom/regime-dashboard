@@ -86,7 +86,26 @@ def universal_hurst(ts):
 
 # Detailed regime classification function
 def detailed_regime_classification(hurst):
-    # ... (rest of your detailed_regime_classification function remains the same)
+    if pd.isna(hurst):
+        return ("UNKNOWN", 0, "Insufficient data")
+    elif hurst < 0.2:
+        return ("MEAN-REVERT", 3, "Strong mean-reversion")
+    elif hurst < 0.3:
+        return ("MEAN-REVERT", 2, "Moderate mean-reversion")
+    elif hurst < 0.4:
+        return ("MEAN-REVERT", 1, "Mild mean-reversion")
+    elif hurst < 0.45:
+        return ("NOISE", 1, "Slight mean-reversion bias")
+    elif hurst <= 0.55:
+        return ("NOISE", 0, "Pure random walk")
+    elif hurst < 0.6:
+        return ("NOISE", 1, "Slight trending bias")
+    elif hurst < 0.7:
+        return ("TREND", 1, "Mild trending")
+    elif hurst < 0.8:
+        return ("TREND", 2, "Moderate trending")
+    else:
+        return ("TREND", 3, "Strong trending")
 
 # Function to convert time string to sortable minutes value
 def time_to_minutes(time_str):
@@ -301,16 +320,4 @@ with st.expander("Understanding the Daily Hurst Table"):
     st.markdown("""
     ### How to Read This Table
     This table shows the Hurst exponent values for all selected tokens over the last 24 hours using 30-minute bars.
-    Each row represents a specific 30-minute time period, with times shown in Singapore time. The table is sorted with the most recent 30-minute period at the top.
-    **Color coding:**
-    - **Red** (Hurst < 0.4): The token is showing mean-reverting behavior during that time period
-    - **Gray** (Hurst 0.4-0.6): The token is behaving like a random walk (no clear pattern)
-    - **Green** (Hurst > 0.6): The token is showing trending behavior
-    **The intensity of the color indicates the strength of the pattern:**
-    - Darker red = Stronger mean-reversion
-    - Darker green = Stronger trending
-    **Technical details:**
-    - Each Hurst value is calculated by applying a rolling window of 20 one-minute bars to the closing prices, and then averaging the Hurst values of 30 one-minute bars.
-    - Values are calculated using multiple methods (R/S Analysis, Variance Method, and DFA)
-    - Missing values (light gray cells) indicate insufficient data for calculation
-    """)
+    Each row represents a specific 30-minute time period, with times shown in Singapore time. The table is sorted with the most recent
