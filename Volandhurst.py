@@ -38,6 +38,11 @@ rolling_window = 20  # Window size for volatility calculation
 expected_points = 48  # Expected data points per pair over 24 hours
 singapore_timezone = pytz.timezone('Asia/Singapore')
 
+# Get current time in Singapore timezone
+now_utc = datetime.now(pytz.utc)
+now_sg = now_utc.astimezone(singapore_timezone)
+st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
+
 # Set extreme volatility threshold
 extreme_vol_threshold = 1.0  # 100% annualized volatility
 
@@ -132,10 +137,33 @@ def classify_volatility(vol):
     else:
         return ("EXTREME", 4, "Extreme volatility")
 
-# Function to convert time string to sortable minutes value
-def time_to_minutes(time_str):
-    hours, minutes = map(int, time_str.split(':'))
-    return hours * 60 + minutes
+# Function to generate aligned 30-minute time blocks for the past 24 hours
+def generate_aligned_time_blocks(current_time):
+    """
+    Generate fixed 30-minute time blocks for past 24 hours,
+    aligned with standard 30-minute intervals (e.g., 4:00-4:30, 4:30-5:00)
+    """
+    # Round down to the nearest 30-minute mark
+    if current_time.minute < 30:
+        # Round down to XX:00
+        latest_complete_block_end = current_time.replace(minute=0, second=0, microsecond=0)
+    else:
+        # Round down to XX:30
+        latest_complete_block_end = current_time.replace(minute=30, second=0, microsecond=0)
+    
+    # Generate block labels for display
+    blocks = []
+    for i in range(48):  # 24 hours of 30-minute blocks
+        block_end = latest_complete_block_end - timedelta(minutes=i*30)
+        block_start = block_end - timedelta(minutes=30)
+        block_label = f"{block_start.strftime('%H:%M')}"
+        blocks.append((block_start, block_end, block_label))
+    
+    return blocks
+
+# Generate aligned time blocks
+aligned_time_blocks = generate_aligned_time_blocks(now_sg)
+time_block_labels = [block[2] for block in aligned_time_blocks]
 
 # Fetch and calculate volatility for a token with 30min timeframe
 @st.cache_data(ttl=600, show_spinner="Calculating volatility metrics...")
@@ -181,18 +209,21 @@ def fetch_and_calculate_volatility(token):
             lambda x: calculate_volatility_metrics(x)['realized_vol']
         )
         
-        # Resample to 30-minute periods for the table
-        thirty_min_vol = one_min_ohlc['realized_vol'].resample('30min').mean().dropna()
+        # Resample to exactly 30min intervals aligned with clock
+        thirty_min_vol = one_min_ohlc['realized_vol'].resample('30min', closed='left', label='left').mean().dropna()
+        
         if thirty_min_vol.empty:
             print(f"[{token}] No 30-min volatility data.")
             return None
             
         # Get last 24 hours (48 30-minute bars)
-        last_24h_vol = thirty_min_vol.iloc[-48:]
+        last_24h_vol = thirty_min_vol.tail(48)  # Get up to last 48 periods (24 hours)
         last_24h_vol = last_24h_vol.to_frame()
         
-        # Store original datetime index for sorting
+        # Store original datetime index for reference
         last_24h_vol['original_datetime'] = last_24h_vol.index
+        
+        # Format time label to match our aligned blocks (HH:MM format)
         last_24h_vol['time_label'] = last_24h_vol.index.strftime('%H:%M')
         
         # Calculate 24-hour average volatility
@@ -218,6 +249,13 @@ def fetch_and_calculate_volatility(token):
         print(f"[{token}] Error processing: {e}")
         return None
 
+# Show the blocks we're analyzing
+with st.expander("View Time Blocks Being Analyzed"):
+    time_blocks_df = pd.DataFrame([(b[0].strftime('%Y-%m-%d %H:%M'), b[1].strftime('%Y-%m-%d %H:%M'), b[2]) 
+                                  for b in aligned_time_blocks], 
+                                 columns=['Start Time', 'End Time', 'Block Label'])
+    st.dataframe(time_blocks_df)
+
 # Show progress bar while calculating
 progress_bar = st.progress(0)
 status_text = st.empty()
@@ -241,28 +279,26 @@ status_text.text(f"Processed {len(token_results)}/{len(selected_tokens)} tokens 
 
 # Create table for display
 if token_results:
-    # Get all datetimes from all tokens
-    combined_datetime_df = pd.DataFrame()
-    for token, df in token_results.items():
-        if 'original_datetime' in df.columns:
-            token_dt = df[['original_datetime', 'time_label']].copy()
-            token_dt['token'] = token
-            combined_datetime_df = pd.concat([combined_datetime_df, token_dt])
-    
-    # Group by time_label and find the latest datetime for each time slot
-    time_mapping = combined_datetime_df.groupby('time_label')['original_datetime'].max()
-    
-    # Create the volatility table using time_labels
-    all_times = sorted(time_mapping.index, key=time_to_minutes, reverse=True)
-    
+    # Create table data
     table_data = {}
     for token, df in token_results.items():
         vol_series = df.set_index('time_label')['realized_vol']
         table_data[token] = vol_series
     
+    # Create DataFrame with all tokens
     vol_table = pd.DataFrame(table_data)
-    # Use the sorted time labels
-    vol_table = vol_table.reindex(all_times)
+    
+    # Apply the time blocks in the proper order (most recent first)
+    available_times = set(vol_table.index)
+    ordered_times = [t for t in time_block_labels if t in available_times]
+    
+    # If no matches are found in aligned blocks, fallback to the available times
+    if not ordered_times and available_times:
+        ordered_times = sorted(list(available_times), reverse=True)
+    
+    # Reindex with the ordered times
+    vol_table = vol_table.reindex(ordered_times)
+    
     # Convert from decimal to percentage and round to 1 decimal place
     vol_table = (vol_table * 100).round(1)
     
