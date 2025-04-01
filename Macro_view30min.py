@@ -365,7 +365,8 @@ if token_results:
     # Extract block labels and use them as index
     if token_results:
         first_token = list(token_results.keys())[0]
-        block_labels = token_results[first_token]['block_label'].tolist()
+        # Use the block labels from time_blocks to ensure proper order
+        block_labels = [block[2] for block in time_blocks]
         hurst_table['time_block'] = block_labels
         hurst_table = hurst_table.set_index('time_block')
         
@@ -399,9 +400,14 @@ if token_results:
     latest_values = {}
     for token, df in token_results.items():
         if not df.empty and not df['Hurst'].isna().all():
-            latest = df['Hurst'].iloc[0]  # Most recent is at index 0
-            regime = df['regime_desc'].iloc[0]
-            latest_values[token] = (latest, regime)
+            # Take the first time block's data (should be the most recent)
+            latest_block_label = time_blocks[0][2]
+            latest_data = df[df['block_label'] == latest_block_label]
+            
+            if not latest_data.empty:
+                latest = latest_data['Hurst'].iloc[0]
+                regime = latest_data['regime_desc'].iloc[0]
+                latest_values[token] = (latest, regime)
     
     if latest_values:
         mean_reverting = sum(1 for v, r in latest_values.values() if v < 0.4)
