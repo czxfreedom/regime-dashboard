@@ -245,13 +245,25 @@ status_text.text(f"Processed {len(token_results)}/{len(selected_tokens)} tokens 
 # After processing all tokens
 print("Debug: Token Results Keys")
 print(token_results.keys())
+# Get all datetimes from all tokens
+    combined_datetime_df = pd.DataFrame()
+    for token, df in token_results.items():
+        if 'original_datetime' in df.columns:
+            token_dt = df[['original_datetime', 'time_label']].copy()
+            token_dt['token'] = token
+            combined_datetime_df = pd.concat([combined_datetime_df, token_dt])
+    
+    # Debug prints for combined datetime (now within the if block)
+    print("Debug: Combined DateTime DataFrame")
+    print(combined_datetime_df)
 
-# When creating time mapping
-print("Debug: Combined DateTime DataFrame")
-print(combined_datetime_df)
+    # Group by time_label and find the latest datetime for each time slot
+    time_mapping = combined_datetime_df.groupby('time_label')['original_datetime'].max()
+    
+    # Debug print for time mapping
+    print("Debug: Time Mapping")
+    print(time_mapping)
 
-print("Debug: Time Mapping")
-print(time_mapping)
 
 # Create table for display
 if token_results:
