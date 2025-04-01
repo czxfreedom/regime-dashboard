@@ -140,7 +140,8 @@ def time_to_minutes(time_str):
 # Fetch and calculate volatility for a token with 30min timeframe
 @st.cache_data(ttl=600, show_spinner="Calculating volatility metrics...")
 def fetch_and_calculate_volatility(token):
-    # Get current time in Singapore timezone
+        # Add these print statements right after time calculations
+        # Get current time in Singapore timezone
     now_utc = datetime.now(pytz.utc)
     now_sg = now_utc.astimezone(singapore_timezone)
     start_time_sg = now_sg - timedelta(days=lookback_days)
@@ -148,6 +149,9 @@ def fetch_and_calculate_volatility(token):
     # Convert back to UTC for database query
     start_time_utc = start_time_sg.astimezone(pytz.utc)
     end_time_utc = now_sg.astimezone(pytz.utc)
+    print(f"Debug: Current Singapore Time: {now_sg}")
+    print(f"Debug: Start Time (UTC): {start_time_utc}")
+    print(f"Debug: End Time (UTC): {end_time_utc}")
 
     query = f"""
     SELECT 
@@ -238,6 +242,16 @@ for i, token in enumerate(selected_tokens):
 # Final progress update
 progress_bar.progress(1.0)
 status_text.text(f"Processed {len(token_results)}/{len(selected_tokens)} tokens successfully")
+# After processing all tokens
+print("Debug: Token Results Keys")
+print(token_results.keys())
+
+# When creating time mapping
+print("Debug: Combined DateTime DataFrame")
+print(combined_datetime_df)
+
+print("Debug: Time Mapping")
+print(time_mapping)
 
 # Create table for display
 if token_results:
