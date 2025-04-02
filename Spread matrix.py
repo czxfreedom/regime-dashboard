@@ -15,7 +15,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Apply custom CSS styling - more minimal design
+# Apply custom CSS styling - more minimal design with centered numeric columns and color coding
 st.markdown("""
 <style>
     .header-style {
@@ -49,6 +49,34 @@ st.markdown("""
     .stTabs [aria-selected="true"] {
         background-color: #4682B4;
         color: white;
+    }
+    
+    /* Center numeric columns in dataframes */
+    .dataframe th, .dataframe td {
+        text-align: center !important;
+    }
+    /* First column (Token) remains left-aligned */
+    .dataframe th:first-child, .dataframe td:first-child {
+        text-align: left !important;
+    }
+    
+    /* Color coding for spread values */
+    .very-low-spread {
+        background-color: rgba(0, 128, 0, 0.1) !important;
+        color: #006600 !important;
+        font-weight: bold;
+    }
+    .low-spread {
+        background-color: rgba(0, 102, 204, 0.1) !important;
+        color: #0066cc !important;
+    }
+    .medium-spread {
+        background-color: rgba(255, 153, 0, 0.1) !important;
+        color: #ff9900 !important;
+    }
+    .high-spread {
+        background-color: rgba(204, 0, 0, 0.1) !important;
+        color: #cc0000 !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -140,6 +168,25 @@ def get_depth_label(fee_column, token):
         }
     return depth_map.get(fee_column, fee_column)
 
+# Function to apply color coding to spread values
+def color_code_value(value, thresholds=None):
+    """Apply color coding to spread values"""
+    if pd.isna(value):
+        return value
+    
+    if thresholds is None:
+        # Default thresholds - adjust based on your data
+        thresholds = [0.0005, 0.001, 0.005]
+        
+    if value < thresholds[0]:
+        return f'<span class="very-low-spread">{value:.6f}</span>'
+    elif value < thresholds[1]:
+        return f'<span class="low-spread">{value:.6f}</span>'
+    elif value < thresholds[2]:
+        return f'<span class="medium-spread">{value:.6f}</span>'
+    else:
+        return f'<span class="high-spread">{value:.6f}</span>'
+
 # --- Data Fetching Functions ---
 @st.cache_data(ttl=600, show_spinner="Fetching tokens...")
 def fetch_all_tokens():
@@ -174,12 +221,16 @@ def fetch_10min_spread_data(token):
         end_time_utc = now_sg.astimezone(pytz.utc)
 
         # Query to get the fee data for the specified token
+        # Special handling for SurfFuture: Use total_fee for all fee levels
         query = f"""
         SELECT 
             time_group AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp,
             pair_name,
             source,
-            fee1, fee2, fee3, fee4,
+            CASE WHEN source = 'surfFuture' THEN total_fee ELSE fee1 END as fee1,
+            CASE WHEN source = 'surfFuture' THEN total_fee ELSE fee2 END as fee2,
+            CASE WHEN source = 'surfFuture' THEN total_fee ELSE fee3 END as fee3,
+            CASE WHEN source = 'surfFuture' THEN total_fee ELSE fee4 END as fee4,
             total_fee
         FROM 
             oracle_exchange_fee
@@ -225,14 +276,15 @@ def fetch_daily_spread_averages(tokens):
         tokens_str = "', '".join(tokens)
 
         # Query to get average fee data for all selected tokens
+        # Special handling for SurfFuture: Use total_fee for all fee levels
         query = f"""
         SELECT 
             pair_name,
             source,
-            AVG(fee1) as avg_fee1,
-            AVG(fee2) as avg_fee2,
-            AVG(fee3) as avg_fee3,
-            AVG(fee4) as avg_fee4,
+            CASE WHEN source = 'surfFuture' THEN AVG(total_fee) ELSE AVG(fee1) END as avg_fee1,
+            CASE WHEN source = 'surfFuture' THEN AVG(total_fee) ELSE AVG(fee2) END as avg_fee2,
+            CASE WHEN source = 'surfFuture' THEN AVG(total_fee) ELSE AVG(fee3) END as avg_fee3,
+            CASE WHEN source = 'surfFuture' THEN AVG(total_fee) ELSE AVG(fee4) END as avg_fee4,
             AVG(total_fee) as avg_total_fee
         FROM 
             oracle_exchange_fee
@@ -292,6 +344,10 @@ def calculate_matrix_data(avg_data):
             # Add a column indicating if SurfFuture is better than non-surf avg
             if 'SurfFuture' in pivot_df.columns and 'Avg (Non-Surf)' in pivot_df.columns:
                 pivot_df['Surf Better'] = pivot_df['SurfFuture'] < pivot_df['Avg (Non-Surf)']
+                
+                # Calculate percentage improvement
+                pivot_df['Improvement %'] = ((pivot_df['Avg (Non-Surf)'] - pivot_df['SurfFuture']) / 
+                                            pivot_df['Avg (Non-Surf)'] * 100).round(2)
             
             # Store the pivot table for this fee level
             matrix_data[fee_col.replace('avg_', '')] = pivot_df
@@ -355,7 +411,7 @@ with tab1:
         scale_label = ""
         
         # Calculate mean for scaling
-        numeric_cols = [col for col in df.columns if col not in ['pair_name', 'Surf Better']]
+        numeric_cols = [col for col in df.columns if col not in ['pair_name', 'Surf Better', 'Improvement %']]
         if numeric_cols:
             values = []
             for col in numeric_cols:
@@ -398,9 +454,11 @@ with tab1:
         
         # Define column order with SurfFuture at the end
         desired_order = ['pair_name', 'Token Type', 'Binance', 'Gate', 'Hyperliquid', 'Avg (Non-Surf)', 'SurfFuture']
+        if 'Improvement %' in display_df.columns:
+            desired_order.append('Improvement %')
         ordered_columns = [col for col in desired_order if col in display_df.columns]
         
-        # Add Surf Better column if it exists
+        # Add Surf Better column if it exists (hidden, used for filtering)
         if 'Surf Better' in display_df.columns:
             ordered_columns.append('Surf Better')
         
@@ -409,15 +467,76 @@ with tab1:
         # Rename columns for display
         display_df = display_df.rename(columns={'pair_name': 'Token'})
         
-        # Display the table
-        token_count = len(display_df)
+        # Apply color coding to numeric columns
+        color_df = display_df.copy()
+        for col in numeric_cols:
+            if col in color_df.columns and col != 'Token Type':
+                # Determine thresholds based on column values
+                values = color_df[col].dropna().tolist()
+                if values:
+                    # Dynamic thresholds based on percentiles
+                    q1 = np.percentile(values, 25)
+                    median = np.percentile(values, 50)
+                    q3 = np.percentile(values, 75)
+                    thresholds = [q1, median, q3]
+                    
+                    color_df[col] = color_df[col].apply(lambda x: color_code_value(x, thresholds) if not pd.isna(x) else "")
+        
+        # Special formatting for improvement percentage
+        if 'Improvement %' in color_df.columns:
+            color_df['Improvement %'] = color_df['Improvement %'].apply(
+                lambda x: f'<span style="color:green;font-weight:bold">+{x:.2f}%</span>' if x > 0 else 
+                (f'<span style="color:red">-{abs(x):.2f}%</span>' if x < 0 else f'{x:.2f}%')
+            )
+        
+        # Display the table with HTML formatting
+        token_count = len(color_df)
         table_height = max(100 + 35 * token_count, 300)  # Minimum height of 300px
-        st.dataframe(display_df, height=table_height, use_container_width=True)
+        
+        # Convert to HTML for better formatting
+        html_table = color_df.to_html(escape=False, index=False)
+        st.markdown(html_table, unsafe_allow_html=True)
+        
+        # Visualization - Pie chart showing proportion of tokens where SurfFuture is better
+        if 'Surf Better' in df.columns:
+            st.markdown("### SurfFuture Performance Analysis")
+            
+            # Count tokens where SurfFuture is better
+            surf_better_count = df['Surf Better'].sum()
+            total_count = len(df)
+            surf_worse_count = total_count - surf_better_count
+            
+            # Create pie chart
+            fig = px.pie(
+                values=[surf_better_count, surf_worse_count],
+                names=['SurfFuture Better', 'Other Exchanges Better'],
+                title="Proportion of Tokens Where SurfFuture Has Better Spreads",
+                color_discrete_sequence=['#4CAF50', '#FFC107'],
+                hole=0.4
+            )
+            
+            # Update layout
+            fig.update_layout(
+                legend=dict(orientation='h', yanchor='bottom', y=-0.2),
+                margin=dict(t=60, b=60, l=20, r=20),
+                height=400
+            )
+            
+            # Display percentage text in middle
+            better_percentage = surf_better_count / total_count * 100 if total_count > 0 else 0
+            fig.add_annotation(
+                text=f"{better_percentage:.1f}%<br>Better",
+                x=0.5, y=0.5,
+                font_size=20,
+                showarrow=False
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
         
         # Show summary of SurfFuture performance
         if 'SurfFuture' in display_df.columns and 'Avg (Non-Surf)' in display_df.columns:
-            surf_values = display_df['SurfFuture'].dropna()
-            nonsurf_values = display_df['Avg (Non-Surf)'].dropna()
+            surf_values = df['SurfFuture'].dropna()
+            nonsurf_values = df['Avg (Non-Surf)'].dropna()
             
             if not surf_values.empty and not nonsurf_values.empty:
                 # Match indices to compare only pairs with both values
@@ -446,13 +565,13 @@ with tab1:
                         st.success(f"📉 **SurfFuture average spread ({surf_avg:.6f}) is {improvement:.2f}% lower than other exchanges ({nonsurf_avg:.6f})**")
                     
             # Calculate separate stats for majors and altcoins
-            major_tokens = display_df[display_df['Token Type'] == 'Major'].index
-            altcoin_tokens = display_df[display_df['Token Type'] == 'Altcoin'].index
+            major_tokens_df = df[df['pair_name'].apply(is_major)]
+            altcoin_tokens_df = df[~df['pair_name'].apply(is_major)]
             
             # For Major tokens
-            if len(major_tokens) > 0:
-                surf_major = display_df.loc[major_tokens, 'SurfFuture'].dropna()
-                nonsurf_major = display_df.loc[major_tokens, 'Avg (Non-Surf)'].dropna()
+            if not major_tokens_df.empty:
+                surf_major = major_tokens_df['SurfFuture'].dropna()
+                nonsurf_major = major_tokens_df['Avg (Non-Surf)'].dropna()
                 
                 if not surf_major.empty and not nonsurf_major.empty:
                     common_indices = surf_major.index.intersection(nonsurf_major.index)
@@ -473,9 +592,9 @@ with tab1:
                             """, unsafe_allow_html=True)
             
             # For Altcoin tokens
-            if len(altcoin_tokens) > 0:
-                surf_altcoin = display_df.loc[altcoin_tokens, 'SurfFuture'].dropna()
-                nonsurf_altcoin = display_df.loc[altcoin_tokens, 'Avg (Non-Surf)'].dropna()
+            if not altcoin_tokens_df.empty:
+                surf_altcoin = altcoin_tokens_df['SurfFuture'].dropna()
+                nonsurf_altcoin = altcoin_tokens_df['Avg (Non-Surf)'].dropna()
                 
                 if not surf_altcoin.empty and not nonsurf_altcoin.empty:
                     common_indices = surf_altcoin.index.intersection(nonsurf_altcoin.index)
@@ -494,6 +613,58 @@ with tab1:
                             • SurfFuture average: {surf_altcoin_avg:.6f} vs Non-Surf average: {nonsurf_altcoin_avg:.6f}
                             </div>
                             """, unsafe_allow_html=True)
+                            
+            # Bar chart comparing exchanges
+            st.markdown("### Average Spread by Exchange")
+            
+            # Calculate average for each exchange
+            exchange_avgs = {}
+            for exchange in ['Binance', 'Gate', 'Hyperliquid', 'SurfFuture']:
+                if exchange in df.columns:
+                    values = df[exchange].dropna()
+                    if not values.empty:
+                        exchange_avgs[exchange] = values.mean()
+            
+            if exchange_avgs:
+                # Create data frame for plotting
+                avg_df = pd.DataFrame({
+                    'Exchange': list(exchange_avgs.keys()),
+                    'Average Spread': list(exchange_avgs.values())
+                })
+                
+                # Sort by average spread (ascending)
+                avg_df = avg_df.sort_values('Average Spread')
+                
+                # Create bar chart
+                fig = px.bar(
+                    avg_df,
+                    x='Exchange',
+                    y='Average Spread',
+                    title=f"Average Spread by Exchange ({scale_label})",
+                    color='Exchange',
+                    text='Average Spread',
+                    color_discrete_map={
+                        'SurfFuture': '#4CAF50',
+                        'Binance': '#2196F3',
+                        'Gate': '#FFC107',
+                        'Hyperliquid': '#FF5722'
+                    }
+                )
+                
+                # Format the bars
+                fig.update_traces(
+                    texttemplate='%{y:.6f}',
+                    textposition='outside'
+                )
+                
+                # Format the layout
+                fig.update_layout(
+                    xaxis_title="Exchange",
+                    yaxis_title=f"Average Spread {scale_label}",
+                    height=400
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
     else:
         st.warning("No fee1 (50K/20K) data available for analysis")
 
@@ -508,8 +679,8 @@ with tab2:
     • <b>Major tokens</b> (BTC, ETH, SOL, XRP, BNB): 100K<br>
     • <b>Altcoin tokens</b>: 50K<br>
     <br>
-    This tab shows daily averages of 10-minute spread data points at 100K/50K size.
-    </div>
+    This tab shows daily averages of 10-minute spread data points at 100K/50K size.""
+    "</div>
     """, unsafe_allow_html=True)
     
     if 'fee2' in matrix_data:
@@ -520,7 +691,7 @@ with tab2:
         scale_label = ""
         
         # Calculate mean for scaling
-        numeric_cols = [col for col in df.columns if col not in ['pair_name', 'Surf Better']]
+        numeric_cols = [col for col in df.columns if col not in ['pair_name', 'Surf Better', 'Improvement %']]
         if numeric_cols:
             values = []
             for col in numeric_cols:
@@ -563,9 +734,11 @@ with tab2:
         
         # Define column order with SurfFuture at the end
         desired_order = ['pair_name', 'Token Type', 'Binance', 'Gate', 'Hyperliquid', 'Avg (Non-Surf)', 'SurfFuture']
+        if 'Improvement %' in display_df.columns:
+            desired_order.append('Improvement %')
         ordered_columns = [col for col in desired_order if col in display_df.columns]
         
-        # Add Surf Better column if it exists
+        # Add Surf Better column if it exists (hidden, used for filtering)
         if 'Surf Better' in display_df.columns:
             ordered_columns.append('Surf Better')
         
@@ -574,15 +747,76 @@ with tab2:
         # Rename columns for display
         display_df = display_df.rename(columns={'pair_name': 'Token'})
         
-        # Display the table
-        token_count = len(display_df)
+        # Apply color coding to numeric columns
+        color_df = display_df.copy()
+        for col in numeric_cols:
+            if col in color_df.columns and col != 'Token Type':
+                # Determine thresholds based on column values
+                values = color_df[col].dropna().tolist()
+                if values:
+                    # Dynamic thresholds based on percentiles
+                    q1 = np.percentile(values, 25)
+                    median = np.percentile(values, 50)
+                    q3 = np.percentile(values, 75)
+                    thresholds = [q1, median, q3]
+                    
+                    color_df[col] = color_df[col].apply(lambda x: color_code_value(x, thresholds) if not pd.isna(x) else "")
+        
+        # Special formatting for improvement percentage
+        if 'Improvement %' in color_df.columns:
+            color_df['Improvement %'] = color_df['Improvement %'].apply(
+                lambda x: f'<span style="color:green;font-weight:bold">+{x:.2f}%</span>' if x > 0 else 
+                (f'<span style="color:red">-{abs(x):.2f}%</span>' if x < 0 else f'{x:.2f}%')
+            )
+        
+        # Display the table with HTML formatting
+        token_count = len(color_df)
         table_height = max(100 + 35 * token_count, 300)  # Minimum height of 300px
-        st.dataframe(display_df, height=table_height, use_container_width=True)
+        
+        # Convert to HTML for better formatting
+        html_table = color_df.to_html(escape=False, index=False)
+        st.markdown(html_table, unsafe_allow_html=True)
+        
+        # Visualization - Pie chart showing proportion of tokens where SurfFuture is better
+        if 'Surf Better' in df.columns:
+            st.markdown("### SurfFuture Performance Analysis")
+            
+            # Count tokens where SurfFuture is better
+            surf_better_count = df['Surf Better'].sum()
+            total_count = len(df)
+            surf_worse_count = total_count - surf_better_count
+            
+            # Create pie chart
+            fig = px.pie(
+                values=[surf_better_count, surf_worse_count],
+                names=['SurfFuture Better', 'Other Exchanges Better'],
+                title="Proportion of Tokens Where SurfFuture Has Better Spreads",
+                color_discrete_sequence=['#4CAF50', '#FFC107'],
+                hole=0.4
+            )
+            
+            # Update layout
+            fig.update_layout(
+                legend=dict(orientation='h', yanchor='bottom', y=-0.2),
+                margin=dict(t=60, b=60, l=20, r=20),
+                height=400
+            )
+            
+            # Display percentage text in middle
+            better_percentage = surf_better_count / total_count * 100 if total_count > 0 else 0
+            fig.add_annotation(
+                text=f"{better_percentage:.1f}%<br>Better",
+                x=0.5, y=0.5,
+                font_size=20,
+                showarrow=False
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
         
         # Show summary of SurfFuture performance
         if 'SurfFuture' in display_df.columns and 'Avg (Non-Surf)' in display_df.columns:
-            surf_values = display_df['SurfFuture'].dropna()
-            nonsurf_values = display_df['Avg (Non-Surf)'].dropna()
+            surf_values = df['SurfFuture'].dropna()
+            nonsurf_values = df['Avg (Non-Surf)'].dropna()
             
             if not surf_values.empty and not nonsurf_values.empty:
                 # Match indices to compare only pairs with both values
@@ -611,13 +845,13 @@ with tab2:
                         st.success(f"📉 **SurfFuture average spread ({surf_avg:.6f}) is {improvement:.2f}% lower than other exchanges ({nonsurf_avg:.6f})**")
                     
             # Calculate separate stats for majors and altcoins
-            major_tokens = display_df[display_df['Token Type'] == 'Major'].index
-            altcoin_tokens = display_df[display_df['Token Type'] == 'Altcoin'].index
+            major_tokens_df = df[df['pair_name'].apply(is_major)]
+            altcoin_tokens_df = df[~df['pair_name'].apply(is_major)]
             
             # For Major tokens
-            if len(major_tokens) > 0:
-                surf_major = display_df.loc[major_tokens, 'SurfFuture'].dropna()
-                nonsurf_major = display_df.loc[major_tokens, 'Avg (Non-Surf)'].dropna()
+            if not major_tokens_df.empty:
+                surf_major = major_tokens_df['SurfFuture'].dropna()
+                nonsurf_major = major_tokens_df['Avg (Non-Surf)'].dropna()
                 
                 if not surf_major.empty and not nonsurf_major.empty:
                     common_indices = surf_major.index.intersection(nonsurf_major.index)
@@ -638,9 +872,9 @@ with tab2:
                             """, unsafe_allow_html=True)
             
             # For Altcoin tokens
-            if len(altcoin_tokens) > 0:
-                surf_altcoin = display_df.loc[altcoin_tokens, 'SurfFuture'].dropna()
-                nonsurf_altcoin = display_df.loc[altcoin_tokens, 'Avg (Non-Surf)'].dropna()
+            if not altcoin_tokens_df.empty:
+                surf_altcoin = altcoin_tokens_df['SurfFuture'].dropna()
+                nonsurf_altcoin = altcoin_tokens_df['Avg (Non-Surf)'].dropna()
                 
                 if not surf_altcoin.empty and not nonsurf_altcoin.empty:
                     common_indices = surf_altcoin.index.intersection(nonsurf_altcoin.index)
@@ -651,7 +885,7 @@ with tab2:
                         if total_count > 0:
                             surf_altcoin_avg = surf_altcoin.mean()
                             nonsurf_altcoin_avg = nonsurf_altcoin.mean()
-
+                            
                             st.markdown(f"""
                             <div class="info-box">
                             <b>Altcoin Tokens (50K):</b><br>
@@ -659,6 +893,58 @@ with tab2:
                             • SurfFuture average: {surf_altcoin_avg:.6f} vs Non-Surf average: {nonsurf_altcoin_avg:.6f}
                             </div>
                             """, unsafe_allow_html=True)
+                            
+            # Bar chart comparing exchanges
+            st.markdown("### Average Spread by Exchange")
+            
+            # Calculate average for each exchange
+            exchange_avgs = {}
+            for exchange in ['Binance', 'Gate', 'Hyperliquid', 'SurfFuture']:
+                if exchange in df.columns:
+                    values = df[exchange].dropna()
+                    if not values.empty:
+                        exchange_avgs[exchange] = values.mean()
+            
+            if exchange_avgs:
+                # Create data frame for plotting
+                avg_df = pd.DataFrame({
+                    'Exchange': list(exchange_avgs.keys()),
+                    'Average Spread': list(exchange_avgs.values())
+                })
+                
+                # Sort by average spread (ascending)
+                avg_df = avg_df.sort_values('Average Spread')
+                
+                # Create bar chart
+                fig = px.bar(
+                    avg_df,
+                    x='Exchange',
+                    y='Average Spread',
+                    title=f"Average Spread by Exchange ({scale_label})",
+                    color='Exchange',
+                    text='Average Spread',
+                    color_discrete_map={
+                        'SurfFuture': '#4CAF50',
+                        'Binance': '#2196F3',
+                        'Gate': '#FFC107',
+                        'Hyperliquid': '#FF5722'
+                    }
+                )
+                
+                # Format the bars
+                fig.update_traces(
+                    texttemplate='%{y:.6f}',
+                    textposition='outside'
+                )
+                
+                # Format the layout
+                fig.update_layout(
+                    xaxis_title="Exchange",
+                    yaxis_title=f"Average Spread {scale_label}",
+                    height=400
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
     else:
         st.warning("No fee2 (100K/50K) data available for analysis")
 
@@ -673,7 +959,7 @@ with tab3:
     • <b>Major tokens</b> (BTC, ETH, SOL, XRP, BNB): 50K, 100K, 200K, 500K<br>
     • <b>Altcoin tokens</b>: 20K, 50K, 100K, 200K<br>
     <br>
-    Tables show daily averages of 10-minute spread data points.
+    Tables show daily averages of 10-minute spread data points across different size tiers.
     </div>
     """, unsafe_allow_html=True)
     
@@ -697,315 +983,286 @@ with tab3:
         if not available_fee_cols:
             st.error("Required fee columns not found in the data. Check database schema.")
         else:
-            # --- Average of all exchanges ---
-            st.markdown("### Average Spreads Across All Exchanges")
+            # --- Average of all exchanges (excluding SurfFuture) ---
+            st.markdown("### Average Spreads Across Exchanges")
             
             try:
-                # First, calculate average across all exchanges for each pair and depth
-                avg_all_exchanges = daily_avg_data.groupby(['pair_name'])[available_fee_cols].mean().reset_index()
-                
-                # Process majors
-                if major_tokens:
-                    major_df = avg_all_exchanges[avg_all_exchanges['pair_name'].isin(major_tokens)].copy()
-                    if not major_df.empty:
-                        # Rename columns for display
-                        major_df_display = major_df.copy()
-                        for col in available_fee_cols:
-                            if col in fee_depth_map_major:
-                                major_df_display = major_df_display.rename(columns={col: fee_depth_map_major[col]})
-                        
-                        # Sort alphabetically
-                        major_df_display = major_df_display.sort_values('pair_name')
-                        
-                        # Determine scale factor
-                        depth_cols = [fee_depth_map_major[col] for col in available_fee_cols if col in fee_depth_map_major]
-                        values = []
-                        for col in depth_cols:
-                            if col in major_df_display.columns:
-                                values.extend(major_df_display[col].dropna().tolist())
-                        
-                        scale_factor = 1
-                        scale_label = ""
-                        if values:
-                            mean_fee = sum(values) / len(values)
-                            if mean_fee < 0.001:
-                                scale_factor = 1000
-                                scale_label = "× 1,000"
-                            elif mean_fee < 0.0001:
-                                scale_factor = 10000
-                                scale_label = "× 10,000"
-                            elif mean_fee < 0.00001:
-                                scale_factor = 100000
-                                scale_label = "× 100,000"
-                        
-                        # Apply scaling
-                        if scale_factor > 1:
-                            for col in depth_cols:
-                                if col in major_df_display.columns:
-                                    major_df_display[col] = major_df_display[col] * scale_factor
-                            
-                            st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
-                        
-                        # Round values
-                        for col in depth_cols:
-                            if col in major_df_display.columns:
-                                major_df_display[col] = major_df_display[col].round(6)
-                        
-                        # Rename pair_name column
-                        major_df_display = major_df_display.rename(columns={'pair_name': 'Token'})
-                        
-                        st.markdown("#### Major Tokens - Average Across All Exchanges")
-                        st.dataframe(major_df_display, height=len(major_df_display) * 35 + 40, use_container_width=True)
-                
-                # Process altcoins
-                if altcoin_tokens:
-                    altcoin_df = avg_all_exchanges[avg_all_exchanges['pair_name'].isin(altcoin_tokens)].copy()
-                    if not altcoin_df.empty:
-                        # Rename columns for display
-                        altcoin_df_display = altcoin_df.copy()
-                        for col in available_fee_cols:
-                            if col in fee_depth_map_altcoin:
-                                altcoin_df_display = altcoin_df_display.rename(columns={col: fee_depth_map_altcoin[col]})
-                        
-                        # Sort alphabetically
-                        altcoin_df_display = altcoin_df_display.sort_values('pair_name')
-                        
-                        # Determine scale factor
-                        depth_cols = [fee_depth_map_altcoin[col] for col in available_fee_cols if col in fee_depth_map_altcoin]
-                        values = []
-                        for col in depth_cols:
-                            if col in altcoin_df_display.columns:
-                                values.extend(altcoin_df_display[col].dropna().tolist())
-                        
-                        scale_factor = 1
-                        scale_label = ""
-                        if values:
-                            mean_fee = sum(values) / len(values)
-                            if mean_fee < 0.001:
-                                scale_factor = 1000
-                                scale_label = "× 1,000"
-                            elif mean_fee < 0.0001:
-                                scale_factor = 10000
-                                scale_label = "× 10,000"
-                            elif mean_fee < 0.00001:
-                                scale_factor = 100000
-                                scale_label = "× 100,000"
-                        
-                        # Apply scaling
-                        if scale_factor > 1:
-                            for col in depth_cols:
-                                if col in altcoin_df_display.columns:
-                                    altcoin_df_display[col] = altcoin_df_display[col] * scale_factor
-                            
-                            st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
-                        
-                        # Round values
-                        for col in depth_cols:
-                            if col in altcoin_df_display.columns:
-                                altcoin_df_display[col] = altcoin_df_display[col].round(6)
-                        
-                        # Rename pair_name column
-                        altcoin_df_display = altcoin_df_display.rename(columns={'pair_name': 'Token'})
-                        
-                        st.markdown("#### Altcoin Tokens - Average Across All Exchanges")
-                        st.dataframe(altcoin_df_display, height=len(altcoin_df_display) * 35 + 40, use_container_width=True)
-            except Exception as e:
-                st.error(f"Error calculating average spreads: {e}")
-                import traceback
-                traceback.print_exc()
-            
-            # --- Individual exchange tables ---
-            st.markdown("### Individual Exchange Spreads")
-            
-            # Create tabs for each exchange
-            exchange_tabs = st.tabs(["Binance", "Gate", "Hyperliquid", "SurfFuture"])
-            
-            # Process each exchange
-            for i, exchange_source in enumerate(["binanceFuture", "gateFuture", "hyperliquidFuture", "surfFuture"]):
-                with exchange_tabs[i]:
-                    exchange_display_name = exchanges_display[exchange_source]
-                    st.markdown(f"#### {exchange_display_name} Spreads")
-                    
-                    # Filter data for this exchange
-                    exchange_data = daily_avg_data[daily_avg_data['source'] == exchange_source].copy()
-                    
-                    if not exchange_data.empty:
-                        # --- Process majors ---
-                        if major_tokens:
-                            major_ex_df = exchange_data[exchange_data['pair_name'].isin(major_tokens)].copy()
-                            if not major_ex_df.empty:
-                                # Create a display DataFrame with available columns
-                                columns_to_select = ['pair_name'] + [col for col in available_fee_cols if col in major_ex_df.columns]
-                                major_ex_display = major_ex_df[columns_to_select].copy()
-                                
-                                # Rename columns for display
-                                for col in available_fee_cols:
-                                    if col in fee_depth_map_major and col in major_ex_display.columns:
-                                        major_ex_display = major_ex_display.rename(columns={col: fee_depth_map_major[col]})
-                                
-                                # Sort alphabetically
-                                major_ex_display = major_ex_display.sort_values('pair_name')
-                                
-                                # Determine scale factor
-                                depth_cols = [fee_depth_map_major[col] for col in available_fee_cols if col in fee_depth_map_major]
-                                values = []
-                                for col in depth_cols:
-                                    if col in major_ex_display.columns:
-                                        values.extend(major_ex_display[col].dropna().tolist())
-                                
-                                scale_factor = 1
-                                scale_label = ""
-                                if values:
-                                    mean_fee = sum(values) / len(values)
-                                    if mean_fee < 0.001:
-                                        scale_factor = 1000
-                                        scale_label = "× 1,000"
-                                    elif mean_fee < 0.0001:
-                                        scale_factor = 10000
-                                        scale_label = "× 10,000"
-                                    elif mean_fee < 0.00001:
-                                        scale_factor = 100000
-                                        scale_label = "× 100,000"
-                                
-                                # Apply scaling
-                                if scale_factor > 1:
-                                    for col in depth_cols:
-                                        if col in major_ex_display.columns:
-                                            major_ex_display[col] = major_ex_display[col] * scale_factor
-                                    
-                                    st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
-                                
-                                # Round values
-                                for col in depth_cols:
-                                    if col in major_ex_display.columns:
-                                        major_ex_display[col] = major_ex_display[col].round(6)
-                                
-                                # Rename pair_name column
-                                major_ex_display = major_ex_display.rename(columns={'pair_name': 'Token'})
-                                
-                                st.markdown(f"##### Major Tokens - {exchange_display_name}")
-                                st.dataframe(major_ex_display, height=len(major_ex_display) * 35 + 40, use_container_width=True)
-                        
-                        # --- Process altcoins ---
-                        if altcoin_tokens:
-                            altcoin_ex_df = exchange_data[exchange_data['pair_name'].isin(altcoin_tokens)].copy()
-                            if not altcoin_ex_df.empty:
-                                # Create a display DataFrame with available columns
-                                columns_to_select = ['pair_name'] + [col for col in available_fee_cols if col in altcoin_ex_df.columns]
-                                altcoin_ex_display = altcoin_ex_df[columns_to_select].copy()
-                                
-                                # Rename columns for display
-                                for col in available_fee_cols:
-                                    if col in fee_depth_map_altcoin and col in altcoin_ex_display.columns:
-                                        altcoin_ex_display = altcoin_ex_display.rename(columns={col: fee_depth_map_altcoin[col]})
-                                
-                                # Sort alphabetically
-                                altcoin_ex_display = altcoin_ex_display.sort_values('pair_name')
-                                
-                                # Determine scale factor
-                                depth_cols = [fee_depth_map_altcoin[col] for col in available_fee_cols if col in fee_depth_map_altcoin]
-                                values = []
-                                for col in depth_cols:
-                                    if col in altcoin_ex_display.columns:
-                                        values.extend(altcoin_ex_display[col].dropna().tolist())
-                                
-                                scale_factor = 1
-                                scale_label = ""
-                                if values:
-                                    mean_fee = sum(values) / len(values)
-                                    if mean_fee < 0.001:
-                                        scale_factor = 1000
-                                        scale_label = "× 1,000"
-                                    elif mean_fee < 0.0001:
-                                        scale_factor = 10000
-                                        scale_label = "× 10,000"
-                                    elif mean_fee < 0.00001:
-                                        scale_factor = 100000
-                                        scale_label = "× 100,000"
-                                
-                                # Apply scaling
-                                if scale_factor > 1:
-                                    for col in depth_cols:
-                                        if col in altcoin_ex_display.columns:
-                                            altcoin_ex_display[col] = altcoin_ex_display[col] * scale_factor
-                                    
-                                    st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
-                                
-                                # Round values
-                                for col in depth_cols:
-                                    if col in altcoin_ex_display.columns:
-                                        altcoin_ex_display[col] = altcoin_ex_display[col].round(6)
-                                
-                                # Rename pair_name column
-                                altcoin_ex_display = altcoin_ex_display.rename(columns={'pair_name': 'Token'})
-                                
-                                st.markdown(f"##### Altcoin Tokens - {exchange_display_name}")
-                                st.dataframe(altcoin_ex_display, height=len(altcoin_ex_display) * 35 + 40, use_container_width=True)
-                    else:
-                        st.warning(f"No data available for {exchange_display_name}")
-            
-            # --- Comparison: SurfFuture vs. Average of Other Exchanges ---
-            st.markdown("### SurfFuture vs. Other Exchanges Comparison")
-            
-            try:
-                # Calculate average of non-surf exchanges for each pair and depth
-                non_surf_data = daily_avg_data[daily_avg_data['source'].isin(
-                    ['binanceFuture', 'gateFuture', 'hyperliquidFuture']
-                )].copy()
+                # Create filtered data without surfFuture for comparison
+                non_surf_data = daily_avg_data[daily_avg_data['source'].isin(['binanceFuture', 'gateFuture', 'hyperliquidFuture'])].copy()
                 
                 if not non_surf_data.empty:
-                    non_surf_avg = non_surf_data.groupby(['pair_name'])[available_fee_cols].mean().reset_index()
+                    # Calculate average across exchanges for each pair and depth
+                    avg_all_exchanges = non_surf_data.groupby(['pair_name'])[available_fee_cols].mean().reset_index()
                     
-                    # Get SurfFuture data
-                    surf_data = daily_avg_data[daily_avg_data['source'] == 'surfFuture'].copy()
+                    # Process majors
+                    if major_tokens:
+                        major_df = avg_all_exchanges[avg_all_exchanges['pair_name'].isin(major_tokens)].copy()
+                        if not major_df.empty:
+                            # Rename columns for display
+                            major_df_display = major_df.copy()
+                            for col in available_fee_cols:
+                                if col in fee_depth_map_major:
+                                    major_df_display = major_df_display.rename(columns={col: fee_depth_map_major[col]})
+                            
+                            # Sort alphabetically
+                            major_df_display = major_df_display.sort_values('pair_name')
+                            
+                            # Determine scale factor
+                            depth_cols = [fee_depth_map_major[col] for col in available_fee_cols if col in fee_depth_map_major]
+                            values = []
+                            for col in depth_cols:
+                                if col in major_df_display.columns:
+                                    values.extend(major_df_display[col].dropna().tolist())
+                            
+                            scale_factor = 1
+                            scale_label = ""
+                            if values:
+                                mean_fee = sum(values) / len(values)
+                                if mean_fee < 0.001:
+                                    scale_factor = 1000
+                                    scale_label = "× 1,000"
+                                elif mean_fee < 0.0001:
+                                    scale_factor = 10000
+                                    scale_label = "× 10,000"
+                                elif mean_fee < 0.00001:
+                                    scale_factor = 100000
+                                    scale_label = "× 100,000"
+                            
+                            # Apply scaling
+                            if scale_factor > 1:
+                                for col in depth_cols:
+                                    if col in major_df_display.columns:
+                                        major_df_display[col] = major_df_display[col] * scale_factor
+                                
+                                st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
+                            
+                            # Apply color coding
+                            color_df = major_df_display.copy()
+                            for col in depth_cols:
+                                if col in color_df.columns:
+                                    # Determine thresholds based on column values
+                                    col_values = color_df[col].dropna().tolist()
+                                    if col_values:
+                                        # Dynamic thresholds based on percentiles
+                                        q1 = np.percentile(col_values, 25) if len(col_values) >= 4 else min(col_values)
+                                        median = np.percentile(col_values, 50) if len(col_values) >= 2 else col_values[0]
+                                        q3 = np.percentile(col_values, 75) if len(col_values) >= 4 else max(col_values)
+                                        thresholds = [q1, median, q3]
+                                        
+                                        color_df[col] = color_df[col].apply(lambda x: color_code_value(x, thresholds) if not pd.isna(x) else "")
+                            
+                            # Round values for display
+                            for col in depth_cols:
+                                if col in major_df_display.columns:
+                                    major_df_display[col] = major_df_display[col].round(6)
+                            
+                            # Rename pair_name column
+                            color_df = color_df.rename(columns={'pair_name': 'Token'})
+                            
+                            st.markdown("#### Major Tokens - Average Across Exchanges")
+                            
+                            # Display the table with HTML formatting
+                            html_table = color_df.to_html(escape=False, index=False)
+                            st.markdown(html_table, unsafe_allow_html=True)
+                            
+                            # Create visualization - line chart showing spread by size
+                            st.markdown("#### Spread vs. Size Relationship (Major Tokens)")
+                            
+                            # Calculate average spread for each size tier
+                            size_averages = {}
+                            for col in depth_cols:
+                                if col in major_df_display.columns:
+                                    size_averages[col] = major_df_display[col].mean()
+                            
+                            if size_averages:
+                                # Create data frame for plotting
+                                sizes = list(size_averages.keys())
+                                spreads = list(size_averages.values())
+                                
+                                # Create line chart
+                                fig = go.Figure()
+                                
+                                fig.add_trace(go.Scatter(
+                                    x=sizes,
+                                    y=spreads,
+                                    mode='lines+markers',
+                                    line=dict(color='#1E88E5', width=3),
+                                    marker=dict(size=10, color='#1E88E5'),
+                                    name='Average Spread'
+                                ))
+                                
+                                # Format the layout
+                                fig.update_layout(
+                                    title=f"Relationship Between Size and Spread - Major Tokens ({scale_label})",
+                                    xaxis_title="Size Tier",
+                                    yaxis_title=f"Average Spread {scale_label}",
+                                    height=400,
+                                    xaxis=dict(
+                                        tickfont=dict(size=14),
+                                        tickmode='array',
+                                        tickvals=sizes
+                                    ),
+                                    yaxis=dict(
+                                        tickformat='.6f'
+                                    )
+                                )
+                                
+                                st.plotly_chart(fig, use_container_width=True)
                     
-                    if not surf_data.empty:
-                        # Merge the data
-                        comparison_df = pd.merge(
-                            non_surf_avg, 
-                            surf_data[['pair_name'] + available_fee_cols],
-                            on='pair_name',
-                            suffixes=('_non_surf', '_surf')
-                        )
+                    # Process altcoins
+                    if altcoin_tokens:
+                        altcoin_df = avg_all_exchanges[avg_all_exchanges['pair_name'].isin(altcoin_tokens)].copy()
+                        if not altcoin_df.empty:
+                            # Rename columns for display
+                            altcoin_df_display = altcoin_df.copy()
+                            for col in available_fee_cols:
+                                if col in fee_depth_map_altcoin:
+                                    altcoin_df_display = altcoin_df_display.rename(columns={col: fee_depth_map_altcoin[col]})
+                            
+                            # Sort alphabetically
+                            altcoin_df_display = altcoin_df_display.sort_values('pair_name')
+                            
+                            # Determine scale factor
+                            depth_cols = [fee_depth_map_altcoin[col] for col in available_fee_cols if col in fee_depth_map_altcoin]
+                            values = []
+                            for col in depth_cols:
+                                if col in altcoin_df_display.columns:
+                                    values.extend(altcoin_df_display[col].dropna().tolist())
+                            
+                            scale_factor = 1
+                            scale_label = ""
+                            if values:
+                                mean_fee = sum(values) / len(values)
+                                if mean_fee < 0.001:
+                                    scale_factor = 1000
+                                    scale_label = "× 1,000"
+                                elif mean_fee < 0.0001:
+                                    scale_factor = 10000
+                                    scale_label = "× 10,000"
+                                elif mean_fee < 0.00001:
+                                    scale_factor = 100000
+                                    scale_label = "× 100,000"
+                            
+                            # Apply scaling
+                            if scale_factor > 1:
+                                for col in depth_cols:
+                                    if col in altcoin_df_display.columns:
+                                        altcoin_df_display[col] = altcoin_df_display[col] * scale_factor
+                                
+                                st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
+                            
+                            # Apply color coding
+                            color_df = altcoin_df_display.copy()
+                            for col in depth_cols:
+                                if col in color_df.columns:
+                                    # Determine thresholds based on column values
+                                    col_values = color_df[col].dropna().tolist()
+                                    if col_values:
+                                        # Dynamic thresholds based on percentiles
+                                        q1 = np.percentile(col_values, 25) if len(col_values) >= 4 else min(col_values)
+                                        median = np.percentile(col_values, 50) if len(col_values) >= 2 else col_values[0]
+                                        q3 = np.percentile(col_values, 75) if len(col_values) >= 4 else max(col_values)
+                                        thresholds = [q1, median, q3]
+                                        
+                                        color_df[col] = color_df[col].apply(lambda x: color_code_value(x, thresholds) if not pd.isna(x) else "")
+                            
+                            # Round values for display
+                            for col in depth_cols:
+                                if col in altcoin_df_display.columns:
+                                    altcoin_df_display[col] = altcoin_df_display[col].round(6)
+                            
+                            # Rename pair_name column
+                            color_df = color_df.rename(columns={'pair_name': 'Token'})
+                            
+                            st.markdown("#### Altcoin Tokens - Average Across Exchanges")
+                            
+                            # Display the table with HTML formatting
+                            html_table = color_df.to_html(escape=False, index=False)
+                            st.markdown(html_table, unsafe_allow_html=True)
+                            
+                            # Create visualization - line chart showing spread by size
+                            st.markdown("#### Spread vs. Size Relationship (Altcoin Tokens)")
+                            
+                            # Calculate average spread for each size tier
+                            size_averages = {}
+                            for col in depth_cols:
+                                if col in altcoin_df_display.columns:
+                                    size_averages[col] = altcoin_df_display[col].mean()
+                            
+                            if size_averages:
+                                # Create data frame for plotting
+                                sizes = list(size_averages.keys())
+                                spreads = list(size_averages.values())
+                                
+                                # Create line chart
+                                fig = go.Figure()
+                                
+                                fig.add_trace(go.Scatter(
+                                    x=sizes,
+                                    y=spreads,
+                                    mode='lines+markers',
+                                    line=dict(color='#FF9800', width=3),
+                                    marker=dict(size=10, color='#FF9800'),
+                                    name='Average Spread'
+                                ))
+                                
+                                # Format the layout
+                                fig.update_layout(
+                                    title=f"Relationship Between Size and Spread - Altcoin Tokens ({scale_label})",
+                                    xaxis_title="Size Tier",
+                                    yaxis_title=f"Average Spread {scale_label}",
+                                    height=400,
+                                    xaxis=dict(
+                                        tickfont=dict(size=14),
+                                        tickmode='array',
+                                        tickvals=sizes
+                                    ),
+                                    yaxis=dict(
+                                        tickformat='.6f'
+                                    )
+                                )
+                                
+                                st.plotly_chart(fig, use_container_width=True)
+                                
+                # --- Individual exchange analysis (excluding SurfFuture) ---
+                st.markdown("### Individual Exchange Analysis")
+                
+                # Create tabs for each exchange (excluding SurfFuture)
+                non_surf_exchanges = ["binanceFuture", "gateFuture", "hyperliquidFuture"]
+                exchange_tabs = st.tabs([exchanges_display[ex] for ex in non_surf_exchanges])
+                
+                # Process each exchange
+                for i, exchange_source in enumerate(non_surf_exchanges):
+                    with exchange_tabs[i]:
+                        exchange_display_name = exchanges_display[exchange_source]
+                        st.markdown(f"#### {exchange_display_name} Spreads Analysis")
                         
-                        if not comparison_df.empty:
-                            # Calculate advantage (negative means SurfFuture is better)
-                            for i, fee_col in enumerate(available_fee_cols):
-                                fee_idx = i + 1
-                                comparison_df[f'advantage_{fee_idx}'] = comparison_df[f'{fee_col}_surf'] - comparison_df[f'{fee_col}_non_surf']
-                                comparison_df[f'percent_better_{fee_idx}'] = (comparison_df[f'{fee_col}_non_surf'] - comparison_df[f'{fee_col}_surf']) / comparison_df[f'{fee_col}_non_surf'] * 100
-                            
-                            # Mark if token is major or altcoin
-                            comparison_df['Token Type'] = comparison_df['pair_name'].apply(
-                                lambda x: 'Major' if is_major(x) else 'Altcoin'
-                            )
-                            
-                            # Process majors
+                        # Filter data for this exchange
+                        exchange_data = daily_avg_data[daily_avg_data['source'] == exchange_source].copy()
+                        
+                        if not exchange_data.empty:
+                            # --- Process majors ---
                             if major_tokens:
-                                major_comp_df = comparison_df[comparison_df['Token Type'] == 'Major'].copy()
-                                
-                                if not major_comp_df.empty:
-                                    # Create display DataFrame with renamed columns
-                                    major_comp_display = pd.DataFrame()
-                                    major_comp_display['Token'] = major_comp_df['pair_name']
+                                major_ex_df = exchange_data[exchange_data['pair_name'].isin(major_tokens)].copy()
+                                if not major_ex_df.empty:
+                                    # Create a display DataFrame with available columns
+                                    columns_to_select = ['pair_name'] + [col for col in available_fee_cols if col in major_ex_df.columns]
+                                    major_ex_display = major_ex_df[columns_to_select].copy()
                                     
-                                    # Add pairs of columns for each depth
-                                    for i, fee_col in enumerate(available_fee_cols):
-                                        fee_idx = i + 1
-                                        if fee_col in fee_depth_map_major:
-                                            size = fee_depth_map_major[fee_col]
-                                            major_comp_display[f'NonSurf {size}'] = major_comp_df[f'{fee_col}_non_surf']
-                                            major_comp_display[f'Surf {size}'] = major_comp_df[f'{fee_col}_surf']
-                                            major_comp_display[f'Better {size}'] = major_comp_df[f'percent_better_{fee_idx}']
+                                    # Rename columns for display
+                                    for col in available_fee_cols:
+                                        if col in fee_depth_map_major and col in major_ex_display.columns:
+                                            major_ex_display = major_ex_display.rename(columns={col: fee_depth_map_major[col]})
                                     
                                     # Sort alphabetically
-                                    major_comp_display = major_comp_display.sort_values('Token')
+                                    major_ex_display = major_ex_display.sort_values('pair_name')
                                     
-                                    # Determine scale factor (for spread values only)
-                                    spread_cols = [col for col in major_comp_display.columns if col.startswith('NonSurf') or col.startswith('Surf')]
+                                    # Determine scale factor
+                                    depth_cols = [fee_depth_map_major[col] for col in available_fee_cols if col in fee_depth_map_major]
                                     values = []
-                                    for col in spread_cols:
-                                        values.extend(major_comp_display[col].dropna().tolist())
+                                    for col in depth_cols:
+                                        if col in major_ex_display.columns:
+                                            values.extend(major_ex_display[col].dropna().tolist())
                                     
                                     scale_factor = 1
                                     scale_label = ""
@@ -1021,72 +1278,109 @@ with tab3:
                                             scale_factor = 100000
                                             scale_label = "× 100,000"
                                     
-                                    # Apply scaling to spread columns only
+                                    # Apply scaling
                                     if scale_factor > 1:
-                                        for col in spread_cols:
-                                            major_comp_display[col] = major_comp_display[col] * scale_factor
+                                        for col in depth_cols:
+                                            if col in major_ex_display.columns:
+                                                major_ex_display[col] = major_ex_display[col] * scale_factor
                                         
-                                        st.markdown(f"<div class='info-box'><b>Note:</b> Spread values are multiplied by {scale_factor} ({scale_label}) for better readability. Percentage values are not scaled.</div>", unsafe_allow_html=True)
+                                        st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
                                     
-                                    # Round values
-                                    for col in major_comp_display.columns:
-                                        if col != 'Token':
-                                            if col.startswith('Better'):
-                                                major_comp_display[col] = major_comp_display[col].round(2)
-                                            else:
-                                                major_comp_display[col] = major_comp_display[col].round(6)
+                                    # Apply color coding
+                                    color_df = major_ex_display.copy()
+                                    for col in depth_cols:
+                                        if col in color_df.columns:
+                                            # Determine thresholds based on column values
+                                            col_values = color_df[col].dropna().tolist()
+                                            if col_values:
+                                                # Dynamic thresholds based on percentiles
+                                                q1 = np.percentile(col_values, 25) if len(col_values) >= 4 else min(col_values)
+                                                median = np.percentile(col_values, 50) if len(col_values) >= 2 else col_values[0]
+                                                q3 = np.percentile(col_values, 75) if len(col_values) >= 4 else max(col_values)
+                                                thresholds = [q1, median, q3]
+                                                
+                                                color_df[col] = color_df[col].apply(lambda x: color_code_value(x, thresholds) if not pd.isna(x) else "")
                                     
-                                    st.markdown("#### Major Tokens - SurfFuture vs. Other Exchanges")
-                                    st.dataframe(major_comp_display, height=len(major_comp_display) * 35 + 40, use_container_width=True)
+                                    # Round values for display
+                                    for col in depth_cols:
+                                        if col in major_ex_display.columns:
+                                            major_ex_display[col] = major_ex_display[col].round(6)
                                     
-                                    # Show a summary of how many times SurfFuture is better
-                                    better_counts = {}
-                                    for i, fee_col in enumerate(available_fee_cols):
-                                        if fee_col in fee_depth_map_major:
-                                            size = fee_depth_map_major[fee_col]
-                                            better_col = f'Better {size}'
-                                            if better_col in major_comp_display.columns:
-                                                better_count = sum(major_comp_display[better_col] > 0)
-                                                total_count = sum(~major_comp_display[better_col].isna())
-                                                better_counts[size] = (better_count, total_count)
+                                    # Rename pair_name column
+                                    color_df = color_df.rename(columns={'pair_name': 'Token'})
                                     
-                                    if better_counts:
-                                        st.markdown("##### Major Tokens Summary")
-                                        summary_text = """
-                                        <div class="info-box">
-                                        <b>SurfFuture Advantage Summary (Major Tokens):</b><br>
-                                        """
-                                        for size, (better_count, total_count) in better_counts.items():
-                                            summary_text += f"• {size}: SurfFuture better in {better_count}/{total_count} tokens<br>\n"
-                                        summary_text += "</div>"
-                                        st.markdown(summary_text, unsafe_allow_html=True)
+                                    st.markdown(f"##### Major Tokens - {exchange_display_name}")
+                                    
+                                    # Display the table with HTML formatting
+                                    html_table = color_df.to_html(escape=False, index=False)
+                                    st.markdown(html_table, unsafe_allow_html=True)
+                                    
+                                    # Create visualization - line chart showing spread by size
+                                    st.markdown(f"##### Spread vs. Size Relationship - {exchange_display_name} (Major Tokens)")
+                                    
+                                    # Calculate average spread for each size tier
+                                    size_averages = {}
+                                    for col in depth_cols:
+                                        if col in major_ex_display.columns:
+                                            size_averages[col] = major_ex_display[col].mean()
+                                    
+                                    if size_averages:
+                                        # Create data frame for plotting
+                                        sizes = list(size_averages.keys())
+                                        spreads = list(size_averages.values())
+                                        
+                                        # Create line chart
+                                        fig = go.Figure()
+                                        
+                                        fig.add_trace(go.Scatter(
+                                            x=sizes,
+                                            y=spreads,
+                                            mode='lines+markers',
+                                            line=dict(color='#1E88E5', width=3),
+                                            marker=dict(size=10, color='#1E88E5'),
+                                            name='Average Spread'
+                                        ))
+                                        
+                                        # Format the layout
+                                        fig.update_layout(
+                                            title=f"{exchange_display_name} - Spread vs. Size (Major Tokens) {scale_label}",
+                                            xaxis_title="Size Tier",
+                                            yaxis_title=f"Average Spread {scale_label}",
+                                            height=400,
+                                            xaxis=dict(
+                                                tickfont=dict(size=14),
+                                                tickmode='array',
+                                                tickvals=sizes
+                                            ),
+                                            yaxis=dict(
+                                                tickformat='.6f'
+                                            )
+                                        )
+                                        
+                                        st.plotly_chart(fig, use_container_width=True)
                             
-                            # Process altcoins
+                            # --- Process altcoins ---
                             if altcoin_tokens:
-                                altcoin_comp_df = comparison_df[comparison_df['Token Type'] == 'Altcoin'].copy()
-                                
-                                if not altcoin_comp_df.empty:
-                                    # Create display DataFrame with renamed columns
-                                    altcoin_comp_display = pd.DataFrame()
-                                    altcoin_comp_display['Token'] = altcoin_comp_df['pair_name']
+                                altcoin_ex_df = exchange_data[exchange_data['pair_name'].isin(altcoin_tokens)].copy()
+                                if not altcoin_ex_df.empty:
+                                    # Create a display DataFrame with available columns
+                                    columns_to_select = ['pair_name'] + [col for col in available_fee_cols if col in altcoin_ex_df.columns]
+                                    altcoin_ex_display = altcoin_ex_df[columns_to_select].copy()
                                     
-                                    # Add pairs of columns for each depth
-                                    for i, fee_col in enumerate(available_fee_cols):
-                                        fee_idx = i + 1
-                                        if fee_col in fee_depth_map_altcoin:
-                                            size = fee_depth_map_altcoin[fee_col]
-                                            altcoin_comp_display[f'NonSurf {size}'] = altcoin_comp_df[f'{fee_col}_non_surf']
-                                            altcoin_comp_display[f'Surf {size}'] = altcoin_comp_df[f'{fee_col}_surf']
-                                            altcoin_comp_display[f'Better {size}'] = altcoin_comp_df[f'percent_better_{fee_idx}']
+                                    # Rename columns for display
+                                    for col in available_fee_cols:
+                                        if col in fee_depth_map_altcoin and col in altcoin_ex_display.columns:
+                                            altcoin_ex_display = altcoin_ex_display.rename(columns={col: fee_depth_map_altcoin[col]})
                                     
                                     # Sort alphabetically
-                                    altcoin_comp_display = altcoin_comp_display.sort_values('Token')
+                                    altcoin_ex_display = altcoin_ex_display.sort_values('pair_name')
                                     
-                                    # Determine scale factor (for spread values only)
-                                    spread_cols = [col for col in altcoin_comp_display.columns if col.startswith('NonSurf') or col.startswith('Surf')]
+                                    # Determine scale factor
+                                    depth_cols = [fee_depth_map_altcoin[col] for col in available_fee_cols if col in fee_depth_map_altcoin]
                                     values = []
-                                    for col in spread_cols:
-                                        values.extend(altcoin_comp_display[col].dropna().tolist())
+                                    for col in depth_cols:
+                                        if col in altcoin_ex_display.columns:
+                                            values.extend(altcoin_ex_display[col].dropna().tolist())
                                     
                                     scale_factor = 1
                                     scale_label = ""
@@ -1102,47 +1396,293 @@ with tab3:
                                             scale_factor = 100000
                                             scale_label = "× 100,000"
                                     
-                                    # Apply scaling to spread columns only
+                                    # Apply scaling
                                     if scale_factor > 1:
-                                        for col in spread_cols:
-                                            altcoin_comp_display[col] = altcoin_comp_display[col] * scale_factor
+                                        for col in depth_cols:
+                                            if col in altcoin_ex_display.columns:
+                                                altcoin_ex_display[col] = altcoin_ex_display[col] * scale_factor
                                         
-                                        st.markdown(f"<div class='info-box'><b>Note:</b> Spread values are multiplied by {scale_factor} ({scale_label}) for better readability. Percentage values are not scaled.</div>", unsafe_allow_html=True)
+                                        st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
                                     
-                                    # Round values
-                                    for col in altcoin_comp_display.columns:
-                                        if col != 'Token':
-                                            if col.startswith('Better'):
-                                                altcoin_comp_display[col] = altcoin_comp_display[col].round(2)
-                                            else:
-                                                altcoin_comp_display[col] = altcoin_comp_display[col].round(6)
+                                    # Apply color coding
+                                    color_df = altcoin_ex_display.copy()
+                                    for col in depth_cols:
+                                        if col in color_df.columns:
+                                            # Determine thresholds based on column values
+                                            col_values = color_df[col].dropna().tolist()
+                                            if col_values:
+                                                # Dynamic thresholds based on percentiles
+                                                q1 = np.percentile(col_values, 25) if len(col_values) >= 4 else min(col_values)
+                                                median = np.percentile(col_values, 50) if len(col_values) >= 2 else col_values[0]
+                                                q3 = np.percentile(col_values, 75) if len(col_values) >= 4 else max(col_values)
+                                                thresholds = [q1, median, q3]
+                                                
+                                                color_df[col] = color_df[col].apply(lambda x: color_code_value(x, thresholds) if not pd.isna(x) else "")
                                     
-                                    st.markdown("#### Altcoin Tokens - SurfFuture vs. Other Exchanges")
-                                    st.dataframe(altcoin_comp_display, height=len(altcoin_comp_display) * 35 + 40, use_container_width=True)
+                                    # Round values for display
+                                    for col in depth_cols:
+                                        if col in altcoin_ex_display.columns:
+                                            altcoin_ex_display[col] = altcoin_ex_display[col].round(6)
                                     
-                                    # Show a summary of how many times SurfFuture is better
-                                    better_counts = {}
-                                    for i, fee_col in enumerate(available_fee_cols):
-                                        if fee_col in fee_depth_map_altcoin:
-                                            size = fee_depth_map_altcoin[fee_col]
-                                            better_col = f'Better {size}'
-                                            if better_col in altcoin_comp_display.columns:
-                                                better_count = sum(altcoin_comp_display[better_col] > 0)
-                                                total_count = sum(~altcoin_comp_display[better_col].isna())
-                                                better_counts[size] = (better_count, total_count)
+                                    # Rename pair_name column
+                                    color_df = color_df.rename(columns={'pair_name': 'Token'})
                                     
-                                    if better_counts:
-                                        st.markdown("##### Altcoin Tokens Summary")
-                                        summary_text = """
-                                        <div class="info-box">
-                                        <b>SurfFuture Advantage Summary (Altcoin Tokens):</b><br>
-                                        """
-                                        for size, (better_count, total_count) in better_counts.items():
-                                            summary_text += f"• {size}: SurfFuture better in {better_count}/{total_count} tokens<br>\n"
-                                        summary_text += "</div>"
-                                        st.markdown(summary_text, unsafe_allow_html=True)
+                                    st.markdown(f"##### Altcoin Tokens - {exchange_display_name}")
+                                    
+                                    # Display the table with HTML formatting
+                                    html_table = color_df.to_html(escape=False, index=False)
+                                    st.markdown(html_table, unsafe_allow_html=True)
+                                    
+                                    # Create visualization - line chart showing spread by size
+                                    st.markdown(f"##### Spread vs. Size Relationship - {exchange_display_name} (Altcoin Tokens)")
+                                    
+                                    # Calculate average spread for each size tier
+                                    size_averages = {}
+                                    for col in depth_cols:
+                                        if col in altcoin_ex_display.columns:
+                                            size_averages[col] = altcoin_ex_display[col].mean()
+                                    
+                                    if size_averages:
+                                        # Create data frame for plotting
+                                        sizes = list(size_averages.keys())
+                                        spreads = list(size_averages.values())
+                                        
+                                        # Create line chart
+                                        fig = go.Figure()
+                                        
+                                        fig.add_trace(go.Scatter(
+                                            x=sizes,
+                                            y=spreads,
+                                            mode='lines+markers',
+                                            line=dict(color='#FF9800', width=3),
+                                            marker=dict(size=10, color='#FF9800'),
+                                            name='Average Spread'
+                                        ))
+                                        
+                                        # Format the layout
+                                        fig.update_layout(
+                                            title=f"{exchange_display_name} - Spread vs. Size (Altcoin Tokens) {scale_label}",
+                                            xaxis_title="Size Tier",
+                                            yaxis_title=f"Average Spread {scale_label}",
+                                            height=400,
+                                            xaxis=dict(
+                                                tickfont=dict(size=14),
+                                                tickmode='array',
+                                                tickvals=sizes
+                                            ),
+                                            yaxis=dict(
+                                                tickformat='.6f'
+                                            )
+                                        )
+                                        
+                                        st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            st.warning(f"No data available for {exchange_display_name}")
+                            
+                # Cross-Exchange Comparison by Size
+                st.markdown("### Cross-Exchange Comparison by Size")
+                
+                # Group data by token and exchange for comparison
+                exchange_comparison = {}
+                
+                # Process major tokens
+                if major_tokens and non_surf_data is not None and not non_surf_data.empty:
+                    # Filter for major tokens
+                    major_data = non_surf_data[non_surf_data['pair_name'].isin(major_tokens)].copy()
+                    
+                    if not major_data.empty:
+                        # Calculate average for each exchange and fee level
+                        for exchange_source in non_surf_exchanges:
+                            exchange_display_name = exchanges_display[exchange_source]
+                            exchange_comparison[exchange_display_name] = {}
+                            
+                            # Filter for this exchange
+                            exchange_df = major_data[major_data['source'] == exchange_source].copy()
+                            
+                            if not exchange_df.empty:
+                                # Calculate average for each fee level
+                                for i, fee_col in enumerate(available_fee_cols):
+                                    if fee_col in exchange_df.columns:
+                                        values = exchange_df[fee_col].dropna()
+                                        if not values.empty:
+                                            # Map to correct size label
+                                            size_label = fee_depth_map_major.get(fee_col, f'Size {i+1}')
+                                            exchange_comparison[exchange_display_name][size_label] = values.mean()
+                        
+                        # Create a comparison chart if we have data
+                        if exchange_comparison:
+                            # Prepare data for plotting
+                            comparison_data = []
+                            for exchange, sizes in exchange_comparison.items():
+                                for size, value in sizes.items():
+                                    comparison_data.append({
+                                        'Exchange': exchange,
+                                        'Size': size,
+                                        'Spread': value
+                                    })
+                            
+                            if comparison_data:
+                                comparison_df = pd.DataFrame(comparison_data)
+                                
+                                # Determine scale factor
+                                values = comparison_df['Spread'].tolist()
+                                scale_factor = 1
+                                scale_label = ""
+                                if values:
+                                    mean_fee = sum(values) / len(values)
+                                    if mean_fee < 0.001:
+                                        scale_factor = 1000
+                                        scale_label = "× 1,000"
+                                    elif mean_fee < 0.0001:
+                                        scale_factor = 10000
+                                        scale_label = "× 10,000"
+                                    elif mean_fee < 0.00001:
+                                        scale_factor = 100000
+                                        scale_label = "× 100,000"
+                                
+                                # Apply scaling
+                                if scale_factor > 1:
+                                    comparison_df['Spread'] = comparison_df['Spread'] * scale_factor
+                                    st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
+                                
+                                # Create grouped bar chart
+                                st.markdown("#### Major Tokens - Exchange Comparison by Size")
+                                
+                                # Sort by size tiers for better visualization
+                                size_order = ['50K', '100K', '200K', '500K']
+                                comparison_df['Size'] = pd.Categorical(comparison_df['Size'], categories=size_order, ordered=True)
+                                comparison_df = comparison_df.sort_values('Size')
+                                
+                                fig = px.bar(
+                                    comparison_df,
+                                    x='Size',
+                                    y='Spread',
+                                    color='Exchange',
+                                    barmode='group',
+                                    title=f"Exchange Comparison by Size - Major Tokens {scale_label}",
+                                    color_discrete_map={
+                                        'Binance': '#2196F3',
+                                        'Gate': '#FFC107',
+                                        'Hyperliquid': '#FF5722'
+                                    }
+                                )
+                                
+                                # Format the layout
+                                fig.update_layout(
+                                    xaxis_title="Size Tier",
+                                    yaxis_title=f"Average Spread {scale_label}",
+                                    height=500,
+                                    legend=dict(
+                                        orientation="h",
+                                        yanchor="bottom",
+                                        y=1.02,
+                                        xanchor="right",
+                                        x=1
+                                    )
+                                )
+                                
+                                st.plotly_chart(fig, use_container_width=True)
+                
+                # Process altcoin tokens
+                exchange_comparison = {}
+                if altcoin_tokens and non_surf_data is not None and not non_surf_data.empty:
+                    # Filter for altcoin tokens
+                    altcoin_data = non_surf_data[non_surf_data['pair_name'].isin(altcoin_tokens)].copy()
+                    
+                    if not altcoin_data.empty:
+                        # Calculate average for each exchange and fee level
+                        for exchange_source in non_surf_exchanges:
+                            exchange_display_name = exchanges_display[exchange_source]
+                            exchange_comparison[exchange_display_name] = {}
+                            
+                            # Filter for this exchange
+                            exchange_df = altcoin_data[altcoin_data['source'] == exchange_source].copy()
+                            
+                            if not exchange_df.empty:
+                                # Calculate average for each fee level
+                                for i, fee_col in enumerate(available_fee_cols):
+                                    if fee_col in exchange_df.columns:
+                                        values = exchange_df[fee_col].dropna()
+                                        if not values.empty:
+                                            # Map to correct size label
+                                            size_label = fee_depth_map_altcoin.get(fee_col, f'Size {i+1}')
+                                            exchange_comparison[exchange_display_name][size_label] = values.mean()
+                        
+                        # Create a comparison chart if we have data
+                        if exchange_comparison:
+                            # Prepare data for plotting
+                            comparison_data = []
+                            for exchange, sizes in exchange_comparison.items():
+                                for size, value in sizes.items():
+                                    comparison_data.append({
+                                        'Exchange': exchange,
+                                        'Size': size,
+                                        'Spread': value
+                                    })
+                            
+                            if comparison_data:
+                                comparison_df = pd.DataFrame(comparison_data)
+                                
+                                # Determine scale factor
+                                values = comparison_df['Spread'].tolist()
+                                scale_factor = 1
+                                scale_label = ""
+                                if values:
+                                    mean_fee = sum(values) / len(values)
+                                    if mean_fee < 0.001:
+                                        scale_factor = 1000
+                                        scale_label = "× 1,000"
+                                    elif mean_fee < 0.0001:
+                                        scale_factor = 10000
+                                        scale_label = "× 10,000"
+                                    elif mean_fee < 0.00001:
+                                        scale_factor = 100000
+                                        scale_label = "× 100,000"
+                                
+                                # Apply scaling
+                                if scale_factor > 1:
+                                    comparison_df['Spread'] = comparison_df['Spread'] * scale_factor
+                                    st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
+                                
+                                # Create grouped bar chart
+                                st.markdown("#### Altcoin Tokens - Exchange Comparison by Size")
+                                
+                                # Sort by size tiers for better visualization
+                                size_order = ['20K', '50K', '100K', '200K']
+                                comparison_df['Size'] = pd.Categorical(comparison_df['Size'], categories=size_order, ordered=True)
+                                comparison_df = comparison_df.sort_values('Size')
+                                
+                                fig = px.bar(
+                                    comparison_df,
+                                    x='Size',
+                                    y='Spread',
+                                    color='Exchange',
+                                    barmode='group',
+                                    title=f"Exchange Comparison by Size - Altcoin Tokens {scale_label}",
+                                    color_discrete_map={
+                                        'Binance': '#2196F3',
+                                        'Gate': '#FFC107',
+                                        'Hyperliquid': '#FF5722'
+                                    }
+                                )
+                                
+                                # Format the layout
+                                fig.update_layout(
+                                    xaxis_title="Size Tier",
+                                    yaxis_title=f"Average Spread {scale_label}",
+                                    height=500,
+                                    legend=dict(
+                                        orientation="h",
+                                        yanchor="bottom",
+                                        y=1.02,
+                                        xanchor="right",
+                                        x=1
+                                    )
+                                )
+                                
+                                st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
-                st.error(f"Error calculating comparison data: {e}")
+                st.error(f"Error analyzing spread data by size: {e}")
                 import traceback
                 traceback.print_exc()
     else:
@@ -1171,6 +1711,7 @@ with st.expander("Understanding Exchange Spreads"):
     ### Interpreting the Data:
     
     - Lower spread values indicate better pricing for traders
+    - Color coding highlights the relative spread values (blue/green for lower spreads, red/orange for higher spreads)
     - The "Better" percentage shows how much lower SurfFuture's spread is compared to other exchanges (positive values mean SurfFuture is better)
     - The scaling factor is applied to make small decimal values more readable
     
