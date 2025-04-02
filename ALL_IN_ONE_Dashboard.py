@@ -1,10 +1,20 @@
 
+from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from sqlalchemy import create_engine
+import concurrent.futures
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import pytz
 import streamlit as st
+import traceback
 
 st.set_page_config(page_title="ALL-IN-ONE Dashboard", layout="wide")
 st.title("📊 ALL-IN-ONE Dashboard")
 
-# Global refresh button
 if st.button("🔄 Refresh All Tabs"):
     st.cache_data.clear()
     st.experimental_rerun()
@@ -12,17 +22,9 @@ if st.button("🔄 Refresh All Tabs"):
 tab_names = ["Macro View", "Cumulative PnL", "PnL and Trades", "Regime Matrix", "Spread Analysis", "Vol & Hurst"]
 tabs = st.tabs(tab_names)
 
-
 def render_macro_view():
     # Save this as pages/04_Daily_Hurst_Table.py in your Streamlit app folder
 
-    import streamlit as st
-    import pandas as pd
-    import numpy as np
-    import plotly.graph_objects as go
-    from sqlalchemy import create_engine
-    from datetime import datetime, timedelta
-    import pytz
 
     st.set_page_config(
         page_title="Daily Hurst Table",
@@ -509,14 +511,6 @@ def render_macro_view():
         st.dataframe(time_blocks_df)
 
 def render_cumulative_pnl():
-    import streamlit as st
-    import pandas as pd
-    import numpy as np
-    import plotly.graph_objects as go
-    import plotly.express as px
-    from sqlalchemy import create_engine
-    from datetime import datetime, timedelta
-    import pytz
 
     st.set_page_config(
         page_title="Trading Pairs PNL Dashboard",
@@ -1270,14 +1264,6 @@ def render_cumulative_pnl():
 
 def render_pnl_and_trades():
     # Save this as pages/06_Trades_PNL_Table.py in your Streamlit app folder
-    import streamlit as st
-    import pandas as pd
-    import numpy as np
-    import plotly.graph_objects as go
-    import plotly.express as px
-    from sqlalchemy import create_engine
-    from datetime import datetime, timedelta
-    import pytz
 
     st.set_page_config(
         page_title="User Trades & Platform PNL Table",
@@ -2363,24 +2349,24 @@ def render_pnl_and_trades():
             )
 
         with col2:
-        # Show bottom profitable (loss-making) time periods
-        st.markdown("### 📉 Top 10 Least Profitable Time Periods")
+            # Show bottom profitable (loss-making) time periods
+            st.markdown("### 📉 Top 10 Least Profitable Time Periods")
 
-        # Get the 10 least profitable periods and sort them
-        bottom_10 = time_profit_df.tail(10).sort_values(by='💰 Total PNL (USD)')
+            # Get the 10 least profitable periods and sort them
+            bottom_10 = time_profit_df.tail(10).sort_values(by='💰 Total PNL (USD)')
 
-        # Style the bottom 10 with the same approach as the top 10
-        bottom_styled_df = styled_time_profit_df.set_properties(**{
+            # Style the bottom 10 with the same approach as the top 10
+            bottom_styled_df = styled_time_profit_df.set_properties(**{
             'font-size': '16px',
             'text-align': 'center',
             'background-color': '#f0f2f6'
         })
 
-        # Display the filtered data
-        st.dataframe(
-            bottom_styled_df.data.tail(10).sort_values(by='💰 Total PNL (USD)'),
-            height=300,
-            use_container_width=True
+            # Display the filtered data
+            st.dataframe(
+                bottom_styled_df.data.tail(10).sort_values(by='💰 Total PNL (USD)'),
+                height=300,
+                use_container_width=True
         )
 
         # Create visualization of top profitable and loss-making periods
@@ -2458,15 +2444,6 @@ def render_pnl_and_trades():
         st.warning("No data available for the selected pairs. Try selecting different pairs or refreshing the data.")
 
 def render_regime_matrix():
-    import streamlit as st
-    import pandas as pd
-    import numpy as np
-    from datetime import datetime, timedelta, timezone
-    import plotly.graph_objects as go
-    import plotly.express as px
-    from sqlalchemy import create_engine
-    import concurrent.futures
-    from functools import lru_cache
 
     # --- Setup ---
     st.set_page_config(layout="wide")
@@ -3681,7 +3658,6 @@ def render_regime_matrix():
                 except Exception as e:
                     st.error(f"An error occurred: {str(e)}")
                     if debug_mode:
-                        import traceback
                         st.code(traceback.format_exc())
 
         # Display previous results if they exist
@@ -3699,13 +3675,6 @@ def render_regime_matrix():
 def render_spread_analysis():
     # Save this as pages/06_Exchange_Fee_Comparison.py in your Streamlit app folder
 
-    import streamlit as st
-    import pandas as pd
-    import numpy as np
-    import plotly.graph_objects as go
-    from sqlalchemy import create_engine
-    from datetime import datetime, timedelta
-    import pytz
 
     st.set_page_config(
         page_title="Exchange Fee Comparison",
@@ -3952,7 +3921,6 @@ def render_spread_analysis():
 
         except Exception as e:
             print(f"[{token}] Error processing: {e}")
-            import traceback
             traceback.print_exc()
             return None, None
 
@@ -4016,7 +3984,6 @@ def render_spread_analysis():
 
         except Exception as e:
             print(f"[{token}] Error processing summary: {e}")
-            import traceback
             traceback.print_exc()
             return None
 
@@ -4392,13 +4359,6 @@ def render_spread_analysis():
 def render_vol_and_hurst():
     # Save this as pages/05_Daily_Volatility_Table.py in your Streamlit app folder
 
-    import streamlit as st
-    import pandas as pd
-    import numpy as np
-    import plotly.graph_objects as go
-    from sqlalchemy import create_engine
-    from datetime import datetime, timedelta
-    import pytz
 
     st.set_page_config(
         page_title="Daily Volatility Table",
@@ -4936,7 +4896,6 @@ def render_vol_and_hurst():
         - The 24-hour average section shows the mean volatility across all 48 30-minute periods
         - Missing values (light gray cells) indicate insufficient data for calculation
         """)
-
 
 tab_functions = {
     "Macro View": render_macro_view,
