@@ -445,7 +445,7 @@ with tab1:
         
         # Round values for display
         for col in numeric_cols:
-            display_df[col] = display_df[col].round(6)
+            display_df[col] = display_df[col].round(2)
         
         # Add token type column for clarity
         display_df['Token Type'] = display_df['pair_name'].apply(
@@ -725,7 +725,7 @@ with tab2:
         
         # Round values for display
         for col in numeric_cols:
-            display_df[col] = display_df[col].round(6)
+            display_df[col] = display_df[col].round(2)
         
         # Add token type column for clarity
         display_df['Token Type'] = display_df['pair_name'].apply(
@@ -1022,7 +1022,7 @@ with tab3:
                             if values:
                                 mean_fee = sum(values) / len(values)
                                 if mean_fee < 0.001:
-                                    scale_factor = 1000
+                                    scale_factor = 1,000
                                     scale_label = "× 1,000"
                                 elif mean_fee < 0.0001:
                                     scale_factor = 10000
@@ -1057,7 +1057,7 @@ with tab3:
                             # Round values for display
                             for col in depth_cols:
                                 if col in major_df_display.columns:
-                                    major_df_display[col] = major_df_display[col].round(6)
+                                    major_df_display[col] = major_df_display[col].round(2)
                             
                             # Rename pair_name column
                             color_df = color_df.rename(columns={'pair_name': 'Token'})
@@ -1172,7 +1172,7 @@ with tab3:
                             # Round values for display
                             for col in depth_cols:
                                 if col in altcoin_df_display.columns:
-                                    altcoin_df_display[col] = altcoin_df_display[col].round(6)
+                                    altcoin_df_display[col] = altcoin_df_display[col].round(2)
                             
                             # Rename pair_name column
                             color_df = color_df.rename(columns={'pair_name': 'Token'})
@@ -1307,7 +1307,7 @@ with tab3:
                                     # Round values for display
                                     for col in depth_cols:
                                         if col in major_ex_display.columns:
-                                            major_ex_display[col] = major_ex_display[col].round(6)
+                                            major_ex_display[col] = major_ex_display[col].round(2)
                                     
                                     # Rename pair_name column
                                     color_df = color_df.rename(columns={'pair_name': 'Token'})
@@ -1425,7 +1425,7 @@ with tab3:
                                     # Round values for display
                                     for col in depth_cols:
                                         if col in altcoin_ex_display.columns:
-                                            altcoin_ex_display[col] = altcoin_ex_display[col].round(6)
+                                            altcoin_ex_display[col] = altcoin_ex_display[col].round(2)
                                     
                                     # Rename pair_name column
                                     color_df = color_df.rename(columns={'pair_name': 'Token'})
