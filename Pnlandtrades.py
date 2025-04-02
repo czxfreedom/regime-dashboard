@@ -778,7 +778,7 @@ if pair_results:
                         color='Pair',
                         title='Trade Count vs. Platform PNL Correlation',
                         hover_data=['Pair', 'Trade Count', 'Platform PNL (USD)'],
-                        trendline="ols"  # Add trend line
+                        
                     )
                     
                     fig.update_layout(
