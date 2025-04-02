@@ -141,7 +141,7 @@ def render_cumulative_pnl():
 
     with col2:
         # Add a refresh button
-        if st.button("Refresh Data"):, key="render_cumulative_pnl_btn_129")
+        if st.button("Refresh Data", key="render_cumulative_pnl_button_0")
             st.cache_data.clear()
             st.experimental_rerun()
 
@@ -847,7 +847,7 @@ def render_pnl_and_trades():
 
     with col2:
         # Add a refresh button
-        if st.button("Refresh Data"):, key="render_pnl_and_trades_btn_83")
+        if st.button("Refresh Data", key="render_pnl_and_trades_button_0")
             st.cache_data.clear()
             st.experimental_rerun()
 
@@ -2069,7 +2069,7 @@ def render_spread_analysis():
 
     with col2:
         # Add a refresh button
-        if st.button("Refresh Data", use_container_width=True):, key="render_spread_analysis_btn_123")
+        if st.button("Refresh Data", use_container_width=True, key="render_spread_analysis_button_0")
             st.cache_data.clear()
             st.experimental_rerun()
 
@@ -2712,7 +2712,7 @@ def render_vol_and_hurst():
 
     with col2:
         # Add a refresh button
-        if st.button("Refresh Data"):, key="render_vol_and_hurst_btn_82")
+        if st.button("Refresh Data", key="render_vol_and_hurst_button_0")
             st.cache_data.clear()
             st.experimental_rerun()
 
@@ -3250,7 +3250,7 @@ def render_macro_view():
 
     with col2:
         # Add a refresh button
-        if st.button("Refresh Data"):, key="render_macro_view_btn_79")
+        if st.button("Refresh Data", key="render_macro_view_button_0")
             st.cache_data.clear()
             st.experimental_rerun()
 
