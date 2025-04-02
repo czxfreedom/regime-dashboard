@@ -357,7 +357,7 @@ st.sidebar.header("Controls")
 selected_tokens = all_tokens
 
 # Add a refresh button
-if st.sidebar.button("Refresh Data", use_container_width=True):
+if st.sidebar.button("Refresh Data", use_container_width=True,key="Refresh_data_button_main"):
     st.cache_data.clear()
     st.experimental_rerun()
 
@@ -1212,7 +1212,7 @@ st.sidebar.header("Controls")
 selected_tokens = all_tokens
 
 # Add a refresh button
-if st.sidebar.button("Refresh Data", use_container_width=True):
+if st.sidebar.button("Refresh Data", use_container_width=True,key="Refresh_data_button_duplicate"):
     st.cache_data.clear()
     st.experimental_rerun()
 
