@@ -2363,24 +2363,24 @@ def render_pnl_and_trades():
             )
 
         with col2:
-            # Show bottom profitable (loss-making) time periods
-            st.markdown("### 📉 Top 10 Least Profitable Time Periods")
+        # Show bottom profitable (loss-making) time periods
+        st.markdown("### 📉 Top 10 Least Profitable Time Periods")
 
-            # Get the 10 least profitable periods and sort them
-            bottom_10 = time_profit_df.tail(10).sort_values(by='💰 Total PNL (USD)')
+        # Get the 10 least profitable periods and sort them
+        bottom_10 = time_profit_df.tail(10).sort_values(by='💰 Total PNL (USD)')
 
-            # Style the bottom 10 with the same approach as the top 10
-            bottom_styled_df = styled_time_profit_df.set_properties(**{
+        # Style the bottom 10 with the same approach as the top 10
+        bottom_styled_df = styled_time_profit_df.set_properties(**{
             'font-size': '16px',
             'text-align': 'center',
             'background-color': '#f0f2f6'
         })
 
-            # Display the filtered data
-            st.dataframe(
-                bottom_styled_df.data.tail(10).sort_values(by='💰 Total PNL (USD)'),
-                height=300,
-                use_container_width=True
+        # Display the filtered data
+        st.dataframe(
+            bottom_styled_df.data.tail(10).sort_values(by='💰 Total PNL (USD)'),
+            height=300,
+            use_container_width=True
         )
 
         # Create visualization of top profitable and loss-making periods
@@ -4389,7 +4389,7 @@ def render_spread_analysis():
         If fee values are very small, they may be multiplied by a scaling factor for better readability. The scaling factor is indicated with each table.
         """)
 
-def render_vol_&_hurst():
+def render_vol_and_hurst():
     # Save this as pages/05_Daily_Volatility_Table.py in your Streamlit app folder
 
     import streamlit as st
@@ -4944,7 +4944,7 @@ tab_functions = {
     "PnL and Trades": render_pnl_and_trades,
     "Regime Matrix": render_regime_matrix,
     "Spread Analysis": render_spread_analysis,
-    "Vol & Hurst": render_vol_&_hurst
+    "Vol & Hurst": render_vol_and_hurst
 }
 
 for tab, name in zip(tabs, tab_names):
