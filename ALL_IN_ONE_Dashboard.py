@@ -2446,7 +2446,7 @@ def render_pnl_and_trades():
 def render_regime_matrix():
 
     # --- Setup ---
-    st.set_page_config(layout="wide")
+
     st.title("📈 Currency Pair Trend Matrix Dashboard")
 
     # Create tabs for Matrix View, Summary Table, Filters/Settings, and Global Summary
