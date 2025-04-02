@@ -1401,7 +1401,8 @@ def render_tab_1():
                         x=[f"{row['🔄 Trading Pair']} ({row['⏰ Time Period']})" for _, row in top_trading_periods.iterrows()],
                         y=top_trading_periods['📊 Number of Trades'],
                         marker_color='blue'
-                ])
+    )
+])
                 fig.update_layout(
                     title="Top 10 Trading Periods by Volume",
                     xaxis_title="Pair and Time",
@@ -1417,7 +1418,8 @@ def render_tab_1():
                         x=[f"{row['🔄 Trading Pair']} ({row['⏰ Time Period']})" for _, row in top_pnl_periods.iterrows()],
                         y=top_pnl_periods['💰 PNL (USD)'],
                         marker_color='green'
-                ])
+    )
+])
                 fig.update_layout(
                     title="Top 10 Trading Periods by Platform PNL",
                     xaxis_title="Pair and Time",
@@ -1783,7 +1785,8 @@ def render_tab_1():
                 'Top Contributing Pair': max(data['pair_breakdown'].items(), key=lambda x: x[1])[0] if data['pair_breakdown'] else "None"
             }
             for time_block, data in time_period_profit.items()
-        ])
+    )
+])
         
         # Format the dataframe for better legibility
         time_profit_df = time_profit_df.rename(columns={
