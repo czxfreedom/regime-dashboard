@@ -16,10 +16,6 @@ def render_tab_0():
     from datetime import datetime, timedelta
     import pytz
     
-        page_title="Trading Pairs PNL Dashboard",
-        page_icon="💰",
-        layout="wide"
-    )
     
     # --- DB CONFIG ---
     try:
@@ -27,7 +23,6 @@ def render_tab_0():
         db_uri = (
             f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
             f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-        )
         engine = create_engine(db_uri)
     except Exception as e:
         st.error(f"Error connecting to the database: {e}")
@@ -131,7 +126,6 @@ def render_tab_0():
                 "Select Pairs", 
                 all_pairs,
                 default=all_pairs[:5] if len(all_pairs) > 5 else all_pairs
-            )
     
     with col2:
         # Add a refresh button
@@ -208,7 +202,6 @@ def render_tab_0():
             "created_at" BETWEEN '{start_time}' AND '{end_time}'
             AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
             AND "taker_way" IN (1, 2, 3, 4)  -- Exclude taker_way = 0 (funding fee deductions)
-        )
         
         -- Final query: combine all data sources
         SELECT
@@ -376,14 +369,12 @@ def render_tab_0():
                 "Total Today PNL", 
                 f"${total_today_pnl:,.2f}", 
                 delta=f"{(total_today_pnl - display_df['Yesterday PNL (USD)'].sum()):,.2f}"
-            )
         
         with col2:
             total_yesterday_pnl = display_df['Yesterday PNL (USD)'].sum()
             st.metric(
                 "Total Yesterday PNL", 
                 f"${total_yesterday_pnl:,.2f}"
-            )
         
         with col3:
             total_week_pnl = display_df['Week PNL (USD)'].sum()
@@ -392,14 +383,12 @@ def render_tab_0():
                 "Week PNL (7 days)", 
                 f"${total_week_pnl:,.2f}",
                 delta=f"${daily_avg:,.2f}/day"
-            )
         
         with col4:
             total_all_time_pnl = display_df['All Time PNL (USD)'].sum()
             st.metric(
                 "All Time PNL", 
                 f"${total_all_time_pnl:,.2f}"
-            )
         
         # Create a visualization of top and bottom performers today
         st.subheader("Today's Top Performers")
@@ -436,7 +425,6 @@ def render_tab_0():
             yaxis_title="PNL (USD)",
             barmode='group',
             height=500
-        )
         
         st.plotly_chart(fig, use_container_width=True)
     
@@ -529,7 +517,6 @@ def render_tab_0():
             yaxis_title="PNL (USD)",
             barmode='group',
             height=500
-        )
         
         st.plotly_chart(fig, use_container_width=True)
     
@@ -604,7 +591,6 @@ def render_tab_0():
             title='PNL Breakdown for Top 10 Pairs',
             labels={'value': 'PNL (USD)', 'variable': 'Time Period'},
             barmode='group'
-        )
         
         fig.update_layout(height=500)
         st.plotly_chart(fig, use_container_width=True)
@@ -663,8 +649,6 @@ def render_tab_0():
                 y=1.02,
                 xanchor="right",
                 x=1
-            )
-        )
         
         st.plotly_chart(fig, use_container_width=True)
         
@@ -759,7 +743,6 @@ def render_tab_0():
             - The dashboard refreshes when you click the "Refresh Data" button
             - Singapore timezone (UTC+8) is used throughout
             """
-            )
     
     # Add footer with last update time
     st.markdown("---")
@@ -784,10 +767,6 @@ def render_tab_1():
     from datetime import datetime, timedelta
     import pytz
     
-        page_title="User Trades & Platform PNL Table",
-        page_icon="💰",
-        layout="wide"
-    )
     
     # --- DB CONFIG ---
     try:
@@ -795,7 +774,6 @@ def render_tab_1():
         db_uri = (
             f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
             f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-        )
         engine = create_engine(db_uri)
     except Exception as e:
         st.error(f"Error connecting to the database: {e}")
@@ -852,7 +830,6 @@ def render_tab_1():
                 "Select Pairs", 
                 all_pairs,
                 default=all_pairs[:5] if len(all_pairs) > 5 else all_pairs
-            )
     
     with col2:
         # Add a refresh button
@@ -1035,7 +1012,6 @@ def render_tab_1():
           GROUP BY
             date_trunc('hour', "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
             INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 30)
-        )
         
         -- Final query: combine all data sources
         SELECT
@@ -1269,7 +1245,6 @@ def render_tab_1():
                 }),
                 height=350,
                 use_container_width=True
-            )
     
         # Add spacing between tables
         st.markdown("<br>", unsafe_allow_html=True)
@@ -1341,7 +1316,6 @@ def render_tab_1():
                 }),
                 height=350,
                 use_container_width=True
-            )
     
         # Add spacing for the next section
         st.markdown("<br>", unsafe_allow_html=True)
@@ -1415,7 +1389,6 @@ def render_tab_1():
                 }),
                 height=350,
                 use_container_width=True
-            )
             
             # Create visual representation
             col1, col2 = st.columns(2)
@@ -1428,14 +1401,12 @@ def render_tab_1():
                         x=[f"{row['🔄 Trading Pair']} ({row['⏰ Time Period']})" for _, row in top_trading_periods.iterrows()],
                         y=top_trading_periods['📊 Number of Trades'],
                         marker_color='blue'
-                    )
                 ])
                 fig.update_layout(
                     title="Top 10 Trading Periods by Volume",
                     xaxis_title="Pair and Time",
                     yaxis_title="Number of Trades",
                     height=400
-                )
                 st.plotly_chart(fig, use_container_width=True)
             
             with col2:
@@ -1446,14 +1417,12 @@ def render_tab_1():
                         x=[f"{row['🔄 Trading Pair']} ({row['⏰ Time Period']})" for _, row in top_pnl_periods.iterrows()],
                         y=top_pnl_periods['💰 PNL (USD)'],
                         marker_color='green'
-                    )
                 ])
                 fig.update_layout(
                     title="Top 10 Trading Periods by Platform PNL",
                     xaxis_title="Pair and Time",
                     yaxis_title="Platform PNL (USD)",
                     height=400
-                )
                 st.plotly_chart(fig, use_container_width=True)
             
             # Overall Trade Count vs. PNL correlation analysis
@@ -1526,7 +1495,6 @@ def render_tab_1():
                         }),
                         height=400,
                         use_container_width=True
-                    )
                 
                 with col2:
                     # Create a scatter plot to visualize the correlation
@@ -1554,13 +1522,11 @@ def render_tab_1():
                             title='Trade Count vs. Platform PNL Correlation',
                             hover_data=['Pair', 'Trade Count', 'Platform PNL (USD)'],
                             
-                        )
                         
                         fig.update_layout(
                             height=500,
                             xaxis_title="Number of Trades",
                             yaxis_title="Platform PNL (USD)",
-                        )
                         
                         st.plotly_chart(fig, use_container_width=True)
         
@@ -1638,7 +1604,6 @@ def render_tab_1():
                 }),
                 height=500,
                 use_container_width=True
-            )
         
         with col2:
             # Create charts for hourly patterns
@@ -1685,8 +1650,6 @@ def render_tab_1():
                     y=1.02,
                     xanchor="right",
                     x=1
-                )
-            )
             
             st.plotly_chart(fig, use_container_width=True)
         
@@ -1754,7 +1717,6 @@ def render_tab_1():
              ).applymap(
                 lambda x: color_pnl_and_contribution(x, '📊 Contribution (%)'), 
                 subset=['📊 Contribution (%)']
-            )
             
             # Display the styled dataframe
             st.markdown("### 💰 Profit Contribution by Pair")
@@ -1766,7 +1728,6 @@ def render_tab_1():
                 }),
                 height=500,
                 use_container_width=True
-            )
             
             # Create a pie chart visualizing contribution
             top_pairs = profit_distribution_df.head(10)
@@ -1780,7 +1741,6 @@ def render_tab_1():
                     names='🔄 Trading Pair',
                     title='Top 10 Pairs by Positive PNL Contribution',
                     hole=0.4
-                )
                 
                 fig.update_traces(textposition='inside', textinfo='percent+label')
                 fig.update_layout(height=500)
@@ -1864,7 +1824,6 @@ def render_tab_1():
                full_styled_df.data.head(10),
                height=300,
                use_container_width=True
-            )
         
         with col2:
             # Show bottom profitable (loss-making) time periods
@@ -1885,7 +1844,6 @@ def render_tab_1():
                 bottom_styled_df.data.tail(10).sort_values(by='💰 Total PNL (USD)'),
                 height=300,
                 use_container_width=True
-        )
         
         # Create visualization of top profitable and loss-making periods
         fig = go.Figure()
@@ -1913,7 +1871,6 @@ def render_tab_1():
             yaxis_title="Total PNL (USD)",
             height=500,
             barmode='group'
-        )
         
         st.plotly_chart(fig, use_container_width=True)
         
@@ -1956,7 +1913,6 @@ def render_tab_1():
             - The dashboard refreshes when you click the "Refresh Data" button
             - Singapore timezone (UTC+8) is used throughout
             """
-            )
     
     else:
         st.warning("No data available for the selected pairs. Try selecting different pairs or refreshing the data.")
@@ -1981,10 +1937,6 @@ def render_tab_2():
     import pytz
     
     # Page configuration
-        page_title="Exchange Spread Analysis Dashboard",
-        page_icon="📊",
-        layout="wide"
-    )
     
     # Apply custom CSS styling - more minimal design with centered numeric columns and color coding
     st.markdown("""
@@ -2059,7 +2011,6 @@ def render_tab_2():
         db_uri = (
             f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
             f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-        )
         engine = create_engine(db_uri)
         st.sidebar.success("Connected to database successfully")
     except Exception as e:
@@ -2079,7 +2030,6 @@ def render_tab_2():
                 db_uri = (
                     f"postgresql+psycopg2://{db_user}:{db_password}"
                     f"@{db_host}:{db_port}/{db_name}"
-                )
                 engine = create_engine(db_uri)
                 st.sidebar.success("Connected to database successfully")
             except Exception as e:
@@ -2418,7 +2368,6 @@ def render_tab_2():
             # Add token type column for clarity
             display_df['Token Type'] = display_df['pair_name'].apply(
                 lambda x: 'Major' if is_major(x) else 'Altcoin'
-            )
             
             # Sort by token type and then by name
             display_df = display_df.sort_values(by=['Token Type', 'pair_name'])
@@ -2458,7 +2407,6 @@ def render_tab_2():
                 color_df['Improvement %'] = color_df['Improvement %'].apply(
                     lambda x: f'<span style="color:green;font-weight:bold">+{x:.2f}%</span>' if x > 0 else 
                     (f'<span style="color:red">-{abs(x):.2f}%</span>' if x < 0 else f'{x:.2f}%')
-                )
             
             # Display the table with HTML formatting
             token_count = len(color_df)
@@ -2484,14 +2432,12 @@ def render_tab_2():
                     title="Proportion of Tokens Where SurfFuture Has Better Spreads",
                     color_discrete_sequence=['#4CAF50', '#FFC107'],
                     hole=0.4
-                )
                 
                 # Update layout
                 fig.update_layout(
                     legend=dict(orientation='h', yanchor='bottom', y=-0.2),
                     margin=dict(t=60, b=60, l=20, r=20),
                     height=400
-                )
                 
                 # Display percentage text in middle
                 better_percentage = surf_better_count / total_count * 100 if total_count > 0 else 0
@@ -2500,7 +2446,6 @@ def render_tab_2():
                     x=0.5, y=0.5,
                     font_size=20,
                     showarrow=False
-                )
                 
                 st.plotly_chart(fig, use_container_width=True)
             
@@ -2620,20 +2565,17 @@ def render_tab_2():
                             'Gate': '#FFC107',
                             'Hyperliquid': '#FF5722'
                         }
-                    )
                     
                     # Format the bars
                     fig.update_traces(
                         texttemplate='%{y:.6f}',
                         textposition='outside'
-                    )
                     
                     # Format the layout
                     fig.update_layout(
                         xaxis_title="Exchange",
                         yaxis_title=f"Average Spread {scale_label}",
                         height=400
-                    )
                     
                     st.plotly_chart(fig, use_container_width=True)
         else:
@@ -2698,7 +2640,6 @@ def render_tab_2():
             # Add token type column for clarity
             display_df['Token Type'] = display_df['pair_name'].apply(
                 lambda x: 'Major' if is_major(x) else 'Altcoin'
-            )
             
             # Sort by token type and then by name
             display_df = display_df.sort_values(by=['Token Type', 'pair_name'])
@@ -2738,7 +2679,6 @@ def render_tab_2():
                 color_df['Improvement %'] = color_df['Improvement %'].apply(
                     lambda x: f'<span style="color:green;font-weight:bold">+{x:.2f}%</span>' if x > 0 else 
                     (f'<span style="color:red">-{abs(x):.2f}%</span>' if x < 0 else f'{x:.2f}%')
-                )
             
             # Display the table with HTML formatting
             token_count = len(color_df)
@@ -2764,14 +2704,12 @@ def render_tab_2():
                     title="Proportion of Tokens Where SurfFuture Has Better Spreads",
                     color_discrete_sequence=['#4CAF50', '#FFC107'],
                     hole=0.4
-                )
                 
                 # Update layout
                 fig.update_layout(
                     legend=dict(orientation='h', yanchor='bottom', y=-0.2),
                     margin=dict(t=60, b=60, l=20, r=20),
                     height=400
-                )
                 
                 # Display percentage text in middle
                 better_percentage = surf_better_count / total_count * 100 if total_count > 0 else 0
@@ -2780,7 +2718,6 @@ def render_tab_2():
                     x=0.5, y=0.5,
                     font_size=20,
                     showarrow=False
-                )
                 
                 st.plotly_chart(fig, use_container_width=True)
             
@@ -2900,20 +2837,17 @@ def render_tab_2():
                             'Gate': '#FFC107',
                             'Hyperliquid': '#FF5722'
                         }
-                    )
                     
                     # Format the bars
                     fig.update_traces(
                         texttemplate='%{y:.6f}',
                         textposition='outside'
-                    )
                     
                     # Format the layout
                     fig.update_layout(
                         xaxis_title="Exchange",
                         yaxis_title=f"Average Spread {scale_label}",
                         height=400
-                    )
                     
                     st.plotly_chart(fig, use_container_width=True)
         else:
@@ -3075,8 +3009,6 @@ def render_tab_2():
                                         ),
                                         yaxis=dict(
                                             tickformat='.6f'
-                                        )
-                                    )
                                     
                                     st.plotly_chart(fig, use_container_width=True)
                         
@@ -3190,8 +3122,6 @@ def render_tab_2():
                                         ),
                                         yaxis=dict(
                                             tickformat='.6f'
-                                        )
-                                    )
                                     
                                     st.plotly_chart(fig, use_container_width=True)
                                     
@@ -3325,8 +3255,6 @@ def render_tab_2():
                                                 ),
                                                 yaxis=dict(
                                                     tickformat='.6f'
-                                                )
-                                            )
                                             
                                             st.plotly_chart(fig, use_container_width=True)
                                 
@@ -3443,8 +3371,6 @@ def render_tab_2():
                                                 ),
                                                 yaxis=dict(
                                                     tickformat='.6f'
-                                                )
-                                            )
                                             
                                             st.plotly_chart(fig, use_container_width=True)
                             else:
@@ -3536,7 +3462,6 @@ def render_tab_2():
                                             'Gate': '#FFC107',
                                             'Hyperliquid': '#FF5722'
                                         }
-                                    )
                                     
                                     # Format the layout
                                     fig.update_layout(
@@ -3549,8 +3474,6 @@ def render_tab_2():
                                             y=1.02,
                                             xanchor="right",
                                             x=1
-                                        )
-                                    )
                                     
                                     st.plotly_chart(fig, use_container_width=True)
                     
@@ -3635,7 +3558,6 @@ def render_tab_2():
                                             'Gate': '#FFC107',
                                             'Hyperliquid': '#FF5722'
                                         }
-                                    )
                                     
                                     # Format the layout
                                     fig.update_layout(
@@ -3648,8 +3570,6 @@ def render_tab_2():
                                             y=1.02,
                                             xanchor="right",
                                             x=1
-                                        )
-                                    )
                                     
                                     st.plotly_chart(fig, use_container_width=True)
                 except Exception as e:
@@ -3714,10 +3634,6 @@ def render_tab_3():
     from datetime import datetime, timedelta
     import pytz
     
-        page_title="Daily Volatility Table",
-        page_icon="📈",
-        layout="wide"
-    )
     
     # --- DB CONFIG ---
     try:
@@ -3725,7 +3641,6 @@ def render_tab_3():
         db_uri = (
             f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
             f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-        )
         engine = create_engine(db_uri)
     except Exception as e:
         st.error(f"Error connecting to the database: {e}")
@@ -3781,7 +3696,6 @@ def render_tab_3():
                 "Select Tokens", 
                 all_tokens,
                 default=all_tokens[:5] if len(all_tokens) > 5 else all_tokens
-            )
     
     with col2:
         # Add a refresh button
@@ -3912,7 +3826,6 @@ def render_tab_3():
             # Calculate rolling volatility on 1-minute data
             one_min_ohlc['realized_vol'] = one_min_ohlc['close'].rolling(window=rolling_window).apply(
                 lambda x: calculate_volatility_metrics(x)['realized_vol']
-            )
             
             # Resample to exactly 30min intervals aligned with clock
             thirty_min_vol = one_min_ohlc['realized_vol'].resample('30min', closed='left', label='left').mean().dropna()
@@ -4171,7 +4084,6 @@ def render_tab_3():
                 title="24-Hour Average Volatility Distribution (Singapore Time)",
                 height=400,
                 font=dict(color="#000000", size=12),
-            )
             st.plotly_chart(fig, use_container_width=True)
             
             # Create columns for each volatility category
@@ -4269,10 +4181,6 @@ def render_tab_4():
     from datetime import datetime, timedelta
     import pytz
     
-        page_title="Daily Hurst Table",
-        page_icon="📊",
-        layout="wide"
-    )
     
     # --- DB CONFIG ---
     try:
@@ -4280,7 +4188,6 @@ def render_tab_4():
         db_uri = (
             f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
             f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-        )
         engine = create_engine(db_uri)
     except Exception as e:
         st.error(f"Error connecting to the database: {e}")
@@ -4333,7 +4240,6 @@ def render_tab_4():
                 "Select Tokens", 
                 all_tokens,
                 default=all_tokens[:5] if len(all_tokens) > 5 else all_tokens
-            )
     
     with col2:
         # Add a refresh button
@@ -4691,7 +4597,6 @@ def render_tab_4():
                     title="Current Market Regime Distribution (Singapore Time)",
                     height=400,
                     font=dict(color="#000000", size=12),  # Set default font color and size
-                )
                 st.plotly_chart(fig, use_container_width=True)
                 
                 col1, col2, col3 = st.columns(3)
@@ -4756,7 +4661,7 @@ def render_tab_4():
 
 import streamlit as st
 
-
+st.set_page_config(page_title="ALL-IN-ONE Dashboard", layout="wide")
 
 st.title("🧠 ALL-IN-ONE DASHBOARD")
 st.markdown("Select a tab to view your dashboards. Each one can be refreshed independently.")
