@@ -1401,7 +1401,7 @@ def render_tab_1():
                         x=[f"{row['🔄 Trading Pair']} ({row['⏰ Time Period']})" for _, row in top_trading_periods.iterrows()],
                         y=top_trading_periods['📊 Number of Trades'],
                         marker_color='blue'
-    )
+    }
 ])
                 fig.update_layout(
                     title="Top 10 Trading Periods by Volume",
@@ -1571,7 +1571,8 @@ def render_tab_1():
                 'PNL per Trade (USD)': round(data['total_pnl'] / data['total_trades'] if data['total_trades'] > 0 else 0, 3)
             }
             for hour, data in hourly_patterns.items()
-        ])
+    }
+])
         
         # Sort by hour for display
         hourly_patterns_df = hourly_patterns_df.sort_values(by='Hour (SG Time)')
@@ -1782,10 +1783,10 @@ def render_tab_1():
                 'Total PNL (USD)': round(data['total_pnl'], 2),
                 'Total Trades': int(data['total_trades']),
                 'PNL per Trade (USD)': round(data['total_pnl'] / data['total_trades'], 3) if data['total_trades'] > 0 else 0,
-                'Top Contributing Pair': max(data['pair_breakdown'].items(), key=lambda x: x[1])[0] if data['pair_breakdown'] else "None"
+                'Top Contributing Pair': max(data['pair_breakdown'].items(), key=lambda x: x[1])[0] if data['pair_breakdown'] else "None"}
             }
             for time_block, data in time_period_profit.items()
-    )
+    }
 ])
         
         # Format the dataframe for better legibility
