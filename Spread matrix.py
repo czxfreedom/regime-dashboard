@@ -869,22 +869,6 @@ with tab2:
         st.warning("No fee2 (100K/50K) data available for analysis")
 
 # === TAB 3: SPREAD BY SIZE (ALL SIZES) ===
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import plotly.express as px
-from sqlalchemy import create_engine
-from datetime import datetime, timedelta
-import pytz
-
-# Page configuration
-st.set_page_config(
-    page_title="Exchange Spread Analysis Dashboard",
-    page_icon="📊",
-    layout="wide"
-)
 
 # Apply custom CSS styling - more minimal design with centered numeric columns and simplified styling
 st.markdown("""
