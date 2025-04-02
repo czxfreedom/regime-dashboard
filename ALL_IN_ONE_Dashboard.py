@@ -1215,7 +1215,7 @@ def render_tab_1():
                     'Max Trades in 30min': int(max_trades),
                     'Busiest Time': max_trades_time if max_trades > 0 else "N/A",
                     'Avg Trades per 30min': round(df['trade_count'].mean(), 1)
-                }
+    )
     
         # Trading Activity Summary with improved formatting
         if trades_summary:
@@ -1401,7 +1401,7 @@ def render_tab_1():
                         x=[f"{row['🔄 Trading Pair']} ({row['⏰ Time Period']})" for _, row in top_trading_periods.iterrows()],
                         y=top_trading_periods['📊 Number of Trades'],
                         marker_color='blue'
-    }
+    )
 ])
                 fig.update_layout(
                     title="Top 10 Trading Periods by Volume",
@@ -1551,7 +1551,7 @@ def render_tab_1():
                     'total_trades': 0,
                     'total_pnl': 0,
                     'count': 0
-                }
+    )
             
             # Sum up trades and PNL for this hour across all pairs
             for pair_name, df in pair_results.items():
@@ -1764,7 +1764,7 @@ def render_tab_1():
                 'total_pnl': 0,
                 'total_trades': 0,
                 'pair_breakdown': {}
-            }
+    )
             
             for pair_name, df in pair_results.items():
                 if time_block in df.index:
@@ -1949,7 +1949,7 @@ def render_tab_2():
             font-size:24px !important;
             font-weight: bold;
             padding: 10px 0;
-        }
+    )
         .subheader-style {
             font-size:20px !important;
             font-weight: bold;
