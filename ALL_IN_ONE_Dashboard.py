@@ -26,12 +26,6 @@ def render_macro_view():
     # Save this as pages/04_Daily_Hurst_Table.py in your Streamlit app folder
 
 
-    st.set_page_config(
-        page_title="Daily Hurst Table",
-        page_icon="📊",
-        layout="wide"
-    )
-
     # --- DB CONFIG ---
     try:
         db_config = st.secrets["database"]
@@ -511,12 +505,6 @@ def render_macro_view():
         st.dataframe(time_blocks_df)
 
 def render_cumulative_pnl():
-
-    st.set_page_config(
-        page_title="Trading Pairs PNL Dashboard",
-        page_icon="💰",
-        layout="wide"
-    )
 
     # --- DB CONFIG ---
     try:
@@ -1264,12 +1252,6 @@ def render_cumulative_pnl():
 
 def render_pnl_and_trades():
     # Save this as pages/06_Trades_PNL_Table.py in your Streamlit app folder
-
-    st.set_page_config(
-        page_title="User Trades & Platform PNL Table",
-        page_icon="💰",
-        layout="wide"
-    )
 
     # --- DB CONFIG ---
     try:
@@ -2446,7 +2428,6 @@ def render_pnl_and_trades():
 def render_regime_matrix():
 
     # --- Setup ---
-
     st.title("📈 Currency Pair Trend Matrix Dashboard")
 
     # Create tabs for Matrix View, Summary Table, Filters/Settings, and Global Summary
@@ -3676,12 +3657,6 @@ def render_spread_analysis():
     # Save this as pages/06_Exchange_Fee_Comparison.py in your Streamlit app folder
 
 
-    st.set_page_config(
-        page_title="Exchange Fee Comparison",
-        page_icon="📊",
-        layout="wide"
-    )
-
     # Apply some custom CSS for better styling
     st.markdown("""
     <style>
@@ -4359,12 +4334,6 @@ def render_spread_analysis():
 def render_vol_and_hurst():
     # Save this as pages/05_Daily_Volatility_Table.py in your Streamlit app folder
 
-
-    st.set_page_config(
-        page_title="Daily Volatility Table",
-        page_icon="📈",
-        layout="wide"
-    )
 
     # --- DB CONFIG ---
     try:
