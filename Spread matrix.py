@@ -445,7 +445,7 @@ with tab1:
         
         # Round values for display
         for col in numeric_cols:
-            display_df[col] = display_df[col].round(2)
+            display_df[col] = display_df[col].apply(lambda x: f"{x:.2f}".rstrip('0').rstrip('.') if not pd.isna(x) else x)
         
         # Add token type column for clarity
         display_df['Token Type'] = display_df['pair_name'].apply(
@@ -725,7 +725,7 @@ with tab2:
         
         # Round values for display
         for col in numeric_cols:
-            display_df[col] = display_df[col].round(2)
+            display_df[col] = display_df[col].apply(lambda x: f"{x:.2f}".rstrip('0').rstrip('.') if not pd.isna(x) else x)
         
         # Add token type column for clarity
         display_df['Token Type'] = display_df['pair_name'].apply(
