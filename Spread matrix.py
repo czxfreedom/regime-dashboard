@@ -15,7 +15,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Apply custom CSS styling - more minimal design with centered numeric columns and color coding
+# Apply custom CSS styling - more minimal design with centered numeric columns and simplified styling
 st.markdown("""
 <style>
     .header-style {
@@ -54,29 +54,17 @@ st.markdown("""
     /* Center numeric columns in dataframes */
     .dataframe th, .dataframe td {
         text-align: center !important;
+        font-family: monospace;  /* Use monospace for better number alignment */
     }
     /* First column (Token) remains left-aligned */
     .dataframe th:first-child, .dataframe td:first-child {
         text-align: left !important;
+        font-family: inherit;  /* Use normal font for token names */
     }
     
-    /* Color coding for spread values */
-    .very-low-spread {
-        background-color: rgba(0, 128, 0, 0.1) !important;
-        color: #006600 !important;
+    /* Bold formatting for spread values */
+    .spread-value {
         font-weight: bold;
-    }
-    .low-spread {
-        background-color: rgba(0, 102, 204, 0.1) !important;
-        color: #0066cc !important;
-    }
-    .medium-spread {
-        background-color: rgba(255, 153, 0, 0.1) !important;
-        color: #ff9900 !important;
-    }
-    .high-spread {
-        background-color: rgba(204, 0, 0, 0.1) !important;
-        color: #cc0000 !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -168,27 +156,24 @@ def get_depth_label(fee_column, token):
         }
     return depth_map.get(fee_column, fee_column)
 
-# Replace the existing color_code_value function with this:
+# Function to format number with 2 decimal places and no trailing zeros
+def format_number(x):
+    if pd.isna(x):
+        return ""
+    # Format to 2 decimal places and remove trailing zeros
+    formatted = f"{float(x):.2f}"
+    # Remove trailing zeros and decimal point if it's a whole number
+    return formatted.rstrip('0').rstrip('.') if '.' in formatted else formatted
+
+# Function to apply bold formatting to spread values
 def color_code_value(value, thresholds=None):
-    """Apply bold formatting to spread values without color backgrounds"""
+    """Apply bold formatting to spread values"""
     if pd.isna(value):
-        return value
+        return ""
     
-    # Always use bold formatting for better readability
-    return f'<span style="font-weight: bold;">{value:.6f}</span>'
-    
-    if thresholds is None:
-        # Default thresholds - adjust based on your data
-        thresholds = [0.0005, 0.001, 0.005]
-        
-    if value < thresholds[0]:
-        return f'<span class="very-low-spread">{value:.6f}</span>'
-    elif value < thresholds[1]:
-        return f'<span class="low-spread">{value:.6f}</span>'
-    elif value < thresholds[2]:
-        return f'<span class="medium-spread">{value:.6f}</span>'
-    else:
-        return f'<span class="high-spread">{value:.6f}</span>'
+    # Format with 2 decimal places and use bold
+    formatted = format_number(value)
+    return f'<span class="spread-value">{formatted}</span>'
 
 # --- Data Fetching Functions ---
 @st.cache_data(ttl=600, show_spinner="Fetching tokens...")
@@ -409,43 +394,22 @@ with tab1:
     if 'fee1' in matrix_data:
         df = matrix_data['fee1']
         
-        # Determine scale factor for better readability
+        # Use a fixed scale factor for consistency
         scale_factor = 10000
-        scale_label = "x10,000"
+        scale_label = "× 10,000"
         
-        # Calculate mean for scaling
+        st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
+        
+        # Calculate numeric columns for scaling
         numeric_cols = [col for col in df.columns if col not in ['pair_name', 'Surf Better', 'Improvement %']]
-        if numeric_cols:
-            values = []
-            for col in numeric_cols:
-                values.extend(df[col].dropna().tolist())
-            
-            if values:
-                mean_fee = sum(values) / len(values)
-                
-                # Determine scale factor based on mean fee value
-                if mean_fee < 0.001:
-                    scale_factor = 1000
-                    scale_label = "× 1,000"
-                elif mean_fee < 0.0001:
-                    scale_factor = 10000
-                    scale_label = "× 10,000"
-                elif mean_fee < 0.00001:
-                    scale_factor = 100000
-                    scale_label = "× 100,000"
         
-        # Apply scaling if needed
-        if scale_factor > 1:
-            for col in numeric_cols:
+        # Apply scaling
+        for col in numeric_cols:
+            if col in df.columns:
                 df[col] = df[col] * scale_factor
-            st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
         
         # Format and display the dataframe
         display_df = df.copy()
-        
-        # Round values for display
-        for col in numeric_cols:
-            display_df[col] = display_df[col].apply(lambda x: f"{x:.2f}".rstrip('0').rstrip('.') if not pd.isna(x) else x)
         
         # Add token type column for clarity
         display_df['Token Type'] = display_df['pair_name'].apply(
@@ -470,20 +434,11 @@ with tab1:
         # Rename columns for display
         display_df = display_df.rename(columns={'pair_name': 'Token'})
         
-        # Apply color coding to numeric columns
+        # Apply formatting to numeric columns (with error checking)
         color_df = display_df.copy()
         for col in numeric_cols:
             if col in color_df.columns and col != 'Token Type':
-                # Determine thresholds based on column values
-                values = color_df[col].dropna().tolist()
-                if values:
-                    # Dynamic thresholds based on percentiles
-                    q1 = np.percentile(values, 25)
-                    median = np.percentile(values, 50)
-                    q3 = np.percentile(values, 75)
-                    thresholds = [q1, median, q3]
-                    
-                    color_df[col] = color_df[col].apply(lambda x: color_code_value(x, thresholds) if not pd.isna(x) else "")
+                color_df[col] = color_df[col].apply(lambda x: color_code_value(x) if not pd.isna(x) else "")
         
         # Special formatting for improvement percentage
         if 'Improvement %' in color_df.columns:
@@ -493,10 +448,6 @@ with tab1:
             )
         
         # Display the table with HTML formatting
-        token_count = len(color_df)
-        table_height = max(100 + 35 * token_count, 300)  # Minimum height of 300px
-        
-        # Convert to HTML for better formatting
         html_table = color_df.to_html(escape=False, index=False)
         st.markdown(html_table, unsafe_allow_html=True)
         
@@ -565,7 +516,7 @@ with tab1:
                     
                     if surf_avg < nonsurf_avg:
                         improvement = ((nonsurf_avg - surf_avg) / nonsurf_avg) * 100
-                        st.success(f"📉 **SurfFuture average spread ({surf_avg:.6f}) is {improvement:.2f}% lower than other exchanges ({nonsurf_avg:.6f})**")
+                        st.success(f"📉 **SurfFuture average spread ({format_number(surf_avg)}) is {improvement:.2f}% lower than other exchanges ({format_number(nonsurf_avg)})**")
                     
             # Calculate separate stats for majors and altcoins
             major_tokens_df = df[df['pair_name'].apply(is_major)]
@@ -590,7 +541,7 @@ with tab1:
                             <div class="info-box">
                             <b>Major Tokens (50K):</b><br>
                             • SurfFuture has tighter spreads for {surf_better_count}/{total_count} major tokens<br>
-                            • SurfFuture average: {surf_major_avg:.6f} vs Non-Surf average: {nonsurf_major_avg:.6f}
+                            • SurfFuture average: {format_number(surf_major_avg)} vs Non-Surf average: {format_number(nonsurf_major_avg)}
                             </div>
                             """, unsafe_allow_html=True)
             
@@ -613,7 +564,7 @@ with tab1:
                             <div class="info-box">
                             <b>Altcoin Tokens (20K):</b><br>
                             • SurfFuture has tighter spreads for {surf_better_count}/{total_count} altcoin tokens<br>
-                            • SurfFuture average: {surf_altcoin_avg:.6f} vs Non-Surf average: {nonsurf_altcoin_avg:.6f}
+                            • SurfFuture average: {format_number(surf_altcoin_avg)} vs Non-Surf average: {format_number(nonsurf_altcoin_avg)}
                             </div>
                             """, unsafe_allow_html=True)
                             
@@ -656,7 +607,7 @@ with tab1:
                 
                 # Format the bars
                 fig.update_traces(
-                    texttemplate='%{y:.6f}',
+                    texttemplate='%{y:.2f}',
                     textposition='outside'
                 )
                 
@@ -682,50 +633,29 @@ with tab2:
     • <b>Major tokens</b> (BTC, ETH, SOL, XRP, BNB): 100K<br>
     • <b>Altcoin tokens</b>: 50K<br>
     <br>
-    This tab shows daily averages of 10-minute spread data points at 100K/50K size.""
-    "</div>
+    This tab shows daily averages of 10-minute spread data points at 100K/50K size.
+    </div>
     """, unsafe_allow_html=True)
     
     if 'fee2' in matrix_data:
         df = matrix_data['fee2']
         
-        # Determine scale factor for better readability
+        # Use a fixed scale factor for consistency
         scale_factor = 10000
-        scale_label = "x 10,000"
+        scale_label = "× 10,000"
         
-        # Calculate mean for scaling
+        st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
+        
+        # Calculate numeric columns for scaling
         numeric_cols = [col for col in df.columns if col not in ['pair_name', 'Surf Better', 'Improvement %']]
-        if numeric_cols:
-            values = []
-            for col in numeric_cols:
-                values.extend(df[col].dropna().tolist())
-            
-            if values:
-                mean_fee = sum(values) / len(values)
-                
-                # Determine scale factor based on mean fee value
-                if mean_fee < 0.001:
-                    scale_factor = 1000
-                    scale_label = "× 1,000"
-                elif mean_fee < 0.0001:
-                    scale_factor = 10000
-                    scale_label = "× 10,000"
-                elif mean_fee < 0.00001:
-                    scale_factor = 100000
-                    scale_label = "× 100,000"
         
-        # Apply scaling if needed
-        if scale_factor > 1:
-            for col in numeric_cols:
+        # Apply scaling
+        for col in numeric_cols:
+            if col in df.columns:
                 df[col] = df[col] * scale_factor
-            st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
         
         # Format and display the dataframe
         display_df = df.copy()
-        
-        # Round values for display
-        for col in numeric_cols:
-            display_df[col] = display_df[col].apply(lambda x: f"{x:.2f}".rstrip('0').rstrip('.') if not pd.isna(x) else x)
         
         # Add token type column for clarity
         display_df['Token Type'] = display_df['pair_name'].apply(
@@ -750,20 +680,11 @@ with tab2:
         # Rename columns for display
         display_df = display_df.rename(columns={'pair_name': 'Token'})
         
-        # Apply color coding to numeric columns
+        # Apply formatting to numeric columns (with error checking)
         color_df = display_df.copy()
         for col in numeric_cols:
             if col in color_df.columns and col != 'Token Type':
-                # Determine thresholds based on column values
-                values = color_df[col].dropna().tolist()
-                if values:
-                    # Dynamic thresholds based on percentiles
-                    q1 = np.percentile(values, 25)
-                    median = np.percentile(values, 50)
-                    q3 = np.percentile(values, 75)
-                    thresholds = [q1, median, q3]
-                    
-                    color_df[col] = color_df[col].apply(lambda x: color_code_value(x, thresholds) if not pd.isna(x) else "")
+                color_df[col] = color_df[col].apply(lambda x: color_code_value(x) if not pd.isna(x) else "")
         
         # Special formatting for improvement percentage
         if 'Improvement %' in color_df.columns:
@@ -773,10 +694,6 @@ with tab2:
             )
         
         # Display the table with HTML formatting
-        token_count = len(color_df)
-        table_height = max(100 + 35 * token_count, 300)  # Minimum height of 300px
-        
-        # Convert to HTML for better formatting
         html_table = color_df.to_html(escape=False, index=False)
         st.markdown(html_table, unsafe_allow_html=True)
         
@@ -845,7 +762,7 @@ with tab2:
                     
                     if surf_avg < nonsurf_avg:
                         improvement = ((nonsurf_avg - surf_avg) / nonsurf_avg) * 100
-                        st.success(f"📉 **SurfFuture average spread ({surf_avg:.6f}) is {improvement:.2f}% lower than other exchanges ({nonsurf_avg:.6f})**")
+                        st.success(f"📉 **SurfFuture average spread ({format_number(surf_avg)}) is {improvement:.2f}% lower than other exchanges ({format_number(nonsurf_avg)})**")
                     
             # Calculate separate stats for majors and altcoins
             major_tokens_df = df[df['pair_name'].apply(is_major)]
@@ -870,7 +787,7 @@ with tab2:
                             <div class="info-box">
                             <b>Major Tokens (100K):</b><br>
                             • SurfFuture has tighter spreads for {surf_better_count}/{total_count} major tokens<br>
-                            • SurfFuture average: {surf_major_avg:.6f} vs Non-Surf average: {nonsurf_major_avg:.6f}
+                            • SurfFuture average: {format_number(surf_major_avg)} vs Non-Surf average: {format_number(nonsurf_major_avg)}
                             </div>
                             """, unsafe_allow_html=True)
             
@@ -893,7 +810,7 @@ with tab2:
                             <div class="info-box">
                             <b>Altcoin Tokens (50K):</b><br>
                             • SurfFuture has tighter spreads for {surf_better_count}/{total_count} altcoin tokens<br>
-                            • SurfFuture average: {surf_altcoin_avg:.6f} vs Non-Surf average: {nonsurf_altcoin_avg:.6f}
+                            • SurfFuture average: {format_number(surf_altcoin_avg)} vs Non-Surf average: {format_number(nonsurf_altcoin_avg)}
                             </div>
                             """, unsafe_allow_html=True)
                             
@@ -936,7 +853,7 @@ with tab2:
                 
                 # Format the bars
                 fig.update_traces(
-                    texttemplate='%{y:.6f}',
+                    texttemplate='%{y:.2f}',
                     textposition='outside'
                 )
                 
@@ -965,6 +882,12 @@ with tab3:
     Tables show daily averages of 10-minute spread data points across different size tiers.
     </div>
     """, unsafe_allow_html=True)
+    
+    # Use a fixed scale factor for consistency
+    scale_factor = 10000
+    scale_label = "× 10,000"
+    
+    st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
     
     if daily_avg_data is not None and not daily_avg_data.empty:
         # Group tokens as majors and altcoins for better organization
@@ -1010,54 +933,17 @@ with tab3:
                             # Sort alphabetically
                             major_df_display = major_df_display.sort_values('pair_name')
                             
-                            # Determine scale factor
+                            # Apply scaling
                             depth_cols = [fee_depth_map_major[col] for col in available_fee_cols if col in fee_depth_map_major]
-                            values = []
                             for col in depth_cols:
                                 if col in major_df_display.columns:
-                                    values.extend(major_df_display[col].dropna().tolist())
+                                    major_df_display[col] = major_df_display[col] * scale_factor
                             
-                            scale_factor = 1
-                            scale_label = ""
-                            if values:
-                                mean_fee = sum(values) / len(values)
-                                if mean_fee < 0.001:
-                                    scale_factor = 1,000
-                                    scale_label = "× 1,000"
-                                elif mean_fee < 0.0001:
-                                    scale_factor = 10000
-                                    scale_label = "× 10,000"
-                                elif mean_fee < 0.00001:
-                                    scale_factor = 100000
-                                    scale_label = "× 100,000"
-                            
-                            # Apply scaling
-                            if scale_factor > 1:
-                                for col in depth_cols:
-                                    if col in major_df_display.columns:
-                                        major_df_display[col] = major_df_display[col] * scale_factor
-                                
-                                st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
-                            
-                            # Apply color coding
+                            # Apply bold formatting to numbers
                             color_df = major_df_display.copy()
                             for col in depth_cols:
                                 if col in color_df.columns:
-                                    # Determine thresholds based on column values
-                                    col_values = color_df[col].dropna().tolist()
-                                    if col_values:
-                                        # Dynamic thresholds based on percentiles
-                                        q1 = np.percentile(col_values, 25) if len(col_values) >= 4 else min(col_values)
-                                        median = np.percentile(col_values, 50) if len(col_values) >= 2 else col_values[0]
-                                        q3 = np.percentile(col_values, 75) if len(col_values) >= 4 else max(col_values)
-                                        thresholds = [q1, median, q3]
-                                        
-                                        color_df[col] = color_df[col].apply(lambda x: color_code_value(x, thresholds) if not pd.isna(x) else "")
-                            
-                            # Round values for display
-                            for col in depth_cols:
-                                if col in major_df_display.columns:
-                                    major_df_display[col] = major_df_display[col].round(2)
+                                    color_df[col] = color_df[col].apply(lambda x: color_code_value(x) if not pd.isna(x) else "")
                             
                             # Rename pair_name column
                             color_df = color_df.rename(columns={'pair_name': 'Token'})
@@ -1106,7 +992,7 @@ with tab3:
                                         tickvals=sizes
                                     ),
                                     yaxis=dict(
-                                        tickformat='.6f'
+                                        tickformat='.2f'  # Show only 2 decimal places
                                     )
                                 )
                                 
@@ -1125,54 +1011,17 @@ with tab3:
                             # Sort alphabetically
                             altcoin_df_display = altcoin_df_display.sort_values('pair_name')
                             
-                            # Determine scale factor
+                            # Apply scaling
                             depth_cols = [fee_depth_map_altcoin[col] for col in available_fee_cols if col in fee_depth_map_altcoin]
-                            values = []
                             for col in depth_cols:
                                 if col in altcoin_df_display.columns:
-                                    values.extend(altcoin_df_display[col].dropna().tolist())
+                                    altcoin_df_display[col] = altcoin_df_display[col] * scale_factor
                             
-                            scale_factor = 1
-                            scale_label = ""
-                            if values:
-                                mean_fee = sum(values) / len(values)
-                                if mean_fee < 0.001:
-                                    scale_factor = 1000
-                                    scale_label = "× 1,000"
-                                elif mean_fee < 0.0001:
-                                    scale_factor = 10000
-                                    scale_label = "× 10,000"
-                                elif mean_fee < 0.00001:
-                                    scale_factor = 100000
-                                    scale_label = "× 100,000"
-                            
-                            # Apply scaling
-                            if scale_factor > 1:
-                                for col in depth_cols:
-                                    if col in altcoin_df_display.columns:
-                                        altcoin_df_display[col] = altcoin_df_display[col] * scale_factor
-                                
-                                st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
-                            
-                            # Apply color coding
+                            # Apply bold formatting to numbers
                             color_df = altcoin_df_display.copy()
                             for col in depth_cols:
                                 if col in color_df.columns:
-                                    # Determine thresholds based on column values
-                                    col_values = color_df[col].dropna().tolist()
-                                    if col_values:
-                                        # Dynamic thresholds based on percentiles
-                                        q1 = np.percentile(col_values, 25) if len(col_values) >= 4 else min(col_values)
-                                        median = np.percentile(col_values, 50) if len(col_values) >= 2 else col_values[0]
-                                        q3 = np.percentile(col_values, 75) if len(col_values) >= 4 else max(col_values)
-                                        thresholds = [q1, median, q3]
-                                        
-                                        color_df[col] = color_df[col].apply(lambda x: color_code_value(x, thresholds) if not pd.isna(x) else "")
-                            
-                            # Round values for display
-                            for col in depth_cols:
-                                if col in altcoin_df_display.columns:
-                                    altcoin_df_display[col] = altcoin_df_display[col].round(2)
+                                    color_df[col] = color_df[col].apply(lambda x: color_code_value(x) if not pd.isna(x) else "")
                             
                             # Rename pair_name column
                             color_df = color_df.rename(columns={'pair_name': 'Token'})
@@ -1221,7 +1070,7 @@ with tab3:
                                         tickvals=sizes
                                     ),
                                     yaxis=dict(
-                                        tickformat='.6f'
+                                        tickformat='.2f'  # Show only 2 decimal places
                                     )
                                 )
                                 
@@ -1260,54 +1109,17 @@ with tab3:
                                     # Sort alphabetically
                                     major_ex_display = major_ex_display.sort_values('pair_name')
                                     
-                                    # Determine scale factor
+                                    # Apply scaling
                                     depth_cols = [fee_depth_map_major[col] for col in available_fee_cols if col in fee_depth_map_major]
-                                    values = []
                                     for col in depth_cols:
                                         if col in major_ex_display.columns:
-                                            values.extend(major_ex_display[col].dropna().tolist())
+                                            major_ex_display[col] = major_ex_display[col] * scale_factor
                                     
-                                    scale_factor = 1
-                                    scale_label = ""
-                                    if values:
-                                        mean_fee = sum(values) / len(values)
-                                        if mean_fee < 0.001:
-                                            scale_factor = 1000
-                                            scale_label = "× 1,000"
-                                        elif mean_fee < 0.0001:
-                                            scale_factor = 10000
-                                            scale_label = "× 10,000"
-                                        elif mean_fee < 0.00001:
-                                            scale_factor = 100000
-                                            scale_label = "× 100,000"
-                                    
-                                    # Apply scaling
-                                    if scale_factor > 1:
-                                        for col in depth_cols:
-                                            if col in major_ex_display.columns:
-                                                major_ex_display[col] = major_ex_display[col] * scale_factor
-                                        
-                                        st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
-                                    
-                                    # Apply color coding
+                                    # Apply bold formatting to numbers
                                     color_df = major_ex_display.copy()
                                     for col in depth_cols:
                                         if col in color_df.columns:
-                                            # Determine thresholds based on column values
-                                            col_values = color_df[col].dropna().tolist()
-                                            if col_values:
-                                                # Dynamic thresholds based on percentiles
-                                                q1 = np.percentile(col_values, 25) if len(col_values) >= 4 else min(col_values)
-                                                median = np.percentile(col_values, 50) if len(col_values) >= 2 else col_values[0]
-                                                q3 = np.percentile(col_values, 75) if len(col_values) >= 4 else max(col_values)
-                                                thresholds = [q1, median, q3]
-                                                
-                                                color_df[col] = color_df[col].apply(lambda x: color_code_value(x, thresholds) if not pd.isna(x) else "")
-                                    
-                                    # Round values for display
-                                    for col in depth_cols:
-                                        if col in major_ex_display.columns:
-                                            major_ex_display[col] = major_ex_display[col].round(2)
+                                            color_df[col] = color_df[col].apply(lambda x: color_code_value(x) if not pd.isna(x) else "")
                                     
                                     # Rename pair_name column
                                     color_df = color_df.rename(columns={'pair_name': 'Token'})
@@ -1356,7 +1168,7 @@ with tab3:
                                                 tickvals=sizes
                                             ),
                                             yaxis=dict(
-                                                tickformat='.6f'
+                                                tickformat='.2f'  # Show only 2 decimal places
                                             )
                                         )
                                         
@@ -1378,54 +1190,17 @@ with tab3:
                                     # Sort alphabetically
                                     altcoin_ex_display = altcoin_ex_display.sort_values('pair_name')
                                     
-                                    # Determine scale factor
+                                    # Apply scaling
                                     depth_cols = [fee_depth_map_altcoin[col] for col in available_fee_cols if col in fee_depth_map_altcoin]
-                                    values = []
                                     for col in depth_cols:
                                         if col in altcoin_ex_display.columns:
-                                            values.extend(altcoin_ex_display[col].dropna().tolist())
+                                            altcoin_ex_display[col] = altcoin_ex_display[col] * scale_factor
                                     
-                                    scale_factor = 1
-                                    scale_label = ""
-                                    if values:
-                                        mean_fee = sum(values) / len(values)
-                                        if mean_fee < 0.001:
-                                            scale_factor = 1000
-                                            scale_label = "× 1,000"
-                                        elif mean_fee < 0.0001:
-                                            scale_factor = 10000
-                                            scale_label = "× 10,000"
-                                        elif mean_fee < 0.00001:
-                                            scale_factor = 100000
-                                            scale_label = "× 100,000"
-                                    
-                                    # Apply scaling
-                                    if scale_factor > 1:
-                                        for col in depth_cols:
-                                            if col in altcoin_ex_display.columns:
-                                                altcoin_ex_display[col] = altcoin_ex_display[col] * scale_factor
-                                        
-                                        st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
-                                    
-                                    # Apply color coding
+                                    # Apply bold formatting to numbers
                                     color_df = altcoin_ex_display.copy()
                                     for col in depth_cols:
                                         if col in color_df.columns:
-                                            # Determine thresholds based on column values
-                                            col_values = color_df[col].dropna().tolist()
-                                            if col_values:
-                                                # Dynamic thresholds based on percentiles
-                                                q1 = np.percentile(col_values, 25) if len(col_values) >= 4 else min(col_values)
-                                                median = np.percentile(col_values, 50) if len(col_values) >= 2 else col_values[0]
-                                                q3 = np.percentile(col_values, 75) if len(col_values) >= 4 else max(col_values)
-                                                thresholds = [q1, median, q3]
-                                                
-                                                color_df[col] = color_df[col].apply(lambda x: color_code_value(x, thresholds) if not pd.isna(x) else "")
-                                    
-                                    # Round values for display
-                                    for col in depth_cols:
-                                        if col in altcoin_ex_display.columns:
-                                            altcoin_ex_display[col] = altcoin_ex_display[col].round(2)
+                                            color_df[col] = color_df[col].apply(lambda x: color_code_value(x) if not pd.isna(x) else "")
                                     
                                     # Rename pair_name column
                                     color_df = color_df.rename(columns={'pair_name': 'Token'})
@@ -1474,7 +1249,7 @@ with tab3:
                                                 tickvals=sizes
                                             ),
                                             yaxis=dict(
-                                                tickformat='.6f'
+                                                tickformat='.2f'  # Show only 2 decimal places
                                             )
                                         )
                                         
@@ -1521,40 +1296,25 @@ with tab3:
                                     comparison_data.append({
                                         'Exchange': exchange,
                                         'Size': size,
-                                        'Spread': value
+                                        'Spread': value * scale_factor  # Apply scaling
                                     })
                             
                             if comparison_data:
                                 comparison_df = pd.DataFrame(comparison_data)
                                 
-                                # Determine scale factor
-                                values = comparison_df['Spread'].tolist()
-                                scale_factor = 1
-                                scale_label = ""
-                                if values:
-                                    mean_fee = sum(values) / len(values)
-                                    if mean_fee < 0.001:
-                                        scale_factor = 1000
-                                        scale_label = "× 1,000"
-                                    elif mean_fee < 0.0001:
-                                        scale_factor = 10000
-                                        scale_label = "× 10,000"
-                                    elif mean_fee < 0.00001:
-                                        scale_factor = 100000
-                                        scale_label = "× 100,000"
-                                
-                                # Apply scaling
-                                if scale_factor > 1:
-                                    comparison_df['Spread'] = comparison_df['Spread'] * scale_factor
-                                    st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
+                                # Sort by size tiers for better visualization
+                                size_order = ['50K', '100K', '200K', '500K']
+                                if 'Size' in comparison_df.columns:
+                                    # Convert to categorical for sorting
+                                    comparison_df['Size'] = pd.Categorical(
+                                        comparison_df['Size'], 
+                                        categories=size_order, 
+                                        ordered=True
+                                    )
+                                    comparison_df = comparison_df.sort_values('Size')
                                 
                                 # Create grouped bar chart
                                 st.markdown("#### Major Tokens - Exchange Comparison by Size")
-                                
-                                # Sort by size tiers for better visualization
-                                size_order = ['50K', '100K', '200K', '500K']
-                                comparison_df['Size'] = pd.Categorical(comparison_df['Size'], categories=size_order, ordered=True)
-                                comparison_df = comparison_df.sort_values('Size')
                                 
                                 fig = px.bar(
                                     comparison_df,
@@ -1581,6 +1341,9 @@ with tab3:
                                         y=1.02,
                                         xanchor="right",
                                         x=1
+                                    ),
+                                    yaxis=dict(
+                                        tickformat='.2f'  # Show only 2 decimal places
                                     )
                                 )
                                 
@@ -1620,40 +1383,25 @@ with tab3:
                                     comparison_data.append({
                                         'Exchange': exchange,
                                         'Size': size,
-                                        'Spread': value
+                                        'Spread': value * scale_factor  # Apply scaling
                                     })
                             
                             if comparison_data:
                                 comparison_df = pd.DataFrame(comparison_data)
                                 
-                                # Determine scale factor
-                                values = comparison_df['Spread'].tolist()
-                                scale_factor = 1
-                                scale_label = ""
-                                if values:
-                                    mean_fee = sum(values) / len(values)
-                                    if mean_fee < 0.001:
-                                        scale_factor = 1000
-                                        scale_label = "× 1,000"
-                                    elif mean_fee < 0.0001:
-                                        scale_factor = 10000
-                                        scale_label = "× 10,000"
-                                    elif mean_fee < 0.00001:
-                                        scale_factor = 100000
-                                        scale_label = "× 100,000"
-                                
-                                # Apply scaling
-                                if scale_factor > 1:
-                                    comparison_df['Spread'] = comparison_df['Spread'] * scale_factor
-                                    st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
+                                # Sort by size tiers for better visualization
+                                size_order = ['20K', '50K', '100K', '200K']
+                                if 'Size' in comparison_df.columns:
+                                    # Convert to categorical for sorting
+                                    comparison_df['Size'] = pd.Categorical(
+                                        comparison_df['Size'], 
+                                        categories=size_order, 
+                                        ordered=True
+                                    )
+                                    comparison_df = comparison_df.sort_values('Size')
                                 
                                 # Create grouped bar chart
                                 st.markdown("#### Altcoin Tokens - Exchange Comparison by Size")
-                                
-                                # Sort by size tiers for better visualization
-                                size_order = ['20K', '50K', '100K', '200K']
-                                comparison_df['Size'] = pd.Categorical(comparison_df['Size'], categories=size_order, ordered=True)
-                                comparison_df = comparison_df.sort_values('Size')
                                 
                                 fig = px.bar(
                                     comparison_df,
@@ -1680,6 +1428,9 @@ with tab3:
                                         y=1.02,
                                         xanchor="right",
                                         x=1
+                                    ),
+                                    yaxis=dict(
+                                        tickformat='.2f'  # Show only 2 decimal places
                                     )
                                 )
                                 
@@ -1714,9 +1465,9 @@ with st.expander("Understanding Exchange Spreads"):
     ### Interpreting the Data:
     
     - Lower spread values indicate better pricing for traders
-    - Color coding highlights the relative spread values (blue/green for lower spreads, red/orange for higher spreads)
+    - Bold formatting highlights spread values for better readability
+    - All values are multiplied by 10,000 for better readability
     - The "Better" percentage shows how much lower SurfFuture's spread is compared to other exchanges (positive values mean SurfFuture is better)
-    - The scaling factor is applied to make small decimal values more readable
     
     ### Data Source:
     
