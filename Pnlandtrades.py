@@ -130,10 +130,11 @@ def fetch_trade_counts(pair_name):
     end_time_utc = now_sg.astimezone(pytz.utc)
 
     # Updated query to use trade_fill_fresh with consistent time handling
+    # Explicitly adding 8 hours to UTC timestamps to match Singapore time
     query = f"""
     SELECT
-        date_trunc('hour', created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
-        INTERVAL '30 min' * FLOOR(EXTRACT(MINUTE FROM created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore')::INT / 30) 
+        date_trunc('hour', created_at + INTERVAL '8 hour') + 
+        INTERVAL '30 min' * FLOOR(EXTRACT(MINUTE FROM created_at + INTERVAL '8 hour')::INT / 30) 
         AS timestamp,
         COUNT(*) AS trade_count
     FROM public.trade_fill_fresh
@@ -141,8 +142,8 @@ def fetch_trade_counts(pair_name):
     AND pair_id IN (SELECT pair_id FROM public.trade_pool_pairs WHERE pair_name = '{pair_name}')
     AND taker_way IN (1, 2, 3, 4)  -- Exclude taker_way = 0 (funding fee deductions)
     GROUP BY
-        date_trunc('hour', created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
-        INTERVAL '30 min' * FLOOR(EXTRACT(MINUTE FROM created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore')::INT / 30)
+        date_trunc('hour', created_at + INTERVAL '8 hour') + 
+        INTERVAL '30 min' * FLOOR(EXTRACT(MINUTE FROM created_at + INTERVAL '8 hour')::INT / 30)
     ORDER BY timestamp
     """
     
