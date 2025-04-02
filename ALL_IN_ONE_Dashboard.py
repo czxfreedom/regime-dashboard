@@ -281,7 +281,7 @@ def render_tab_0():
         'Week Trades': pnl_df['this_week_trades'],
         'All Time PNL (USD)': pnl_df['all_time_pnl'].round(2),
         'All Time Trades': pnl_df['all_time_trades'],
-    })
+    }
     
     # Function to format display DataFrame
     def format_display_df(df):
@@ -354,7 +354,7 @@ def render_tab_0():
             'Yesterday PNL (USD)': '${:,.2f}',
             'Week PNL (USD)': '${:,.2f}',
             'All Time PNL (USD)': '${:,.2f}'
-        })
+    }
         
         # Display the styled DataFrame
         st.dataframe(styled_df, height=600, use_container_width=True)
@@ -453,7 +453,7 @@ def render_tab_0():
             'Yesterday PNL/Trade': '${:,.2f}',
             'Week PNL/Trade': '${:,.2f}',
             'All Time PNL/Trade': '${:,.2f}'
-        })
+    }
         
         # Display the styled DataFrame
         st.dataframe(styled_detailed_df, height=600, use_container_width=True)
@@ -478,7 +478,7 @@ def render_tab_0():
             'Day Before PNL (USD)': '${:,.2f}',
             'Day-to-Day Change': '${:,.2f}',
             'Yesterday Change': '${:,.2f}'
-        })
+    }
         
         # Display the styled DataFrame
         st.dataframe(styled_day_comparison, height=400, use_container_width=True)
@@ -557,7 +557,7 @@ def render_tab_0():
                 f"{display_df['Today Trades'].sum():,}",
                 f"{display_df['Yesterday Trades'].sum():,}",
                 f"{display_df['Week Trades'].sum():,}"
-        })
+    }
         
         # Display statistics
         st.dataframe(stats_df, hide_index=True, height=400, use_container_width=True)
@@ -578,7 +578,7 @@ def render_tab_0():
                 'Today': pair_data['Today PNL (USD)'],
                 'Yesterday': pair_data['Yesterday PNL (USD)'],
                 'Rest of Week': pair_data['Week PNL (USD)'] - pair_data['Today PNL (USD)'] - pair_data['Yesterday PNL (USD)']
-            })
+    }
         
         chart_df = pd.DataFrame(chart_data)
         
@@ -680,7 +680,7 @@ def render_tab_0():
             '3-Day Daily Avg': '${:,.2f}',
             'Daily Avg This Week': '${:,.2f}',
             'Performance Trend': '{:.2f}x'
-        })
+    }
         
         # Add conditional formatting for Performance Trend
         def color_trend(val):
@@ -1228,7 +1228,7 @@ def render_tab_1():
                 'Max Trades in 30min': '⏱️ Max Trades (30min)',
                 'Busiest Time': '🕒 Busiest Time',
                 'Avg Trades per 30min': '📈 Avg Trades/30min'
-            })
+    }
             
             # Add a clear section header
             st.markdown("### 📊 Trading Activity Summary")
@@ -1282,7 +1282,7 @@ def render_tab_1():
                 'Max Loss in 30min': '📉 Max Loss (30min)',
                 'Max Loss Time': '⏱️ Max Loss Time', 
                 'Avg PNL per 30min': '📊 Avg PNL/30min'
-            })
+    }
             
             # Add a clear section header
             st.markdown("### 💰 Platform PNL Summary")
@@ -1293,7 +1293,7 @@ def render_tab_1():
                 '📈 Max Profit (30min)': '${:,.2f}',
                 '📉 Max Loss (30min)': '${:,.2f}',
                 '📊 Avg PNL/30min': '${:,.2f}'
-            })
+    }
             
             # Apply conditional formatting
             def highlight_profits(val):
@@ -1340,7 +1340,7 @@ def render_tab_1():
                             'Trade Count': int(trade_count),
                             'Platform PNL (USD)': round(pnl, 2),
                             'Revenue per Trade (USD)': round(pnl / trade_count, 2) if trade_count > 0 else 0
-                        })
+    }
         
         # Extract periods with both high activity and significant PNL with better formatting
         if high_activity_periods:
@@ -1354,7 +1354,7 @@ def render_tab_1():
                 'Trade Count': '📊 Number of Trades',
                 'Platform PNL (USD)': '💰 PNL (USD)',
                 'Revenue per Trade (USD)': '💸 PNL/Trade (USD)'
-            })
+    }
             
             # Sort by Trade Count (highest first)
             high_activity_df = high_activity_df.sort_values(by='📊 Number of Trades', ascending=False)
@@ -1363,7 +1363,7 @@ def render_tab_1():
             styled_activity_df = high_activity_df.style.format({
                 '💰 PNL (USD)': '${:,.2f}',
                 '💸 PNL/Trade (USD)': '${:,.2f}'
-            })
+    }
             
             # Apply conditional formatting
             def highlight_pnl(val):
@@ -1445,7 +1445,7 @@ def render_tab_1():
                         'Total Trades': int(df['trade_count'].sum()),
                         'Total PNL (USD)': round(df['platform_pnl'].sum(), 2),
                         'Avg PNL per Trade (USD)': round(avg_pnl_per_trade, 3)
-                    })
+    }
             
             if correlation_data:
                 # Convert to DataFrame
@@ -1461,14 +1461,14 @@ def render_tab_1():
                     'Total Trades': '📈 Total Trades',
                     'Total PNL (USD)': '💰 Total PNL (USD)',
                     'Avg PNL per Trade (USD)': '💸 Avg PNL/Trade (USD)'
-                })
+    }
                 
                 # Style the dataframe
                 styled_correlation_df = correlation_df.style.format({
                     '📊 Correlation': '{:.3f}',
                     '💰 Total PNL (USD)': '${:,.2f}',
                     '💸 Avg PNL/Trade (USD)': '${:,.3f}'
-                })
+    }
                 
                 # Apply conditional formatting
                 def highlight_correlation(val):
@@ -1509,7 +1509,7 @@ def render_tab_1():
                                         'Pair': pair_name,
                                         'Trade Count': int(row['trade_count']),
                                         'Platform PNL (USD)': round(row['platform_pnl'], 2)
-                                    })
+    }
                     
                     if scatter_data:
                         scatter_df = pd.DataFrame(scatter_data)
@@ -1581,14 +1581,14 @@ def render_tab_1():
             'Avg Trades': '📊 Avg Trades',
             'Avg PNL (USD)': '💰 Avg PNL (USD)',
             'PNL per Trade (USD)': '💸 PNL/Trade (USD)'
-        })
+    }
         
         # Style the dataframe
         styled_hourly_df = hourly_patterns_df.style.format({
             '📊 Avg Trades': '{:.1f}',
             '💰 Avg PNL (USD)': '${:,.2f}',
             '💸 PNL/Trade (USD)': '${:,.3f}'
-        })
+    }
         
         # Apply conditional formatting
         styled_hourly_df = styled_hourly_df.applymap(highlight_pnl, subset=['💰 Avg PNL (USD)', '💸 PNL/Trade (USD)'])
@@ -1675,7 +1675,7 @@ def render_tab_1():
                     'Pair': pair_name,
                     'Total PNL (USD)': round(pair_pnl, 0),
                     'Contribution (%)': round(contribution_pct, 2)
-                })
+    }
         
         if profit_distribution:
             # Sort by total PNL (highest first)
@@ -1687,13 +1687,13 @@ def render_tab_1():
                 'Pair': '🔄 Trading Pair',
                 'Total PNL (USD)': '💰 Total PNL (USD)',
                 'Contribution (%)': '📊 Contribution (%)'
-            })
+    }
             
             # Apply styling to make numbers clearer
             styled_profit_df = profit_distribution_df.style.format({
                 '💰 Total PNL (USD)': '${:,.0f}',  # Format as integers with comma for thousands
                 '📊 Contribution (%)': '{:+.2f}%'  # Show with + or - sign and 2 decimal places
-            })
+    }
         
             # Conditionally color the cells based on values
             def color_pnl_and_contribution(val, column):
@@ -1792,7 +1792,7 @@ def render_tab_1():
             'Total Trades': '📊 Total Trades',
             'PNL per Trade (USD)': '💸 PNL/Trade (USD)',
             'Top Contributing Pair': '🔄 Top Pair'
-        })
+    }
         
         # Sort by total PNL (highest first)
         time_profit_df = time_profit_df.sort_values(by='💰 Total PNL (USD)', ascending=False)
@@ -1801,7 +1801,7 @@ def render_tab_1():
         styled_time_profit_df = time_profit_df.style.format({
             '💰 Total PNL (USD)': '${:,.2f}',
             '💸 PNL/Trade (USD)': '${:,.3f}'
-        })
+    }
         
         # Apply conditional formatting
         styled_time_profit_df = styled_time_profit_df.applymap(highlight_pnl, subset=['💰 Total PNL (USD)', '💸 PNL/Trade (USD)'])
@@ -1837,7 +1837,7 @@ def render_tab_1():
             'font-size': '16px',
             'text-align': 'center',
             'background-color': '#f0f2f6'
-        })
+    }
         
             # Display the filtered data
             st.dataframe(
@@ -2546,7 +2546,7 @@ def render_tab_2():
                     avg_df = pd.DataFrame({
                         'Exchange': list(exchange_avgs.keys()),
                         'Average Spread': list(exchange_avgs.values())
-                    })
+    }
                     
                     # Sort by average spread (ascending)
                     avg_df = avg_df.sort_values('Average Spread')
@@ -2818,7 +2818,7 @@ def render_tab_2():
                     avg_df = pd.DataFrame({
                         'Exchange': list(exchange_avgs.keys()),
                         'Average Spread': list(exchange_avgs.values())
-                    })
+    }
                     
                     # Sort by average spread (ascending)
                     avg_df = avg_df.sort_values('Average Spread')
@@ -3416,7 +3416,7 @@ def render_tab_2():
                                             'Exchange': exchange,
                                             'Size': size,
                                             'Spread': value
-                                        })
+    }
                                 
                                 if comparison_data:
                                     comparison_df = pd.DataFrame(comparison_data)
@@ -3512,7 +3512,7 @@ def render_tab_2():
                                             'Exchange': exchange,
                                             'Size': size,
                                             'Spread': value
-                                        })
+    }
                                 
                                 if comparison_data:
                                     comparison_df = pd.DataFrame(comparison_data)
@@ -3958,7 +3958,7 @@ def render_tab_3():
                     'Max Vol (%)': (max_vol * 100).round(1),
                     'Min Vol (%)': (min_vol * 100).round(1),
                     'Vol Range (%)': ((max_vol - min_vol) * 100).round(1)
-                })
+    }
         
         if ranking_data:
             ranking_df = pd.DataFrame(ranking_data)
@@ -4021,7 +4021,7 @@ def render_tab_3():
                         'Time': time_label,
                         'Volatility (%)': round(vol_value * 100, 1),
                         'Full Timestamp': idx.strftime('%Y-%m-%d %H:%M')
-                    })
+    }
         
         if extreme_events:
             extreme_df = pd.DataFrame(extreme_events)
