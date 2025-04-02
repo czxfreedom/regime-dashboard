@@ -120,7 +120,7 @@ def render_cumulative_pnl():# --- DB CONFIG ---
 
     with col1:
         # Let user select pairs to display (or select all)
-        select_all = st.checkbox("Select All Pairs", value=True)
+        select_all = st.checkbox("Select All Pairs", value=True, key="render_cumulative_pnl_checkbox_0")
 
         if select_all:
             selected_pairs = all_pairs
@@ -133,7 +133,7 @@ def render_cumulative_pnl():# --- DB CONFIG ---
 
     with col2:
         # Add a refresh button
-        if st.button("Refresh Data", key="render_cumulative_pnl_button_0"):
+        if st.button("Refresh Data", key="render_cumulative_pnl_button_1"):
             st.cache_data.clear()
             st.experimental_rerun()
 
@@ -818,7 +818,7 @@ def render_pnl_and_trades():
 
     with col1:
         # Let user select pairs to display (or select all)
-        select_all = st.checkbox("Select All Pairs", value=True)
+        select_all = st.checkbox("Select All Pairs", value=True, key="render_pnl_and_trades_checkbox_0")
 
         if select_all:
             selected_pairs = all_pairs
@@ -831,7 +831,7 @@ def render_pnl_and_trades():
 
     with col2:
         # Add a refresh button
-        if st.button("Refresh Data", key="render_pnl_and_trades_button_0"):
+        if st.button("Refresh Data", key="render_pnl_and_trades_button_1"):
             st.cache_data.clear()
             st.experimental_rerun()
 
@@ -2031,7 +2031,7 @@ def render_spread_analysis():
 
     with col1:
         # Let user select tokens to display (or select all)
-        select_all = st.checkbox("Select All Tokens", value=True)
+        select_all = st.checkbox("Select All Tokens", value=True, key="render_spread_analysis_checkbox_0")
 
         if select_all:
             selected_tokens = all_tokens
@@ -2044,7 +2044,7 @@ def render_spread_analysis():
 
     with col2:
         # Add a refresh button
-        if st.button("Refresh Data", use_container_width=True, key="render_spread_analysis_button_0"):
+        if st.button("Refresh Data", use_container_width=True, key="render_spread_analysis_button_1"):
             st.cache_data.clear()
             st.experimental_rerun()
 
@@ -2665,7 +2665,7 @@ def render_vol_and_hurst():
 
     with col1:
         # Let user select tokens to display (or select all)
-        select_all = st.checkbox("Select All Tokens", value=True)
+        select_all = st.checkbox("Select All Tokens", value=True, key="render_vol_and_hurst_checkbox_0")
 
         if select_all:
             selected_tokens = all_tokens
@@ -2678,7 +2678,7 @@ def render_vol_and_hurst():
 
     with col2:
         # Add a refresh button
-        if st.button("Refresh Data", key="render_vol_and_hurst_button_0"):
+        if st.button("Refresh Data", key="render_vol_and_hurst_button_1"):
             st.cache_data.clear()
             st.experimental_rerun()
 
@@ -3194,7 +3194,7 @@ def render_macro_view():
 
     with col1:
         # Let user select tokens to display (or select all)
-        select_all = st.checkbox("Select All Tokens", value=True)
+        select_all = st.checkbox("Select All Tokens", value=True, key="render_macro_view_checkbox_0")
 
         if select_all:
             selected_tokens = all_tokens
@@ -3207,7 +3207,7 @@ def render_macro_view():
 
     with col2:
         # Add a refresh button
-        if st.button("Refresh Data", key="render_macro_view_button_0"):
+        if st.button("Refresh Data", key="render_macro_view_button_1"):
             st.cache_data.clear()
             st.experimental_rerun()
 
