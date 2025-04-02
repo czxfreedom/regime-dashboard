@@ -118,6 +118,12 @@ aligned_time_blocks = generate_aligned_time_blocks(now_sg)
 time_block_labels = [block[2] for block in aligned_time_blocks]
 
 # Fetch trades data for the past 24 hours in 30min intervals
+# Update the time handling in both fetch_trade_counts and fetch_platform_pnl functions
+# to ensure consistent time block alignment
+
+# First, modify the fetch_trade_counts function
+# Look for this section in your code and replace it with the below:
+
 @st.cache_data(ttl=600, show_spinner="Fetching trade counts...")
 def fetch_trade_counts(pair_name):
     # Get current time in Singapore timezone
@@ -129,11 +135,11 @@ def fetch_trade_counts(pair_name):
     start_time_utc = start_time_sg.astimezone(pytz.utc)
     end_time_utc = now_sg.astimezone(pytz.utc)
 
-    # Updated query to use trade_fill_fresh
+    # Updated query to use trade_fill_fresh with consistent time handling
     query = f"""
     SELECT
         date_trunc('hour', created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
-        INTERVAL '30 min' * (EXTRACT(MINUTE FROM created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore')::INT / 30) 
+        INTERVAL '30 min' * FLOOR(EXTRACT(MINUTE FROM created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore')::INT / 30) 
         AS timestamp,
         COUNT(*) AS trade_count
     FROM public.trade_fill_fresh
@@ -141,7 +147,7 @@ def fetch_trade_counts(pair_name):
     AND pair_id IN (SELECT pair_id FROM public.trade_pool_pairs WHERE pair_name = '{pair_name}')
     GROUP BY
         date_trunc('hour', created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
-        INTERVAL '30 min' * (EXTRACT(MINUTE FROM created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore')::INT / 30)
+        INTERVAL '30 min' * FLOOR(EXTRACT(MINUTE FROM created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore')::INT / 30)
     ORDER BY timestamp
     """
     
@@ -165,6 +171,35 @@ def fetch_trade_counts(pair_name):
         st.error(f"Error processing trade counts for {pair_name}: {e}")
         print(f"[{pair_name}] Error processing trade counts: {e}")
         return None
+
+# Also update the combine_data function to handle potential time mismatches better
+def combine_data(trade_data, pnl_data):
+    if trade_data is None and pnl_data is None:
+        return None
+    
+    # Create a DataFrame with time blocks as index
+    time_blocks = pd.DataFrame(index=[block[2] for block in aligned_time_blocks])
+    
+    # Add trade count data if available
+    if trade_data is not None and not trade_data.empty:
+        for time_label in time_blocks.index:
+            # Find matching rows in trade_data by time_label
+            matching_rows = trade_data[trade_data['time_label'] == time_label]
+            if not matching_rows.empty:
+                time_blocks.at[time_label, 'trade_count'] = matching_rows['trade_count'].sum()
+    
+    # Add PNL data if available
+    if pnl_data is not None and not pnl_data.empty:
+        for time_label in time_blocks.index:
+            # Find matching rows in pnl_data by time_label
+            matching_rows = pnl_data[pnl_data['time_label'] == time_label]
+            if not matching_rows.empty:
+                time_blocks.at[time_label, 'platform_pnl'] = matching_rows['platform_total_pnl'].sum()
+    
+    # Fill NaN values with 0
+    time_blocks.fillna(0, inplace=True)
+    
+    return time_blocks
     
 # Fetch platform PNL data for the past 24 hours in 30min intervals
 @st.cache_data(ttl=600, show_spinner="Calculating platform PNL...")
