@@ -168,11 +168,14 @@ def get_depth_label(fee_column, token):
         }
     return depth_map.get(fee_column, fee_column)
 
-# Function to apply color coding to spread values
+# Replace the existing color_code_value function with this:
 def color_code_value(value, thresholds=None):
-    """Apply color coding to spread values"""
+    """Apply bold formatting to spread values without color backgrounds"""
     if pd.isna(value):
         return value
+    
+    # Always use bold formatting for better readability
+    return f'<span style="font-weight: bold;">{value:.6f}</span>'
     
     if thresholds is None:
         # Default thresholds - adjust based on your data
@@ -407,8 +410,8 @@ with tab1:
         df = matrix_data['fee1']
         
         # Determine scale factor for better readability
-        scale_factor = 1
-        scale_label = ""
+        scale_factor = 10000
+        scale_label = "x10,000"
         
         # Calculate mean for scaling
         numeric_cols = [col for col in df.columns if col not in ['pair_name', 'Surf Better', 'Improvement %']]
@@ -687,8 +690,8 @@ with tab2:
         df = matrix_data['fee2']
         
         # Determine scale factor for better readability
-        scale_factor = 1
-        scale_label = ""
+        scale_factor = 10000
+        scale_label = "x 10,000"
         
         # Calculate mean for scaling
         numeric_cols = [col for col in df.columns if col not in ['pair_name', 'Surf Better', 'Improvement %']]
