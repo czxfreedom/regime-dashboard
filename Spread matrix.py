@@ -971,6 +971,6 @@ with st.expander("Understanding Exchange Spreads"):
     ### Data Source:
     
     Data is fetched from the `oracle_exchange_fee` table, with 10-minute interval data points that represent the average of previous 10 one-minute points.""")
-    "# Execute the app
+    # Execute the app
 if __name__ == '__main__':
     pass  # The app is already running
