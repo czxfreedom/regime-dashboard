@@ -1092,24 +1092,24 @@ if pair_results:
         )
     
     with col2:
-    # Show bottom profitable (loss-making) time periods
-    st.markdown("### 📉 Top 10 Least Profitable Time Periods")
+        # Show bottom profitable (loss-making) time periods
+        st.markdown("### 📉 Top 10 Least Profitable Time Periods")
     
-    # Get the 10 least profitable periods and sort them
-    bottom_10 = time_profit_df.tail(10).sort_values(by='💰 Total PNL (USD)')
+        # Get the 10 least profitable periods and sort them
+        bottom_10 = time_profit_df.tail(10).sort_values(by='💰 Total PNL (USD)')
     
-    # Style the bottom 10 with the same approach as the top 10
-    bottom_styled_df = styled_time_profit_df.set_properties(**{
+        # Style the bottom 10 with the same approach as the top 10
+        bottom_styled_df = styled_time_profit_df.set_properties(**{
         'font-size': '16px',
         'text-align': 'center',
         'background-color': '#f0f2f6'
     })
     
-    # Display the filtered data
-    st.dataframe(
-        bottom_styled_df.data.tail(10).sort_values(by='💰 Total PNL (USD)'),
-        height=300,
-        use_container_width=True
+        # Display the filtered data
+        st.dataframe(
+            bottom_styled_df.data.tail(10).sort_values(by='💰 Total PNL (USD)'),
+            height=300,
+            use_container_width=True
     )
     
     # Create visualization of top profitable and loss-making periods
