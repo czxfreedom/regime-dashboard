@@ -1076,29 +1076,41 @@ if pair_results:
     with col1:
         # Show top profitable time periods
         st.markdown("### 📈 Top 10 Most Profitable Time Periods")
+
+        # Style the entire DataFrame
+        full_styled_df = styled_time_profit_df.set_properties(**{
+         'font-size': '16px',
+         'text-align': 'center',
+         'background-color': '#f0f2f6'
+    }   )
+
+        # Display only the top 10 rows
         st.dataframe(
-            styled_time_profit_df.head(10).set_properties(**{
-                'font-size': '16px',
-                'text-align': 'center',
-                'background-color': '#f0f2f6'
-            }),
-            height=300,
-            use_container_width=True
+           full_styled_df.data.head(10),
+           height=300,
+           use_container_width=True
         )
     
     with col2:
-        # Show bottom profitable (loss-making) time periods
-        st.markdown("### 📉 Top 10 Least Profitable Time Periods")
-        least_profitable = styled_time_profit_df.tail(10).sort_values(by='💰 Total PNL (USD)')
-        st.dataframe(
-            least_profitable.set_properties(**{
-                'font-size': '16px',
-                'text-align': 'center',
-                'background-color': '#f0f2f6'
-            }),
-            height=300,
-            use_container_width=True
-        )
+    # Show bottom profitable (loss-making) time periods
+    st.markdown("### 📉 Top 10 Least Profitable Time Periods")
+    
+    # Get the 10 least profitable periods and sort them
+    bottom_10 = time_profit_df.tail(10).sort_values(by='💰 Total PNL (USD)')
+    
+    # Style the bottom 10 with the same approach as the top 10
+    bottom_styled_df = styled_time_profit_df.set_properties(**{
+        'font-size': '16px',
+        'text-align': 'center',
+        'background-color': '#f0f2f6'
+    })
+    
+    # Display the filtered data
+    st.dataframe(
+        bottom_styled_df.data.tail(10).sort_values(by='💰 Total PNL (USD)'),
+        height=300,
+        use_container_width=True
+    )
     
     # Create visualization of top profitable and loss-making periods
     fig = go.Figure()
