@@ -4756,7 +4756,7 @@ def render_tab_4():
 
 import streamlit as st
 
-st.set_page_config(page_title="ALL-IN-ONE Dashboard", layout="wide")
+
 
 st.title("🧠 ALL-IN-ONE DASHBOARD")
 st.markdown("Select a tab to view your dashboards. Each one can be refreshed independently.")
