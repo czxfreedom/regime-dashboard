@@ -1215,7 +1215,7 @@ def render_tab_1():
                     'Max Trades in 30min': int(max_trades),
                     'Busiest Time': max_trades_time if max_trades > 0 else "N/A",
                     'Avg Trades per 30min': round(df['trade_count'].mean(), 1)
-    )
+    }
     
         # Trading Activity Summary with improved formatting
         if trades_summary:
@@ -1551,7 +1551,7 @@ def render_tab_1():
                     'total_trades': 0,
                     'total_pnl': 0,
                     'count': 0
-    )
+    }
             
             # Sum up trades and PNL for this hour across all pairs
             for pair_name, df in pair_results.items():
@@ -1571,7 +1571,7 @@ def render_tab_1():
                 'PNL per Trade (USD)': round(data['total_pnl'] / data['total_trades'] if data['total_trades'] > 0 else 0, 3)
             }
             for hour, data in hourly_patterns.items()
-    }
+    ]
 ])
         
         # Sort by hour for display
@@ -1764,7 +1764,7 @@ def render_tab_1():
                 'total_pnl': 0,
                 'total_trades': 0,
                 'pair_breakdown': {}
-    )
+    }
             
             for pair_name, df in pair_results.items():
                 if time_block in df.index:
@@ -1784,9 +1784,9 @@ def render_tab_1():
                 'Total Trades': int(data['total_trades']),
                 'PNL per Trade (USD)': round(data['total_pnl'] / data['total_trades'], 3) if data['total_trades'] > 0 else 0,
                 'Top Contributing Pair': max(data['pair_breakdown'].items(), key=lambda x: x[1])[0] if data['pair_breakdown'] else "None"}
-            }
+            ]
             for time_block, data in time_period_profit.items()
-    }
+    ]
 ])
         
         # Format the dataframe for better legibility
@@ -1949,7 +1949,7 @@ def render_tab_2():
             font-size:24px !important;
             font-weight: bold;
             padding: 10px 0;
-    )
+    }
         .subheader-style {
             font-size:20px !important;
             font-weight: bold;
