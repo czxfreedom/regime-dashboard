@@ -394,7 +394,7 @@ def render_macro_view_dashboard():
         container = st.container()
         
         # Get all tokens
-        all_tokens = fetch_all_tokens(engine)
+        all_tokens = fetch_all_tokens(_engine)
         
         # Replace main Streamlit functions
         original_st_set_page_config = st.set_page_config
@@ -1026,7 +1026,7 @@ def render_pnlandtrades_dashboard():
         container = st.container()
         
         # Get all trading pairs
-        all_pairs = fetch_all_pairs(engine)
+        all_pairs = fetch_all_pairs(_engine)
         
         # Replace main Streamlit functions
         original_st_set_page_config = st.set_page_config
