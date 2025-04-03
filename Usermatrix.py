@@ -111,57 +111,7 @@ def fetch_all_pairs():
         return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "PEPE/USDT"]  # Default fallback
 
 # Fetch top users from DB
-@st.cache_data(ttl=600, show_spinner="Fetching users...")
-def fetch_top_users(limit=100):
-    """Fetch top users by trading volume."""
-    # First, let's get the actual column name that stores user information
-    try:
-        # Check what columns are available in the trade_fill_fresh table
-        column_query = """
-        SELECT column_name 
-        FROM information_schema.columns 
-        WHERE table_name = 'trade_fill_fresh'
-        """
-        columns_df = pd.read_sql(column_query, engine)
-        st.write("Available columns:", columns_df['column_name'].tolist())
-        
-        # Try to identify the user column - it might be named differently
-        user_columns = [col for col in columns_df['column_name'] if 'user' in col.lower() or 'account' in col.lower() or 'taker' in col.lower()]
-        
-        if user_columns:
-            st.info(f"Possible user columns found: {user_columns}")
-            user_column = user_columns[0]  # Use the first match
-        else:
-            st.error("No user column identified. Using 'taker_id' as fallback.")
-            user_column = "taker_id"  # Fallback to a common alternative
-            
-        # Now use the identified column in your query
-        query = f"""
-        SELECT 
-            "{user_column}" as user_identifier,
-            COUNT(*) as trade_count,
-            SUM(ABS("size" * "price")) as total_volume
-        FROM 
-            "public"."trade_fill_fresh"
-        WHERE 
-            "created_at" >= '{time_boundaries["this_month"]["start"]}'
-            AND "taker_way" IN (1, 2, 3, 4)
-        GROUP BY 
-            "{user_column}"
-        ORDER BY 
-            total_volume DESC
-        LIMIT {limit}
-        """
-        
-        df = pd.read_sql(query, engine)
-        if df.empty:
-            st.error("No active users found in the database.")
-            return []
-        return df['user_identifier'].tolist()
-    except Exception as e:
-        st.error(f"Error fetching users: {e}")
-        # Return some mock user IDs for testing
-        return [f"user_{i}" for i in range(1, 11)]
+
 # UI Controls
 all_pairs = fetch_all_pairs()
 top_users = fetch_top_users(limit=100)  # Get top 100 users by volume
@@ -209,7 +159,7 @@ if not top_selected_users:
 
 # Function to fetch user PNL data
 @st.cache_data(ttl=600)
-def fetch_user_pnl_data(user_id, pair_name, start_time, end_time):
+def fetch_user_pnl_data(taker_account_id, pair_name, start_time, end_time):
     """Fetch user PNL data for a specific pair and time period."""
     
     query = f"""
@@ -223,7 +173,7 @@ def fetch_user_pnl_data(user_id, pair_name, start_time, end_time):
       WHERE
         "created_at" BETWEEN '{start_time}' AND '{end_time}'
         AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
-        AND "user_id" = '{user_id}'
+        AND "taker_account_id" = '{taker_account_id}'
         AND "taker_way" IN (1, 2, 3, 4)
     ),
     
@@ -236,7 +186,7 @@ def fetch_user_pnl_data(user_id, pair_name, start_time, end_time):
       WHERE
         "created_at" BETWEEN '{start_time}' AND '{end_time}'
         AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
-        AND "user_id" = '{user_id}'
+        AND "taker_account_id" = '{taker_account_id}'
         AND "taker_fee_mode" = 1
         AND "taker_way" IN (1, 3)
     ),
@@ -250,7 +200,7 @@ def fetch_user_pnl_data(user_id, pair_name, start_time, end_time):
       WHERE
         "created_at" BETWEEN '{start_time}' AND '{end_time}'
         AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
-        AND "user_id" = '{user_id}'
+        AND "taker_account_id" = '{taker_account_id}'
         AND "taker_way" = 0
     ),
     
@@ -263,7 +213,7 @@ def fetch_user_pnl_data(user_id, pair_name, start_time, end_time):
       WHERE
         "created_at" BETWEEN '{start_time}' AND '{end_time}'
         AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
-        AND "user_id" = '{user_id}'
+        AND "taker_account_id" = '{taker_account_id}'
         AND "taker_way" IN (1, 2, 3, 4)
     )
     
@@ -274,6 +224,8 @@ def fetch_user_pnl_data(user_id, pair_name, start_time, end_time):
       (SELECT "user_funding_payments" FROM user_funding_payments) AS "user_total_pnl",
       (SELECT "trade_count" FROM user_trade_count) AS "trade_count"
     """
+    
+    # Rest of the function remains the same
     
     try:
         df = pd.read_sql(query, engine)
@@ -291,7 +243,8 @@ def fetch_user_pnl_data(user_id, pair_name, start_time, end_time):
 
 # Calculate user metadata
 @st.cache_data(ttl=600)
-def fetch_user_metadata(user_id):
+@st.cache_data(ttl=600)
+def fetch_user_metadata(taker_account_id):
     """Fetch additional metadata about a user."""
     
     query = f"""
@@ -299,13 +252,15 @@ def fetch_user_metadata(user_id):
         MIN(created_at) as first_trade_date,
         TO_CHAR(MIN(created_at), 'YYYY-MM-DD') as first_trade_date_str,
         COUNT(*) as all_time_trades,
-        SUM(ABS("size" * "price")) as all_time_volume
+        SUM(ABS("deal_size" * "deal_price")) as all_time_volume
     FROM 
         "public"."trade_fill_fresh"
     WHERE 
-        "user_id" = '{user_id}'
+        "taker_account_id" = '{taker_account_id}'
         AND "taker_way" IN (1, 2, 3, 4)
     """
+    
+    # Rest of the function remains the same
     
     try:
         df = pd.read_sql(query, engine)
