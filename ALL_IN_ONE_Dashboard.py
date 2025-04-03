@@ -394,7 +394,7 @@ def render_macro_view_dashboard():
         container = st.container()
         
         # Get all tokens
-        all_tokens = fetch_all_tokens(_engine)
+        all_tokens = fetch_all_tokens(engine)
         
         # Replace main Streamlit functions
         original_st_set_page_config = st.set_page_config
@@ -1026,7 +1026,7 @@ def render_pnlandtrades_dashboard():
         container = st.container()
         
         # Get all trading pairs
-        all_pairs = fetch_all_pairs(_engine)
+        all_pairs = fetch_all_pairs(engine)
         
         # Replace main Streamlit functions
         original_st_set_page_config = st.set_page_config
@@ -1894,7 +1894,7 @@ def render_all_in_one_dashboard():
 
 # --- Utility Functions ---
 @st.cache_data(ttl=600, show_spinner="Fetching tokens...")
-def fetch_all_tokens(engine):
+def fetch_all_tokens(_engine):
     """Fetch all available tokens from the database"""
     query = """
     SELECT DISTINCT pair_name 
@@ -1913,7 +1913,7 @@ def fetch_all_tokens(engine):
         return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]  # Default fallback
 
 @st.cache_data(ttl=600, show_spinner="Fetching pairs...")
-def fetch_all_pairs(engine):
+def fetch_all_pairs(_engine):
     """Fetch all available trading pairs from the database"""
     query = "SELECT DISTINCT pair_name FROM public.trade_pool_pairs ORDER BY pair_name"
     try:
