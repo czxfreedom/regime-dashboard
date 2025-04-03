@@ -114,14 +114,42 @@ engine = connect_to_database()
 # --- Dashboard Modules ---
 # Import all dashboard modules
 # These should be your existing Python files with modifications for integration
+import os
+import importlib.util
+import sys
+
+# Current directory
+current_dir = os.path.dirname(os.path.abspath(__file__))
+
+def import_module_from_file(file_name, module_name):
+    try:
+        file_path = os.path.join(current_dir, file_name)
+        if os.path.exists(file_path):
+            # Add to path if needed
+            if current_dir not in sys.path:
+                sys.path.insert(0, current_dir)
+            
+            # Import the module
+            spec = importlib.util.spec_from_file_location(module_name, file_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        else:
+            print(f"File not found: {file_path}")
+            return None
+    except Exception as e:
+        print(f"Error importing {file_name}: {e}")
+        return None
+
+# Import the modules
 try:
-    import Spread_matrix
-    import Macro_view
-    import Volandhurst
-    import Pnlandtrades
-    import platformpnlcumulative
-except ImportError:
-    st.error("Some dashboard modules could not be imported. Please check file paths and names.")
+    Spread_matrix_module = import_module_from_file("Spread_matrix.py", "Spread_matrix")
+    Macro_view_module = import_module_from_file("Macro_view.py", "Macro_view")
+    Volandhurst_module = import_module_from_file("Volandhurst.py", "Volandhurst")
+    Pnlandtrades_module = import_module_from_file("Pnlandtrades.py", "Pnlandtrades")
+    platformpnl_module = import_module_from_file("platformpnlcumulative.py", "platformpnlcumulative")
+except Exception as e:
+    st.error(f"Some dashboard modules could not be imported: {e}")
 
 # --- Main Application ---
 def main():
