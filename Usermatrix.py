@@ -109,6 +109,44 @@ def fetch_all_pairs():
     except Exception as e:
         st.error(f"Error fetching pairs: {e}")
         return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "PEPE/USDT"]  # Default fallback
+    
+@st.cache_data(ttl=600, show_spinner="Fetching users...")
+def fetch_top_users(limit=100):
+    """Fetch top users by trading volume."""
+    # Calculate the date range internally
+    now_utc = datetime.now(pytz.utc)
+    month_ago_utc = now_utc - timedelta(days=30)
+    
+    query = f"""
+    SELECT 
+        "taker_account_id" as user_identifier,
+        COUNT(*) as trade_count,
+        SUM(ABS("deal_size" * "deal_price")) as total_volume
+    FROM 
+        "public"."trade_fill_fresh"
+    WHERE 
+        "created_at" >= '{month_ago_utc.strftime("%Y-%m-%d %H:%M:%S")}'
+        AND "taker_way" IN (1, 2, 3, 4)
+    GROUP BY 
+        "taker_account_id"
+    ORDER BY 
+        total_volume DESC
+    LIMIT {limit}
+    """
+    
+    try:
+        df = pd.read_sql(query, engine)
+        if df.empty:
+            st.error("No active users found in the database.")
+            return []
+        return df['user_identifier'].tolist()
+    except Exception as e:
+        st.error(f"Error fetching users: {e}")
+        # For debugging, print the full error with traceback
+        import traceback
+        st.error(traceback.format_exc())
+        # Return some mock user IDs for testing
+        return [f"user_{i}" for i in range(1, 11)]    
 
 # Fetch top users from DB
 
@@ -238,7 +276,7 @@ def fetch_user_pnl_data(taker_account_id, pair_name, start_time, end_time):
             "trades": int(df.iloc[0]['trade_count'])
         }
     except Exception as e:
-        st.error(f"Error processing PNL for user {user_id} on {pair_name}: {e}")
+        st.error(f"Error processing PNL for user {taker_account_id} on {pair_name}: {e}")
         return {"pnl": 0, "trades": 0}
 
 # Calculate user metadata
