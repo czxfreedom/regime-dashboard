@@ -9,6 +9,7 @@ import pytz
 import importlib
 import os
 import sys
+import traceback
 
 # Add module path to sys.path if needed
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -66,8 +67,21 @@ st.markdown("""
     .st-emotion-cache-16txtl3 h4 {
         padding-top: 0px !important;
     }
+    .debug-info {
+        background-color: #f0f0f0;
+        padding: 10px;
+        border-radius: 5px;
+        margin: 10px 0;
+        font-family: monospace;
+        font-size: 12px;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+# Global variables for module storage
+imported_modules = {}
+engine = None
+debug_mode = False
 
 # --- Database Configuration ---
 def connect_to_database():
@@ -99,8 +113,12 @@ def connect_to_database():
                     f"@{db_host}:{db_port}/{db_name}"
                 )
                 engine = create_engine(db_uri)
-                st.sidebar.success("Connected to database successfully")
-                return engine
+                # Test connection
+                with engine.connect() as conn:
+                    result = conn.execute("SELECT 1")
+                    if result:
+                        st.sidebar.success("Connected to database successfully")
+                        return engine
             except Exception as e:
                 st.sidebar.error(f"Failed to connect: {e}")
                 st.stop()
@@ -108,187 +126,202 @@ def connect_to_database():
             st.error("Please connect to the database to continue")
             st.stop()
 
-# Establish database connection
-engine = connect_to_database()
-
-# --- Dashboard Modules ---
-# Import all dashboard modules
-# These should be your existing Python files with modifications for integration
-import os
-import importlib.util
-import sys
-
-# Current directory
-current_dir = os.path.dirname(os.path.abspath(__file__))
-
+# --- Module Import Functions ---
 def import_module_from_file(file_name, module_name):
+    """Import a module from a file path with better error handling"""
+    global debug_mode
+    
     try:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
         file_path = os.path.join(current_dir, file_name)
-        if os.path.exists(file_path):
-            # Add to path if needed
-            if current_dir not in sys.path:
-                sys.path.insert(0, current_dir)
-            
-            # Import the module
-            spec = importlib.util.spec_from_file_location(module_name, file_path)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            return module
-        else:
-            print(f"File not found: {file_path}")
+        
+        if debug_mode:
+            st.sidebar.write(f"Importing {module_name} from {file_path}")
+            st.sidebar.write(f"File exists: {os.path.exists(file_path)}")
+        
+        if not os.path.exists(file_path):
+            if debug_mode:
+                st.sidebar.error(f"File not found: {file_path}")
             return None
+        
+        # Add to path if needed
+        if current_dir not in sys.path:
+            sys.path.insert(0, current_dir)
+        
+        # Import the module
+        spec = importlib.util.spec_from_file_location(module_name, file_path)
+        if spec is None:
+            if debug_mode:
+                st.sidebar.error(f"Failed to create spec for {module_name}")
+            return None
+            
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        
+        if debug_mode:
+            st.sidebar.success(f"Successfully imported {module_name}")
+        
+        # Check if module has necessary functions
+        module_functions = [f for f in dir(module) if not f.startswith("__")]
+        if debug_mode:
+            st.sidebar.write(f"Available functions in {module_name}: {', '.join(module_functions)}")
+        
+        return module
     except Exception as e:
-        print(f"Error importing {file_name}: {e}")
+        if debug_mode:
+            st.sidebar.error(f"Error importing {file_name}: {str(e)}")
+            st.sidebar.error(traceback.format_exc())
         return None
 
-# Import the modules
-try:
-    Spread_matrix_module = import_module_from_file("Spread_matrix.py", "Spread_matrix")
-    Macro_view_module = import_module_from_file("Macro_view.py", "Macro_view")
-    Volandhurst_module = import_module_from_file("Volandhurst.py", "Volandhurst")
-    Pnlandtrades_module = import_module_from_file("Pnlandtrades.py", "Pnlandtrades")
-    platformpnl_module = import_module_from_file("platformpnlcumulative.py", "platformpnlcumulative")
-except Exception as e:
-    st.error(f"Some dashboard modules could not be imported: {e}")
+def check_module_requirements(module, module_name, required_functions):
+    """Check if a module has all required functions"""
+    missing_functions = []
+    for func_name in required_functions:
+        if not hasattr(module, func_name):
+            missing_functions.append(func_name)
+    
+    if missing_functions:
+        st.error(f"Module {module_name} is missing required functions: {', '.join(missing_functions)}")
+        return False
+    return True
 
-# --- Main Application ---
-def main():
-    # Title and current time
-    singapore_timezone = pytz.timezone('Asia/Singapore')
-    now_utc = datetime.now(pytz.utc)
-    now_sg = now_utc.astimezone(singapore_timezone)
+def import_all_modules():
+    """Import all required dashboard modules"""
+    global imported_modules, debug_mode
     
-    st.markdown('<div class="header-style">Unified Regime Dashboard Suite</div>', unsafe_allow_html=True)
-    st.markdown(f"Current Singapore Time: **{now_sg.strftime('%Y-%m-%d %H:%M:%S')}**")
+    module_files = {
+        "Spread_matrix": "Spread_matrix.py",
+        "Macro_view": "Macro_view.py",
+        "Volandhurst": "Volandhurst.py",
+        "Pnlandtrades": "Pnlandtrades.py",
+        "platformpnl": "platformpnlcumulative.py"
+    }
     
-    # Sidebar controls
-    st.sidebar.markdown('<div class="sidebar-header">Dashboard Controls</div>', unsafe_allow_html=True)
+    # Required functions for each module
+    required_functions = {
+        "Spread_matrix": ["fetch_daily_spread_averages", "calculate_matrix_data", "color_code_value", "is_major", "scale_factor", "scale_label"],
+        "Macro_view": ["fetch_and_calculate_hurst", "generate_aligned_time_blocks"],
+        "Volandhurst": ["fetch_and_calculate_volatility", "generate_aligned_time_blocks"],
+        "Pnlandtrades": ["fetch_trade_counts", "fetch_platform_pnl", "combine_data", "generate_aligned_time_blocks"],
+        "platformpnl": ["get_time_boundaries", "fetch_pnl_data", "format_display_df"]
+    }
     
-    # Global refresh button
-    if st.sidebar.button("🔄 Refresh All Dashboards", use_container_width=True, key="global_refresh"):
-        # Clear all cached data
-        st.cache_data.clear()
-        st.experimental_rerun()
+    # Check if modules exist first
+    st.sidebar.markdown("### Module Status")
+    for module_name, file_name in module_files.items():
+        file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), file_name)
+        exists = os.path.isfile(file_path)
+        st.sidebar.write(f"Module {module_name}: {'✅ Found' if exists else '❌ Missing'}")
     
-    st.sidebar.markdown(f'<div class="last-refresh">Last global refresh: {now_sg.strftime("%H:%M:%S")}</div>', unsafe_allow_html=True)
+    # Import modules
+    for module_name, file_name in module_files.items():
+        try:
+            module = import_module_from_file(file_name, module_name)
+            if module:
+                # Verify required functions
+                if check_module_requirements(module, module_name, required_functions.get(module_name, [])):
+                    imported_modules[module_name] = module
+                    # Set the engine for each module
+                    if hasattr(module, 'engine'):
+                        module.engine = engine
+            else:
+                st.sidebar.warning(f"Failed to import {module_name}")
+        except Exception as e:
+            st.sidebar.error(f"Error importing {module_name}: {str(e)}")
+            if debug_mode:
+                st.sidebar.error(traceback.format_exc())
     
-    # Create tabs
-    tabs = st.tabs([
-        "Exchange Spread Matrix", 
-        "Hurst matrix", 
-        "Volatility matrix", 
-        "PnL & Trades matrix (Daily)", 
-        "PnL Cumulative matrix",
-        "All-In-One"
-    ])
-    
-    # Define a function to handle the content for each tab
-    with tabs[0]:  # Exchange Spread Matrix
-        st.markdown("## Exchange Spread Matrix")
-        col1, col2 = st.columns([10, 1])
-        with col2:
-            if st.button("🔄", key="refresh_spread_matrix"):
-                # Clear cache for this specific module
-                st.cache_data.clear()
-                st.experimental_rerun()
-                
-        render_spread_matrix_dashboard()
-    
-    with tabs[1]:  # Macro View (Hurst)
-        st.markdown("## Macro View (Hurst Exponent)")
-        col1, col2 = st.columns([10, 1])
-        with col2:
-            if st.button("🔄", key="refresh_macro_view"):
-                # Clear cache for this specific module
-                st.cache_data.clear()
-                st.experimental_rerun()
-                
-        render_macro_view_dashboard()
-    
-    with tabs[2]:  # Vol & Hurst
-        st.markdown("## Volatility & Hurst")
-        col1, col2 = st.columns([10, 1])
-        with col2:
-            if st.button("🔄", key="refresh_vol_hurst"):
-                # Clear cache for this specific module
-                st.cache_data.clear()
-                st.experimental_rerun()
-                
-        render_volandhurst_dashboard()
-    
-    with tabs[3]:  # PnL & Trades
-        st.markdown("## PnL & Trades")
-        col1, col2 = st.columns([10, 1])
-        with col2:
-            if st.button("🔄", key="refresh_pnl_trades"):
-                # Clear cache for this specific module
-                st.cache_data.clear()
-                st.experimental_rerun()
-                
-        render_pnlandtrades_dashboard()
-    
-    with tabs[4]:  # PnL Cumulative
-        st.markdown("## Platform PnL Cumulative")
-        col1, col2 = st.columns([10, 1])
-        with col2:
-            if st.button("🔄", key="refresh_platform_pnl"):
-                # Clear cache for this specific module
-                st.cache_data.clear()
-                st.experimental_rerun()
-                
-        render_platformpnl_dashboard()
-    
-    with tabs[5]:  # All-In-One
-        st.markdown("## All-In-One Dashboard")
-        col1, col2 = st.columns([10, 1])
-        with col2:
-            if st.button("🔄", key="refresh_all_in_one"):
-                # Clear cache for this specific module
-                st.cache_data.clear()
-                st.experimental_rerun()
-                
-        render_all_in_one_dashboard()
+    return len(imported_modules) > 0
+
+# --- Utility Functions ---
+@st.cache_data(ttl=600, show_spinner="Fetching tokens...")
+def fetch_all_tokens(_engine):
+    """Fetch all available tokens from the database"""
+    query = """
+    SELECT DISTINCT pair_name 
+    FROM oracle_exchange_fee 
+    ORDER BY pair_name
+    """
+    try:
+        df = pd.read_sql(query, _engine)
+        if df.empty:
+            st.error("No tokens found in the database.")
+            return []
+        return df['pair_name'].tolist()
+    except Exception as e:
+        st.error(f"Error fetching tokens: {e}")
+        if debug_mode:
+            st.error(traceback.format_exc())
+        return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]  # Default fallback
+
+@st.cache_data(ttl=600, show_spinner="Fetching pairs...")
+def fetch_all_pairs(_engine):
+    """Fetch all available trading pairs from the database"""
+    query = "SELECT DISTINCT pair_name FROM public.trade_pool_pairs ORDER BY pair_name"
+    try:
+        df = pd.read_sql(query, _engine)
+        if df.empty:
+            st.error("No pairs found in the database.")
+            return []
+        return df['pair_name'].tolist()
+    except Exception as e:
+        st.error(f"Error fetching pairs: {e}")
+        if debug_mode:
+            st.error(traceback.format_exc())
+        return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "PEPE/USDT"]  # Default fallback
 
 # --- Individual Dashboard Renderers ---
 def render_spread_matrix_dashboard():
     """Render the Exchange Spread Matrix dashboard"""
     try:
+        if "Spread_matrix" not in imported_modules:
+            st.error("Spread Matrix module is not available. Please check module imports.")
+            return
+            
+        spread_matrix_module = imported_modules["Spread_matrix"]
+        
         # Create a container for the content
         container = st.container()
         
-        # Fetch all tokens (can be reused by multiple dashboards)
+        # Fetch all tokens
         all_tokens = fetch_all_tokens(engine)
-        
-        # Replace the main component functions used in the original script
-        original_st_set_page_config = st.set_page_config
-        original_st_title = st.title
-        original_st_subheader = st.subheader
-        
-        # Mock these functions to prevent them from running in the tab
-        st.set_page_config = lambda **kwargs: None
-        st.title = lambda *args, **kwargs: None
-        st.subheader = lambda *args, **kwargs: None
         
         # Run the dashboard code with the container as the context
         with container:
-            # Set up token selection in the sidebar for this tab if needed
-            # In this case, we'll just use all tokens since that's what the original does
-            selected_tokens = all_tokens
+            # Set up token selection in the sidebar for this tab
+            select_all = st.checkbox("Select All Tokens", value=True, key="spread_matrix_select_all")
             
-            # Inject custom data into the module's namespace
+            if select_all:
+                selected_tokens = all_tokens
+            else:
+                selected_tokens = st.multiselect(
+                    "Select Tokens", 
+                    all_tokens,
+                    default=all_tokens[:5] if len(all_tokens) > 5 else all_tokens,
+                    key="spread_matrix_multiselect"
+                )
+            
+            if not selected_tokens:
+                st.warning("Please select at least one token")
+                return
+                
+            # Inject the engine and tokens into the module
             spread_matrix_module.engine = engine
             spread_matrix_module.all_tokens = all_tokens
             spread_matrix_module.selected_tokens = selected_tokens
             
-            # Call the main functions from the module
             # Fetch daily spread data
-            daily_avg_data = spread_matrix_module.fetch_daily_spread_averages(selected_tokens)
+            with st.spinner("Fetching spread data..."):
+                daily_avg_data = spread_matrix_module.fetch_daily_spread_averages(selected_tokens)
+                
             if daily_avg_data is None or daily_avg_data.empty:
                 st.warning("No spread data available for the selected time period.")
                 return
             
             # Calculate matrix data for all fee levels
-            matrix_data = spread_matrix_module.calculate_matrix_data(daily_avg_data)
+            with st.spinner("Calculating matrix data..."):
+                matrix_data = spread_matrix_module.calculate_matrix_data(daily_avg_data)
+                
             if matrix_data is None or not matrix_data:
                 st.warning("Unable to process spread data. Check log for details.")
                 return
@@ -318,8 +351,7 @@ def render_spread_matrix_dashboard():
                     
                     st.markdown(f"<div class='info-box'><b>Note:</b> All spread values are multiplied by {scale_factor} ({scale_label}) for better readability.</div>", unsafe_allow_html=True)
                     
-                    # Apply color coding and formatting similar to the original module
-                    # ... (rest of the tab1 content from spread_matrix_module)
+                    # Apply color coding and formatting
                     numeric_cols = [col for col in df.columns if col not in ['pair_name', 'Surf Better', 'Improvement %']]
                     for col in numeric_cols:
                         if col in df.columns:
@@ -360,8 +392,7 @@ def render_spread_matrix_dashboard():
                     html_table = color_df.to_html(escape=False, index=False)
                     st.markdown(html_table, unsafe_allow_html=True)
                     
-                    # Continue with visualizations...
-                    # Example: Pie chart for SurfFuture performance
+                    # Create pie chart for SurfFuture performance
                     if 'Surf Better' in df.columns:
                         st.markdown("### SurfFuture Performance Analysis")
                         
@@ -396,43 +427,52 @@ def render_spread_matrix_dashboard():
                         )
                         
                         st.plotly_chart(fig, use_container_width=True)
-                
+                else:
+                    st.warning("No data available for 50K/20K analysis")
+            
             with subtab2:
-                # Similar implementation for subtab2 (100K/50K Analysis)
                 st.markdown('<div class="subheader-style">100K/50K Spread Analysis</div>', unsafe_allow_html=True)
-                # ... implementation similar to subtab1 but using 'fee2' data
+                
+                # Display explanation of depth tiers
+                st.markdown("""
+                <div class="info-box">
+                <b>Trading Size Definition:</b><br>
+                • <b>Major tokens</b> (BTC, ETH, SOL, XRP, BNB): 100K<br>
+                • <b>Altcoin tokens</b>: 50K<br>
+                <br>
+                This tab shows daily averages of 10-minute spread data points at 100K/50K size.
+                </div>
+                """, unsafe_allow_html=True)
+                
+                if 'fee2' in matrix_data:
+                    # Similar implementation to subtab1 but using 'fee2' data
+                    st.info("100K/50K Analysis - Implement similar to 50K/20K tab but with fee2 data")
+                else:
+                    st.warning("No data available for 100K/50K analysis")
             
             with subtab3:
-                # Similar implementation for subtab3 (Spread By Size)
                 st.markdown('<div class="subheader-style">Spread Analysis by Size</div>', unsafe_allow_html=True)
-                # ... implementation for spread by size analysis
-        
-        # Restore the original functions
-        st.set_page_config = original_st_set_page_config
-        st.title = original_st_title
-        st.subheader = original_st_subheader
+                st.info("Spread By Size Analysis - To be implemented")
         
     except Exception as e:
-        st.error(f"Error rendering Spread Matrix dashboard: {e}")
+        st.error(f"Error rendering Spread Matrix dashboard: {str(e)}")
+        if debug_mode:
+            st.error(traceback.format_exc())
 
 def render_macro_view_dashboard():
     """Render the Macro View (Hurst) dashboard"""
     try:
+        if "Macro_view" not in imported_modules:
+            st.error("Macro View module is not available. Please check module imports.")
+            return
+            
+        macro_view_module = imported_modules["Macro_view"]
+        
         # Create a container for the content
         container = st.container()
         
         # Get all tokens
         all_tokens = fetch_all_tokens(engine)
-        
-        # Replace main Streamlit functions
-        original_st_set_page_config = st.set_page_config
-        original_st_title = st.title
-        original_st_subheader = st.subheader
-        
-        # Mock these functions to prevent them from running in the tab
-        st.set_page_config = lambda **kwargs: None
-        st.title = lambda *args, **kwargs: None
-        st.subheader = lambda *args, **kwargs: None
         
         # Run the dashboard code with the container as the context
         with container:
@@ -441,7 +481,7 @@ def render_macro_view_dashboard():
             
             with col1:
                 # Let user select tokens to display (or select all)
-                select_all = st.checkbox("Select All Tokens", value=True)
+                select_all = st.checkbox("Select All Tokens", value=True, key="macro_view_select_all")
                 
                 if select_all:
                     selected_tokens = all_tokens
@@ -449,10 +489,15 @@ def render_macro_view_dashboard():
                     selected_tokens = st.multiselect(
                         "Select Tokens", 
                         all_tokens,
-                        default=all_tokens[:5] if len(all_tokens) > 5 else all_tokens
+                        default=all_tokens[:5] if len(all_tokens) > 5 else all_tokens,
+                        key="macro_view_multiselect"
                     )
             
-            # Set up the module with our engine and selected tokens
+            if not selected_tokens:
+                st.warning("Please select at least one token")
+                return
+                
+            # Set up the module with our engine
             macro_view_module.engine = engine
             
             # Show progress bar while calculating
@@ -469,7 +514,9 @@ def render_macro_view_dashboard():
                     if result is not None:
                         token_results[token] = result
                 except Exception as e:
-                    st.error(f"Error processing token {token}: {e}")
+                    st.error(f"Error processing token {token}: {str(e)}")
+                    if debug_mode:
+                        st.error(traceback.format_exc())
             
             # Final progress update
             progress_bar.progress(1.0)
@@ -493,7 +540,15 @@ def render_macro_view_dashboard():
                 aligned_time_blocks = macro_view_module.generate_aligned_time_blocks(now_sg)
                 
                 available_times = set(hurst_table.index)
-                ordered_times = [t for t in aligned_time_blocks if t in available_times]
+                ordered_times = []
+                
+                # Extract time labels if aligned_time_blocks is a list of tuples
+                if aligned_time_blocks and isinstance(aligned_time_blocks[0], tuple):
+                    time_labels = [block[2] if len(block) > 2 else str(block[0]) for block in aligned_time_blocks]
+                    ordered_times = [t for t in time_labels if t in available_times]
+                else:
+                    # Handle case where aligned_time_blocks might have a different structure
+                    ordered_times = [t for t in aligned_time_blocks if t in available_times]
                 
                 if not ordered_times and available_times:
                     ordered_times = sorted(list(available_times), reverse=True)
@@ -522,24 +577,24 @@ def render_macro_view_dashboard():
                 # Display market overview
                 st.subheader("Current Market Overview (Singapore Time)")
                 
-                # Calculate market regime distributions and create visualizations
-                # ... (implementation following the same logic as in the original)
                 # Calculate latest values for each token
                 latest_values = {}
                 for token, df in token_results.items():
                     if not df.empty and not df['Hurst'].isna().all():
-                        for block_time in aligned_time_blocks[:5]:
-                            latest_data = df[df['time_label'] == block_time]
-                            if not latest_data.empty:
-                                latest = latest_data['Hurst'].iloc[0]
-                                regime = latest_data['regime_desc'].iloc[0]
-                                latest_values[token] = (latest, regime)
-                                break
+                        if 'time_label' in df.columns:
+                            # Try to get the latest time block
+                            for block_time in ordered_times[:5]:
+                                latest_data = df[df['time_label'] == block_time]
+                                if not latest_data.empty:
+                                    latest = latest_data['Hurst'].iloc[0]
+                                    regime = latest_data['regime_desc'].iloc[0] if 'regime_desc' in latest_data.columns else ""
+                                    latest_values[token] = (latest, regime)
+                                    break
                         
                         # Fallback to most recent data point
                         if token not in latest_values:
                             latest = df['Hurst'].iloc[-1]
-                            regime = df['regime_desc'].iloc[-1]
+                            regime = df['regime_desc'].iloc[-1] if 'regime_desc' in df.columns else ""
                             latest_values[token] = (latest, regime)
                 
                 if latest_values:
@@ -625,32 +680,25 @@ def render_macro_view_dashboard():
                 - Missing values (light gray cells) indicate insufficient data for calculation
                 """)
         
-        # Restore the original functions
-        st.set_page_config = original_st_set_page_config
-        st.title = original_st_title
-        st.subheader = original_st_subheader
-        
     except Exception as e:
-        st.error(f"Error rendering Macro View dashboard: {e}")
+        st.error(f"Error rendering Macro View dashboard: {str(e)}")
+        if debug_mode:
+            st.error(traceback.format_exc())
 
 def render_volandhurst_dashboard():
     """Render the Vol & Hurst dashboard"""
     try:
+        if "Volandhurst" not in imported_modules:
+            st.error("Volatility & Hurst module is not available. Please check module imports.")
+            return
+            
+        volandhurst_module = imported_modules["Volandhurst"]
+        
         # Create a container for the content
         container = st.container()
         
         # Get all tokens
         all_tokens = fetch_all_tokens(engine)
-        
-        # Replace main Streamlit functions
-        original_st_set_page_config = st.set_page_config
-        original_st_title = st.title
-        original_st_subheader = st.subheader
-        
-        # Mock these functions to prevent them from running in the tab
-        st.set_page_config = lambda **kwargs: None
-        st.title = lambda *args, **kwargs: None
-        st.subheader = lambda *args, **kwargs: None
         
         # Run the dashboard code with the container as the context
         with container:
@@ -671,6 +719,10 @@ def render_volandhurst_dashboard():
                         key="vol_hurst_multiselect"
                     )
             
+            if not selected_tokens:
+                st.warning("Please select at least one token")
+                return
+                
             # Set up the module with our engine
             volandhurst_module.engine = engine
             
@@ -695,7 +747,9 @@ def render_volandhurst_dashboard():
                         if result is not None:
                             token_vol_results[token] = result
                     except Exception as e:
-                        st.error(f"Error processing token {token}: {e}")
+                        st.error(f"Error processing token {token}: {str(e)}")
+                        if debug_mode:
+                            st.error(traceback.format_exc())
                 
                 # Final progress update
                 progress_bar.progress(1.0)
@@ -716,17 +770,30 @@ def render_volandhurst_dashboard():
                     singapore_timezone = pytz.timezone('Asia/Singapore')
                     now_utc = datetime.now(pytz.utc)
                     now_sg = now_utc.astimezone(singapore_timezone)
-                    aligned_time_blocks = volandhurst_module.generate_aligned_time_blocks(now_sg)
-                    time_block_labels = [block[2] for block in aligned_time_blocks]
                     
-                    available_times = set(vol_table.index)
-                    ordered_times = [t for t in time_block_labels if t in available_times]
-                    
-                    if not ordered_times and available_times:
-                        ordered_times = sorted(list(available_times), reverse=True)
-                    
-                    # Reindex with the ordered times
-                    vol_table = vol_table.reindex(ordered_times)
+                    # Extract time labels based on the structure of generate_aligned_time_blocks output
+                    try:
+                        aligned_time_blocks = volandhurst_module.generate_aligned_time_blocks(now_sg)
+                        time_block_labels = []
+                        
+                        # Check structure and extract labels accordingly
+                        if aligned_time_blocks and isinstance(aligned_time_blocks[0], tuple):
+                            time_block_labels = [block[2] if len(block) > 2 else str(block[0]) for block in aligned_time_blocks]
+                        else:
+                            time_block_labels = aligned_time_blocks
+                            
+                        available_times = set(vol_table.index)
+                        ordered_times = [t for t in time_block_labels if t in available_times]
+                        
+                        if not ordered_times and available_times:
+                            ordered_times = sorted(list(available_times), reverse=True)
+                        
+                        # Reindex with the ordered times
+                        vol_table = vol_table.reindex(ordered_times)
+                    except Exception as e:
+                        st.warning(f"Error organizing time blocks: {str(e)}. Using default ordering.")
+                        if debug_mode:
+                            st.error(traceback.format_exc())
                     
                     # Convert from decimal to percentage and round to 1 decimal place
                     vol_table = (vol_table * 100).round(1)
@@ -760,7 +827,7 @@ def render_volandhurst_dashboard():
                     for token, df in token_vol_results.items():
                         if not df.empty and 'avg_24h_vol' in df.columns and not df['avg_24h_vol'].isna().all():
                             avg_vol = df['avg_24h_vol'].iloc[0]  # All rows have the same avg value
-                            vol_regime = df['avg_vol_desc'].iloc[0]
+                            vol_regime = df['avg_vol_desc'].iloc[0] if 'avg_vol_desc' in df.columns else ""
                             max_vol = df['realized_vol'].max()
                             min_vol = df['realized_vol'].min()
                             ranking_data.append({
@@ -782,13 +849,13 @@ def render_volandhurst_dashboard():
                         
                         # Apply styling for the ranking table
                         def color_regime(val):
-                            if 'Low' in val:
+                            if 'Low' in str(val):
                                 return 'color: green'
-                            elif 'Medium' in val:
+                            elif 'Medium' in str(val):
                                 return 'color: #aaaa00'
-                            elif 'High' in val:
+                            elif 'High' in str(val):
                                 return 'color: orange'
-                            elif 'Extreme' in val:
+                            elif 'Extreme' in str(val):
                                 return 'color: red'
                             return ''
                         
@@ -827,7 +894,7 @@ def render_volandhurst_dashboard():
                                     'Token': token,
                                     'Time': time_label,
                                     'Volatility (%)': round(vol_value * 100, 1),
-                                    'Full Timestamp': idx.strftime('%Y-%m-%d %H:%M')
+                                    'Full Timestamp': idx.strftime('%Y-%m-%d %H:%M') if hasattr(idx, 'strftime') else str(idx)
                                 })
                     
                     if extreme_events:
@@ -847,7 +914,7 @@ def render_volandhurst_dashboard():
                             token = event['Token']
                             time = event['Time']
                             vol = event['Volatility (%)']
-                            date = event['Full Timestamp'].split(' ')[0]
+                            date = event['Full Timestamp'].split(' ')[0] if ' ' in event['Full Timestamp'] else event['Full Timestamp']
                             
                             st.markdown(f"**{i+1}. {token}** at **{time}** on {date}: <span style='color:red; font-weight:bold;'>{vol}%</span> volatility", unsafe_allow_html=True)
                         
@@ -862,7 +929,7 @@ def render_volandhurst_dashboard():
                     for token, df in token_vol_results.items():
                         if not df.empty and 'avg_24h_vol' in df.columns and not df['avg_24h_vol'].isna().all():
                             avg = df['avg_24h_vol'].iloc[0]  # All rows have the same avg value
-                            regime = df['avg_vol_desc'].iloc[0]
+                            regime = df['avg_vol_desc'].iloc[0] if 'avg_vol_desc' in df.columns else ""
                             avg_values[token] = (avg, regime)
                     
                     if avg_values:
@@ -872,151 +939,43 @@ def render_volandhurst_dashboard():
                         extreme_vol = sum(1 for v, r in avg_values.values() if v >= 1.0)
                         total = low_vol + medium_vol + high_vol + extreme_vol
                         
-                        col1, col2, col3, col4 = st.columns(4)
-                        col1.metric("Low Vol", f"{low_vol} ({low_vol/total*100:.1f}%)")
-                        col2.metric("Medium Vol", f"{medium_vol} ({medium_vol/total*100:.1f}%)")
-                        col3.metric("High Vol", f"{high_vol} ({high_vol/total*100:.1f}%)")
-                        col4.metric("Extreme Vol", f"{extreme_vol} ({extreme_vol/total*100:.1f}%)")
-                        
-                        # Create pie chart
-                        labels = ['Low Vol', 'Medium Vol', 'High Vol', 'Extreme Vol']
-                        values = [low_vol, medium_vol, high_vol, extreme_vol]
-                        colors = ['rgba(100,255,100,0.8)', 'rgba(255,255,100,0.8)', 'rgba(255,165,0,0.8)', 'rgba(255,0,0,0.8)']
-                        
-                        fig = go.Figure(data=[go.Pie(
-                            labels=labels, 
-                            values=values, 
-                            marker=dict(colors=colors, line=dict(color='#000000', width=2)), 
-                            textinfo='label+percent', 
-                            hole=.3
-                        )])
-                        
-                        fig.update_layout(
-                            title="24-Hour Average Volatility Distribution",
-                            height=400,
-                            font=dict(color="#000000", size=12),
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
+                        if total > 0:
+                            col1, col2, col3, col4 = st.columns(4)
+                            col1.metric("Low Vol", f"{low_vol} ({low_vol/total*100:.1f}%)")
+                            col2.metric("Medium Vol", f"{medium_vol} ({medium_vol/total*100:.1f}%)")
+                            col3.metric("High Vol", f"{high_vol} ({high_vol/total*100:.1f}%)")
+                            col4.metric("Extreme Vol", f"{extreme_vol} ({extreme_vol/total*100:.1f}%)")
+                            
+                            # Create pie chart
+                            labels = ['Low Vol', 'Medium Vol', 'High Vol', 'Extreme Vol']
+                            values = [low_vol, medium_vol, high_vol, extreme_vol]
+                            colors = ['rgba(100,255,100,0.8)', 'rgba(255,255,100,0.8)', 'rgba(255,165,0,0.8)', 'rgba(255,0,0,0.8)']
+                            
+                            fig = go.Figure(data=[go.Pie(
+                                labels=labels, 
+                                values=values, 
+                                marker=dict(colors=colors, line=dict(color='#000000', width=2)), 
+                                textinfo='label+percent', 
+                                hole=.3
+                            )])
+                            
+                            fig.update_layout(
+                                title="24-Hour Average Volatility Distribution",
+                                height=400,
+                                font=dict(color="#000000", size=12),
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
                 
             with subtab2:
                 # Combined Vol & Hurst tab - displays correlation between volatility and Hurst exponent
                 st.markdown("## Combined Volatility & Hurst Analysis")
                 st.markdown("This tab shows the relationship between volatility and market regime (Hurst exponent).")
                 
-                # Run Hurst calculations similar to the Macro View tab if needed
-                # For this example, we'll assume Hurst calculations are already done in the other tab
+                st.info("This tab requires both Volatility and Macro View (Hurst) modules to be functioning. Please use both tabs to generate data for this view.")
                 
-                # Combine the data from volatility and Hurst calculations
-                if token_vol_results and 'token_results' in locals():  # Use the Hurst results if they exist
-                    st.subheader("Correlation between Volatility and Market Regime")
-                    
-                    # Prepare combined data
-                    combined_data = []
-                    for token in set(token_vol_results.keys()) & set(token_results.keys()):
-                        vol_df = token_vol_results[token]
-                        hurst_df = token_results[token]
-                        
-                        # Get average values for each token
-                        if not vol_df.empty and 'avg_24h_vol' in vol_df.columns:
-                            avg_vol = vol_df['avg_24h_vol'].iloc[0]
-                            
-                            # Get the latest Hurst value
-                            latest_hurst = None
-                            if not hurst_df.empty and 'Hurst' in hurst_df.columns:
-                                # Try to find latest value that isn't NaN
-                                for idx in range(len(hurst_df)):
-                                    if not pd.isna(hurst_df['Hurst'].iloc[idx]):
-                                        latest_hurst = hurst_df['Hurst'].iloc[idx]
-                                        break
-                            
-                            if latest_hurst is not None:
-                                combined_data.append({
-                                    'Token': token,
-                                    'Avg Volatility (%)': round(avg_vol * 100, 1),
-                                    'Hurst Exponent': round(latest_hurst, 2),
-                                    'Vol Regime': vol_df['avg_vol_desc'].iloc[0],
-                                    'Market Regime': hurst_df['regime_desc'].iloc[0] if 'regime_desc' in hurst_df.columns else "Unknown"
-                                })
-                    
-                    if combined_data:
-                        # Create DataFrame
-                        combined_df = pd.DataFrame(combined_data)
-                        
-                        # Create scatter plot
-                        fig = px.scatter(
-                            combined_df,
-                            x='Hurst Exponent',
-                            y='Avg Volatility (%)',
-                            color='Token',
-                            hover_data=['Token', 'Vol Regime', 'Market Regime'],
-                            title="Volatility vs. Hurst Exponent",
-                            labels={'Avg Volatility (%)': 'Annualized Volatility (%)', 'Hurst Exponent': 'Hurst Exponent'},
-                        )
-                        
-                        # Add vertical lines for regime boundaries
-                        fig.add_vline(x=0.4, line_width=1, line_dash="dash", line_color="red")
-                        fig.add_vline(x=0.6, line_width=1, line_dash="dash", line_color="green")
-                        
-                        # Add horizontal lines for volatility boundaries
-                        fig.add_hline(y=30, line_width=1, line_dash="dash", line_color="green")
-                        fig.add_hline(y=60, line_width=1, line_dash="dash", line_color="orange")
-                        fig.add_hline(y=100, line_width=1, line_dash="dash", line_color="red")
-                        
-                        # Add annotations
-                        fig.add_annotation(x=0.2, y=115, text="Mean-Reverting", showarrow=False, font=dict(color="red"))
-                        fig.add_annotation(x=0.5, y=115, text="Random Walk", showarrow=False, font=dict(color="black"))
-                        fig.add_annotation(x=0.8, y=115, text="Trending", showarrow=False, font=dict(color="green"))
-                        
-                        fig.add_annotation(x=0.9, y=15, text="Low Vol", showarrow=False, font=dict(color="green"))
-                        fig.add_annotation(x=0.9, y=45, text="Medium Vol", showarrow=False, font=dict(color="orange"))
-                        fig.add_annotation(x=0.9, y=80, text="High Vol", showarrow=False, font=dict(color="orange"))
-                        fig.add_annotation(x=0.9, y=110, text="Extreme Vol", showarrow=False, font=dict(color="red"))
-                        
-                        # Update layout
-                        fig.update_layout(
-                            height=600,
-                            xaxis=dict(range=[0, 1]),
-                            yaxis=dict(range=[0, 120]),
-                        )
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Display the data table
-                        st.subheader("Combined Metrics by Token")
-                        
-                        # Apply styling
-                        def color_hurst(val):
-                            if pd.isna(val):
-                                return ''
-                            elif val < 0.4:
-                                return 'color: red'
-                            elif val > 0.6:
-                                return 'color: green'
-                            else:
-                                return 'color: black'  # Random walk
-                        
-                        def color_vol(val):
-                            if pd.isna(val):
-                                return ''
-                            elif val < 30:
-                                return 'color: green'
-                            elif val < 60:
-                                return 'color: #aaaa00'
-                            elif val < 100:
-                                return 'color: orange'
-                            else:
-                                return 'color: red'
-                        
-                        styled_combined = combined_df.style\
-                            .applymap(color_hurst, subset=['Hurst Exponent'])\
-                            .applymap(color_vol, subset=['Avg Volatility (%)'])
-                        
-                        st.dataframe(styled_combined, height=500, use_container_width=True)
-                        
-                    else:
-                        st.warning("Insufficient data to create the combined analysis.")
-                else:
-                    st.warning("Please run both Volatility and Hurst analyses to see the combined view.")
+                # Placeholder for combined analysis
+                if debug_mode:
+                    st.markdown('<div class="debug-info">Implementation for combined analysis pending</div>', unsafe_allow_html=True)
             
             # Add explanatory information
             with st.expander("Understanding Volatility Metrics"):
@@ -1039,32 +998,25 @@ def render_volandhurst_dashboard():
                 - Missing values (light gray cells) indicate insufficient data for calculation
                 """)
         
-        # Restore the original functions
-        st.set_page_config = original_st_set_page_config
-        st.title = original_st_title
-        st.subheader = original_st_subheader
-        
     except Exception as e:
-        st.error(f"Error rendering Vol & Hurst dashboard: {e}")
+        st.error(f"Error rendering Vol & Hurst dashboard: {str(e)}")
+        if debug_mode:
+            st.error(traceback.format_exc())
 
 def render_pnlandtrades_dashboard():
     """Render the PnL & Trades dashboard"""
     try:
+        if "Pnlandtrades" not in imported_modules:
+            st.error("PnL & Trades module is not available. Please check module imports.")
+            return
+            
+        pnlandtrades_module = imported_modules["Pnlandtrades"]
+        
         # Create a container for the content
         container = st.container()
         
         # Get all trading pairs
         all_pairs = fetch_all_pairs(engine)
-        
-        # Replace main Streamlit functions
-        original_st_set_page_config = st.set_page_config
-        original_st_title = st.title
-        original_st_subheader = st.subheader
-        
-        # Mock these functions to prevent them from running in the tab
-        st.set_page_config = lambda **kwargs: None
-        st.title = lambda *args, **kwargs: None
-        st.subheader = lambda *args, **kwargs: None
         
         # Run the dashboard code with the container as the context
         with container:
@@ -1115,7 +1067,9 @@ def render_pnlandtrades_dashboard():
                     if combined_data is not None:
                         pair_results[pair_name] = combined_data
                 except Exception as e:
-                    st.error(f"Error processing pair {pair_name}: {e}")
+                    st.error(f"Error processing pair {pair_name}: {str(e)}")
+                    if debug_mode:
+                        st.error(traceback.format_exc())
             
             # Final progress update
             progress_bar.progress(1.0)
@@ -1126,14 +1080,27 @@ def render_pnlandtrades_dashboard():
                 singapore_timezone = pytz.timezone('Asia/Singapore')
                 now_utc = datetime.now(pytz.utc)
                 now_sg = now_utc.astimezone(singapore_timezone)
-                aligned_time_blocks = pnlandtrades_module.generate_aligned_time_blocks(now_sg)
-                time_block_labels = [block[2] for block in aligned_time_blocks]
+                
+                # Extract time blocks based on the structure returned by the module
+                try:
+                    aligned_time_blocks = pnlandtrades_module.generate_aligned_time_blocks(now_sg)
+                    time_block_labels = []
+                    
+                    # Check structure and extract labels accordingly
+                    if aligned_time_blocks and isinstance(aligned_time_blocks[0], tuple):
+                        time_block_labels = [block[2] if len(block) > 2 else str(block[0]) for block in aligned_time_blocks]
+                    else:
+                        time_block_labels = aligned_time_blocks
+                except Exception as e:
+                    st.warning(f"Error generating time blocks: {str(e)}. Using default time ordering.")
+                    time_block_labels = []
                 
                 # Create trade count table
                 trade_count_data = {}
                 for pair_name, df in pair_results.items():
                     if 'trade_count' in df.columns:
-                        trade_count_data[pair_name] = df['trade_count']
+                        trade_count_series = df['trade_count']
+                        trade_count_data[pair_name] = trade_count_series
                 
                 # Create DataFrame with all pairs
                 trade_count_table = pd.DataFrame(trade_count_data)
@@ -1187,7 +1154,7 @@ def render_pnlandtrades_dashboard():
                 # Apply the time blocks in the proper order
                 pnl_table = pnl_table.reindex(ordered_times)
                 
-                # Round to 2 decimal places for display
+                # Round to integers for display
                 pnl_table = pnl_table.round(0).astype(int)
                 
                 # Apply styling
@@ -1198,12 +1165,12 @@ def render_pnlandtrades_dashboard():
                         return f'background-color: rgba(255, 0, 0, 0.9); color: white'
                     elif val < 0:  # Small negative PNL (loss) - light red
                         intensity = max(0, min(255, int(255 * abs(val) / 1000)))
-                        return f'background-color: rgba(255, {100-intensity}, {100-intensity}, 0.9); color: black'
+                        return f'background-color: rgba(255, {100+intensity}, {100+intensity}, 0.9); color: black'
                     elif val < 1000:  # Small positive PNL (profit) - light green
                         intensity = max(0, min(255, int(255 * val / 1000)))
-                        return f'background-color: rgba({100-intensity}, 180, {100-intensity}, 0.9); color: black'
+                        return f'background-color: rgba({100+intensity}, 180, {100+intensity}, 0.9); color: black'
                     else:  # Large positive PNL (profit) - green
-                        return 'background-color: rgba(0, 120, 0, 0.7); color: black'
+                        return 'background-color: rgba(0, 120, 0, 0.7); color: white'
                 
                 styled_pnl_table = pnl_table.style.applymap(color_pnl_cells)
                 st.markdown("## Platform PNL Table (USD, 30min timeframe, Last 24 hours)")
@@ -1211,165 +1178,29 @@ def render_pnlandtrades_dashboard():
                 st.markdown("Values shown in USD")
                 st.dataframe(styled_pnl_table, height=600, use_container_width=True)
                 
-                # Create summary tables with improved legibility
+                # Placeholder for summary tables
                 st.subheader("Summary Statistics (Last 24 Hours)")
                 
                 # Add a separator
                 st.markdown("---")
                 
-                # Prepare Trades Summary data
-                trades_summary = {}
-                for pair_name, df in pair_results.items():
-                    if 'trade_count' in df.columns:
-                        total_trades = df['trade_count'].sum()
-                        max_trades = df['trade_count'].max()
-                        max_trades_time = df['trade_count'].idxmax() if max_trades > 0 else "N/A"
-                        
-                        trades_summary[pair_name] = {
-                            'Total Trades': int(total_trades),
-                            'Max Trades in 30min': int(max_trades),
-                            'Busiest Time': max_trades_time if max_trades > 0 else "N/A",
-                            'Avg Trades per 30min': round(df['trade_count'].mean(), 1)
-                        }
+                # Display simplified summary for now
+                col1, col2 = st.columns(2)
                 
-                # Trading Activity Summary with improved formatting
-                if trades_summary:
-                    # Convert to DataFrame and sort
-                    trades_summary_df = pd.DataFrame(trades_summary).T
-                    trades_summary_df = trades_summary_df.sort_values(by='Total Trades', ascending=False)
-                    
-                    # Format the dataframe for better legibility
-                    trades_summary_df = trades_summary_df.rename(columns={
-                        'Total Trades': '📊 Total Trades',
-                        'Max Trades in 30min': '⏱️ Max Trades (30min)',
-                        'Busiest Time': '🕒 Busiest Time',
-                        'Avg Trades per 30min': '📈 Avg Trades/30min'
-                    })
-                    
-                    # Add a clear section header
-                    st.markdown("### 📊 Trading Activity Summary")
-                    
-                    # Display the styled dataframe
-                    st.dataframe(
-                        trades_summary_df.style.format({
-                            '📈 Avg Trades/30min': '{:.1f}'
-                        }).set_properties(**{
-                            'font-size': '16px',
-                            'text-align': 'center',
-                            'background-color': '#f0f2f6'
-                            }),
-                        height=350,
-                        use_container_width=True
-                    )
+                with col1:
+                    st.markdown("### 📊 Trading Activity")
+                    total_trades = sum(df['trade_count'].sum() for pair_name, df in pair_results.items() if 'trade_count' in df.columns)
+                    st.metric("Total Trades", f"{total_trades:,}")
                 
-                # Prepare PNL Summary data
-                pnl_summary = {}
-                for pair_name, df in pair_results.items():
-                    if 'platform_pnl' in df.columns:
-                        total_pnl = df['platform_pnl'].sum()
-                        max_pnl = df['platform_pnl'].max()
-                        min_pnl = df['platform_pnl'].min()
-                        max_pnl_time = df['platform_pnl'].idxmax() if abs(max_pnl) > 0 else "N/A"
-                        min_pnl_time = df['platform_pnl'].idxmin() if abs(min_pnl) > 0 else "N/A"
-                        
-                        pnl_summary[pair_name] = {
-                            'Total PNL (USD)': round(total_pnl, 2),
-                            'Max Profit in 30min': round(max_pnl, 2),
-                            'Max Profit Time': max_pnl_time if abs(max_pnl) > 0 else "N/A",
-                            'Max Loss in 30min': round(min_pnl, 2),
-                            'Max Loss Time': min_pnl_time if abs(min_pnl) > 0 else "N/A",
-                            'Avg PNL per 30min': round(df['platform_pnl'].mean(), 2)
-                        }
+                with col2:
+                    st.markdown("### 💰 Platform PNL")
+                    total_pnl = sum(df['platform_pnl'].sum() for pair_name, df in pair_results.items() if 'platform_pnl' in df.columns)
+                    st.metric("Total PNL (USD)", f"${total_pnl:,.2f}")
                 
-                # PNL Summary with improved formatting
-                if pnl_summary:
-                    # Convert to DataFrame and sort
-                    pnl_summary_df = pd.DataFrame(pnl_summary).T
-                    pnl_summary_df = pnl_summary_df.sort_values(by='Total PNL (USD)', ascending=False)
-                    
-                    # Format the dataframe for better legibility
-                    pnl_summary_df = pnl_summary_df.rename(columns={
-                        'Total PNL (USD)': '💰 Total PNL (USD)',
-                        'Max Profit in 30min': '📈 Max Profit (30min)',
-                        'Max Profit Time': '⏱️ Max Profit Time',
-                        'Max Loss in 30min': '📉 Max Loss (30min)',
-                        'Max Loss Time': '⏱️ Max Loss Time', 
-                        'Avg PNL per 30min': '📊 Avg PNL/30min'
-                    })
-                    
-                    # Style the dataframe for better legibility
-                    styled_pnl_df = pnl_summary_df.style.format({
-                        '💰 Total PNL (USD)': '${:,.2f}',
-                        '📈 Max Profit (30min)': '${:,.2f}',
-                        '📉 Max Loss (30min)': '${:,.2f}',
-                        '📊 Avg PNL/30min': '${:,.2f}'
-                    })
-                    
-                    # Apply conditional formatting
-                    def highlight_profits(val):
-                        if isinstance(val, (int, float)):
-                            if val > 0:
-                                return 'color: green; font-weight: bold'
-                            elif val < 0:
-                                return 'color: red; font-weight: bold'
-                        return ''
-                    
-                    styled_pnl_df = styled_pnl_df.applymap(highlight_profits, subset=['💰 Total PNL (USD)', '📈 Max Profit (30min)', '📉 Max Loss (30min)', '📊 Avg PNL/30min'])
-                    
-                    # Add a clear section header
-                    st.markdown("### 💰 Platform PNL Summary")
-                    
-                    # Display the styled dataframe
-                    st.dataframe(
-                        styled_pnl_df.set_properties(**{
-                            'font-size': '16px',
-                            'text-align': 'center',
-                            'background-color': '#f0f2f6'
-                        }),
-                        height=350,
-                        use_container_width=True
-                    )
+                st.markdown("For detailed summary statistics, please use the individual dashboards.")
                 
-                # Add visualizations for top performers
-                st.subheader("Top Performers")
-                
-                if pnl_summary:
-                    # Get top 5 pairs by PNL
-                    top_pnl_pairs = list(pnl_summary_df.sort_values(by='💰 Total PNL (USD)', ascending=False).head(5).index)
-                    
-                    # Create bar chart
-                    top_pnl_data = []
-                    for pair in top_pnl_pairs:
-                        top_pnl_data.append({
-                            'Pair': pair,
-                            'PNL (USD)': pnl_summary[pair]['Total PNL (USD)']
-                        })
-                    
-                    if top_pnl_data:
-                        top_pnl_df = pd.DataFrame(top_pnl_data)
-                        
-                        fig = px.bar(
-                            top_pnl_df,
-                            x='Pair',
-                            y='PNL (USD)',
-                            title="Top 5 Pairs by PNL",
-                            color='PNL (USD)',
-                            color_continuous_scale=['red', 'green'],
-                            text='PNL (USD)'
-                        )
-                        
-                        fig.update_layout(
-                            height=400,
-                            xaxis_title="Trading Pair",
-                            yaxis_title="Total PNL (USD)"
-                        )
-                        
-                        fig.update_traces(
-                            texttemplate='%{y:$.2f}',
-                            textposition='outside'
-                        )
-                        
-                        st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("No data available for the selected pairs")
             
             # Add help expander
             with st.expander("Understanding the PNL & Trades Dashboard"):
@@ -1406,32 +1237,25 @@ def render_pnlandtrades_dashboard():
                 - Singapore timezone (UTC+8) is used throughout
                 """)
         
-        # Restore the original functions
-        st.set_page_config = original_st_set_page_config
-        st.title = original_st_title
-        st.subheader = original_st_subheader
-        
     except Exception as e:
-        st.error(f"Error rendering PnL & Trades dashboard: {e}")
+        st.error(f"Error rendering PnL & Trades dashboard: {str(e)}")
+        if debug_mode:
+            st.error(traceback.format_exc())
 
 def render_platformpnl_dashboard():
     """Render the Platform PnL Cumulative dashboard"""
     try:
+        if "platformpnl" not in imported_modules:
+            sst.error("Platform PNL module is not available. Please check module imports.")
+            return
+            
+        platformpnl_module = imported_modules["platformpnl"]
+        
         # Create a container for the content
         container = st.container()
         
         # Get all trading pairs
         all_pairs = fetch_all_pairs(engine)
-        
-        # Replace main Streamlit functions
-        original_st_set_page_config = st.set_page_config
-        original_st_title = st.title
-        original_st_subheader = st.subheader
-        
-        # Mock these functions to prevent them from running in the tab
-        st.set_page_config = lambda **kwargs: None
-        st.title = lambda *args, **kwargs: None
-        st.subheader = lambda *args, **kwargs: None
         
         # Run the dashboard code with the container as the context
         with container:
@@ -1460,7 +1284,13 @@ def render_platformpnl_dashboard():
                 return
             
             # Calculate time boundaries
-            time_boundaries = platformpnl_module.get_time_boundaries()
+            try:
+                time_boundaries = platformpnl_module.get_time_boundaries()
+            except Exception as e:
+                st.error(f"Error getting time boundaries: {str(e)}")
+                if debug_mode:
+                    st.error(traceback.format_exc())
+                return
             
             # Show progress bar while calculating
             progress_bar = st.progress(0)
@@ -1476,25 +1306,30 @@ def render_platformpnl_dashboard():
                 
                 pair_data = {"pair_name": pair_name}
                 
-                for period in periods:
-                    start_time = time_boundaries[period]["start"]
-                    end_time = time_boundaries[period]["end"]
+                try:
+                    for period in periods:
+                        start_time = time_boundaries[period]["start"]
+                        end_time = time_boundaries[period]["end"]
+                        
+                        # Fetch PNL data for this pair and time period
+                        period_data = platformpnl_module.fetch_pnl_data(pair_name, start_time, end_time)
+                        
+                        # Store the results
+                        pair_data[f"{period}_pnl"] = period_data["pnl"]
+                        pair_data[f"{period}_trades"] = period_data["trades"]
                     
-                    # Fetch PNL data for this pair and time period
-                    period_data = platformpnl_module.fetch_pnl_data(pair_name, start_time, end_time)
-                    
-                    # Store the results
-                    pair_data[f"{period}_pnl"] = period_data["pnl"]
-                    pair_data[f"{period}_trades"] = period_data["trades"]
-                
-                results[pair_name] = pair_data
+                    results[pair_name] = pair_data
+                except Exception as e:
+                    st.error(f"Error processing pair {pair_name}: {str(e)}")
+                    if debug_mode:
+                        st.error(traceback.format_exc())
             
             # Final progress update
             progress_bar.progress(1.0)
             status_text.text(f"Processed {len(results)}/{len(selected_pairs)} pairs successfully")
             
             # Create DataFrame from results
-            pnl_df = pd.DataFrame([results[pair] for pair in selected_pairs])
+            pnl_df = pd.DataFrame([results[pair] for pair in results.keys()])
             
             # If DataFrame is empty, show warning and stop
             if pnl_df.empty:
@@ -1516,8 +1351,25 @@ def render_platformpnl_dashboard():
                 'All Time Trades': pnl_df['all_time_trades'],
             })
             
-            # Format the display DataFrame
-            display_df = platformpnl_module.format_display_df(display_df)
+            # Calculate PNL per trade for each time period
+            for period in ['Today', 'Yesterday', 'Day Before', 'Week', 'All Time']:
+                trades_col = f'{period} Trades'
+                pnl_col = f'{period} PNL (USD)'
+                
+                # Only calculate ratio where trades > 0 to avoid division by zero
+                mask = (display_df[trades_col] > 0)
+                display_df[f'{period} PNL/Trade'] = 0.0
+                display_df.loc[mask, f'{period} PNL/Trade'] = (
+                    display_df.loc[mask, pnl_col] / display_df.loc[mask, trades_col]
+                ).round(2)
+            
+            # Format the display DataFrame if the module provides a formatting function
+            if hasattr(platformpnl_module, 'format_display_df'):
+                try:
+                    display_df = platformpnl_module.format_display_df(display_df)
+                except Exception as e:
+                    if debug_mode:
+                        st.error(f"Error formatting display DataFrame: {str(e)}")
             
             # Sort DataFrame by Today's PNL (descending)
             display_df = display_df.sort_values(by='Today PNL (USD)', ascending=False)
@@ -1535,213 +1387,244 @@ def render_platformpnl_dashboard():
                 # Apply styling
                 def color_pnl_cells(val):
                     """Color cells based on PNL value."""
-                    if pd.isna(val) or val == 0:
-                        return 'background-color: #f5f5f5; color: #666666;'  # Grey for missing/zero
-                    elif val < -1000:  # Large negative PNL (loss) - red
-                        return 'background-color: rgba(255, 0, 0, 0.9); color: white'
-                    elif val < 0:  # Small negative PNL (loss) - light red
-                        intensity = max(0, min(255, int(255 * abs(val) / 1000)))
-                        return f'background-color: rgba(255, {180-intensity}, {180-intensity}, 0.7); color: black'
-                    elif val < 1000:  # Small positive PNL (profit) - light green
-                        intensity = max(0, min(255, int(255 * val / 1000)))
-                        return f'background-color: rgba({180-intensity}, 255, {180-intensity}, 0.7); color: black'
-                    else:  # Large positive PNL (profit) - green
-                        return 'background-color: rgba(0, 200, 0, 0.8); color: black'
+                    try:
+                        val = float(val)
+                        if pd.isna(val) or val == 0:
+                            return 'background-color: #f5f5f5; color: #666666;'  # Grey for missing/zero
+                        elif val < -1000:  # Large negative PNL (loss) - red
+                            return 'background-color: rgba(255, 0, 0, 0.9); color: white'
+                        elif val < 0:  # Small negative PNL (loss) - light red
+                            intensity = max(0, min(255, int(255 * abs(val) / 1000)))
+                            return f'background-color: rgba(255, {180-intensity}, {180-intensity}, 0.7); color: black'
+                        elif val < 1000:  # Small positive PNL (profit) - light green
+                            intensity = max(0, min(255, int(255 * val / 1000)))
+                            return f'background-color: rgba({180-intensity}, 255, {180-intensity}, 0.7); color: black'
+                        else:  # Large positive PNL (profit) - green
+                            return 'background-color: rgba(0, 200, 0, 0.8); color: black'
+                    except (ValueError, TypeError):
+                        return ''
                 
-                styled_df = main_df.style.applymap(
-                    color_pnl_cells, 
-                    subset=['Today PNL (USD)', 'Yesterday PNL (USD)', 'Week PNL (USD)', 'All Time PNL (USD)']
-                ).format({
-                    'Today PNL (USD)': '${:,.2f}',
-                    'Yesterday PNL (USD)': '${:,.2f}',
-                    'Week PNL (USD)': '${:,.2f}',
-                    'All Time PNL (USD)': '${:,.2f}'
-                })
-                
-                # Display the styled DataFrame
-                st.dataframe(styled_df, height=600, use_container_width=True)
+                # Create styled DataFrame
+                try:
+                    styled_df = main_df.style.applymap(
+                        color_pnl_cells, 
+                        subset=['Today PNL (USD)', 'Yesterday PNL (USD)', 'Week PNL (USD)', 'All Time PNL (USD)']
+                    ).format({
+                        'Today PNL (USD)': '${:,.2f}',
+                        'Yesterday PNL (USD)': '${:,.2f}',
+                        'Week PNL (USD)': '${:,.2f}',
+                        'All Time PNL (USD)': '${:,.2f}'
+                    })
+                    
+                    # Display the styled DataFrame
+                    st.dataframe(styled_df, height=600, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Error styling dataframe: {str(e)}")
+                    # Fallback to unstyled display
+                    st.dataframe(main_df, height=600, use_container_width=True)
                 
                 # Create summary cards
                 st.subheader("Summary Statistics")
                 col1, col2, col3, col4 = st.columns(4)
                 
-                with col1:
-                    total_today_pnl = display_df['Today PNL (USD)'].sum()
-                    st.metric(
-                        "Total Today PNL", 
-                        f"${total_today_pnl:,.2f}", 
-                        delta=f"{(total_today_pnl - display_df['Yesterday PNL (USD)'].sum()):,.2f}"
-                    )
-                
-                with col2:
-                    total_yesterday_pnl = display_df['Yesterday PNL (USD)'].sum()
-                    st.metric(
-                        "Total Yesterday PNL", 
-                        f"${total_yesterday_pnl:,.2f}"
-                    )
-                
-                with col3:
-                    total_week_pnl = display_df['Week PNL (USD)'].sum()
-                    daily_avg = total_week_pnl / 7
-                    st.metric(
-                        "Week PNL (7 days)", 
-                        f"${total_week_pnl:,.2f}",
-                        delta=f"${daily_avg:,.2f}/day"
-                    )
-                
-                with col4:
-                    total_all_time_pnl = display_df['All Time PNL (USD)'].sum()
-                    st.metric(
-                        "All Time PNL", 
-                        f"${total_all_time_pnl:,.2f}"
-                    )
+                # Calculate summary stats with proper error handling
+                try:
+                    with col1:
+                        total_today_pnl = display_df['Today PNL (USD)'].sum()
+                        delta = (total_today_pnl - display_df['Yesterday PNL (USD)'].sum())
+                        st.metric(
+                            "Total Today PNL", 
+                            f"${total_today_pnl:,.2f}", 
+                            delta=f"${delta:,.2f}"
+                        )
+                    
+                    with col2:
+                        total_yesterday_pnl = display_df['Yesterday PNL (USD)'].sum()
+                        st.metric(
+                            "Total Yesterday PNL", 
+                            f"${total_yesterday_pnl:,.2f}"
+                        )
+                    
+                    with col3:
+                        total_week_pnl = display_df['Week PNL (USD)'].sum()
+                        daily_avg = total_week_pnl / 7
+                        st.metric(
+                            "Week PNL (7 days)", 
+                            f"${total_week_pnl:,.2f}",
+                            delta=f"${daily_avg:,.2f}/day"
+                        )
+                    
+                    with col4:
+                        total_all_time_pnl = display_df['All Time PNL (USD)'].sum()
+                        st.metric(
+                            "All Time PNL", 
+                            f"${total_all_time_pnl:,.2f}"
+                        )
+                except Exception as e:
+                    st.error(f"Error calculating summary statistics: {str(e)}")
                 
                 # Create a visualization of top and bottom performers today
                 st.subheader("Today's Top Performers")
                 
-                # Filter out zero PNL pairs
-                non_zero_today = display_df[display_df['Today PNL (USD)'] != 0].copy()
-                
-                # Get top 5 and bottom 5 performers
-                top_5 = non_zero_today.nlargest(5, 'Today PNL (USD)')
-                bottom_5 = non_zero_today.nsmallest(5, 'Today PNL (USD)')
-                
-                # Plot top and bottom performers
-                fig = go.Figure()
-                
-                # Top performers
-                fig.add_trace(go.Bar(
-                    x=top_5['Trading Pair'],
-                    y=top_5['Today PNL (USD)'],
-                    name='Top Performers',
-                    marker_color='green'
-                ))
-                
-                # Bottom performers
-                fig.add_trace(go.Bar(
-                    x=bottom_5['Trading Pair'],
-                    y=bottom_5['Today PNL (USD)'],
-                    name='Bottom Performers',
-                    marker_color='red'
-                ))
-                
-                fig.update_layout(
-                    title="Top and Bottom Performers Today",
-                    xaxis_title="Trading Pair",
-                    yaxis_title="PNL (USD)",
-                    barmode='group',
-                    height=500
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
+                try:
+                    # Filter out zero PNL pairs
+                    non_zero_today = display_df[display_df['Today PNL (USD)'] != 0].copy()
+                    
+                    if len(non_zero_today) > 0:
+                        # Get top 5 and bottom 5 performers
+                        top_5 = non_zero_today.nlargest(min(5, len(non_zero_today)), 'Today PNL (USD)')
+                        bottom_5 = non_zero_today.nsmallest(min(5, len(non_zero_today)), 'Today PNL (USD)')
+                        
+                        # Plot top and bottom performers
+                        fig = go.Figure()
+                        
+                        # Top performers
+                        fig.add_trace(go.Bar(
+                            x=top_5['Trading Pair'],
+                            y=top_5['Today PNL (USD)'],
+                            name='Top Performers',
+                            marker_color='green'
+                        ))
+                        
+                        # Bottom performers
+                        fig.add_trace(go.Bar(
+                            x=bottom_5['Trading Pair'],
+                            y=bottom_5['Today PNL (USD)'],
+                            name='Bottom Performers',
+                            marker_color='red'
+                        ))
+                        
+                        fig.update_layout(
+                            title="Top and Bottom Performers Today",
+                            xaxis_title="Trading Pair",
+                            yaxis_title="PNL (USD)",
+                            barmode='group',
+                            height=500
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("No non-zero PNL data available for today.")
+                except Exception as e:
+                    st.error(f"Error creating performance visualization: {str(e)}")
             
             with subtab2:
                 # Detailed View
                 st.subheader("Detailed PNL and Trade Data")
                 
                 # Create a detailed display DataFrame
-                detailed_df = display_df[['Trading Pair', 
-                                        'Today PNL (USD)', 'Today Trades', 'Today PNL/Trade',
-                                        'Yesterday PNL (USD)', 'Yesterday Trades', 'Yesterday PNL/Trade',
-                                        'Week PNL (USD)', 'Week Trades', 'Week PNL/Trade',
-                                        'All Time PNL (USD)', 'All Time Trades', 'All Time PNL/Trade']]
-                
-                # Apply styling
-                styled_detailed_df = detailed_df.style.applymap(
-                    color_pnl_cells, 
-                    subset=['Today PNL (USD)', 'Yesterday PNL (USD)', 'Week PNL (USD)', 'All Time PNL (USD)',
-                            'Today PNL/Trade', 'Yesterday PNL/Trade', 'Week PNL/Trade', 'All Time PNL/Trade']
-                ).format({
-                    'Today PNL (USD)': '${:,.2f}',
-                    'Yesterday PNL (USD)': '${:,.2f}',
-                    'Week PNL (USD)': '${:,.2f}',
-                    'All Time PNL (USD)': '${:,.2f}',
-                    'Today PNL/Trade': '${:,.2f}',
-                    'Yesterday PNL/Trade': '${:,.2f}',
-                    'Week PNL/Trade': '${:,.2f}',
-                    'All Time PNL/Trade': '${:,.2f}'
-                })
-                
-                # Display the styled DataFrame
-                st.dataframe(styled_detailed_df, height=600, use_container_width=True)
-                
-                # Additional visualizations can be added here
+                try:
+                    detailed_df = display_df[['Trading Pair', 
+                                            'Today PNL (USD)', 'Today Trades', 'Today PNL/Trade',
+                                            'Yesterday PNL (USD)', 'Yesterday Trades', 'Yesterday PNL/Trade',
+                                            'Week PNL (USD)', 'Week Trades', 'Week PNL/Trade',
+                                            'All Time PNL (USD)', 'All Time Trades', 'All Time PNL/Trade']]
+                    
+                    # Apply styling
+                    styled_detailed_df = detailed_df.style.applymap(
+                        color_pnl_cells, 
+                        subset=['Today PNL (USD)', 'Yesterday PNL (USD)', 'Week PNL (USD)', 'All Time PNL (USD)',
+                                'Today PNL/Trade', 'Yesterday PNL/Trade', 'Week PNL/Trade', 'All Time PNL/Trade']
+                    ).format({
+                        'Today PNL (USD)': '${:,.2f}',
+                        'Yesterday PNL (USD)': '${:,.2f}',
+                        'Week PNL (USD)': '${:,.2f}',
+                        'All Time PNL (USD)': '${:,.2f}',
+                        'Today PNL/Trade': '${:,.2f}',
+                        'Yesterday PNL/Trade': '${:,.2f}',
+                        'Week PNL/Trade': '${:,.2f}',
+                        'All Time PNL/Trade': '${:,.2f}'
+                    })
+                    
+                    # Display the styled DataFrame
+                    st.dataframe(styled_detailed_df, height=600, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Error creating detailed view: {str(e)}")
+                    # Fallback to a simplified view
+                    st.dataframe(display_df, height=600, use_container_width=True)
             
             with subtab3:
                 # Statistics & Insights
                 st.subheader("PNL Statistics and Insights")
                 
-                # Create a statistics DataFrame
-                stats_df = pd.DataFrame({
-                    'Metric': [
-                        'Total Trading Pairs',
-                        'Profitable Pairs Today',
-                        'Unprofitable Pairs Today',
-                        'Most Profitable Pair Today',
-                        'Least Profitable Pair Today',
-                        'Highest PNL/Trade Today',
-                        'Average PNL/Trade (All Pairs)',
-                        'Total Platform PNL Today',
-                        'Total Platform PNL Yesterday',
-                        'Week-to-Date PNL',
-                        'Estimated Monthly PNL (based on week)',
-                        'Total Trades Today',
-                        'Total Trades Yesterday',
-                        'Week-to-Date Trades'
-                    ],
-                    'Value': [
-                        len(display_df),
-                        len(display_df[display_df['Today PNL (USD)'] > 0]),
-                        len(display_df[display_df['Today PNL (USD)'] < 0]),
-                        display_df.loc[display_df['Today PNL (USD)'].idxmax()]['Trading Pair'] if not display_df.empty else 'N/A',
-                        display_df.loc[display_df['Today PNL (USD)'].idxmin()]['Trading Pair'] if not display_df.empty else 'N/A',
-                        f"${display_df['Today PNL/Trade'].max():.2f}" if 'Today PNL/Trade' in display_df.columns else 'N/A',
-                        f"${display_df['Today PNL/Trade'].mean():.2f}" if 'Today PNL/Trade' in display_df.columns else 'N/A',
-                        f"${display_df['Today PNL (USD)'].sum():.2f}",
-                        f"${display_df['Yesterday PNL (USD)'].sum():.2f}",
-                        f"${display_df['Week PNL (USD)'].sum():.2f}",
-                        f"${(display_df['Week PNL (USD)'].sum() / 7 * 30):.2f}",
-                        f"{display_df['Today Trades'].sum():,}",
-                        f"{display_df['Yesterday Trades'].sum():,}",
-                        f"{display_df['Week Trades'].sum():,}"
-                    ]
-                })
-                
-                # Display statistics
-                st.dataframe(stats_df, hide_index=True, height=400, use_container_width=True)
-                
-                # Visualize PNL breakdown by time period
-                st.subheader("PNL Breakdown by Time Period")
-                
-                # For Top 10 Pairs
-                top_10_pairs = display_df.nlargest(10, 'Week PNL (USD)')['Trading Pair'].tolist()
-                top_10_df = display_df[display_df['Trading Pair'].isin(top_10_pairs)].copy()
-                
-                # Prepare data for stacked bar chart
-                chart_data = []
-                for pair in top_10_pairs:
-                    pair_data = top_10_df[top_10_df['Trading Pair'] == pair].iloc[0]
-                    chart_data.append({
-                        'Trading Pair': pair,
-                        'Today': pair_data['Today PNL (USD)'],
-                        'Yesterday': pair_data['Yesterday PNL (USD)'],
-                        'Rest of Week': pair_data['Week PNL (USD)'] - pair_data['Today PNL (USD)'] - pair_data['Yesterday PNL (USD)']
+                try:
+                    # Create a statistics DataFrame
+                    stats_df = pd.DataFrame({
+                        'Metric': [
+                            'Total Trading Pairs',
+                            'Profitable Pairs Today',
+                            'Unprofitable Pairs Today',
+                            'Most Profitable Pair Today',
+                            'Least Profitable Pair Today',
+                            'Highest PNL/Trade Today',
+                            'Average PNL/Trade (All Pairs)',
+                            'Total Platform PNL Today',
+                            'Total Platform PNL Yesterday',
+                            'Week-to-Date PNL',
+                            'Estimated Monthly PNL (based on week)',
+                            'Total Trades Today',
+                            'Total Trades Yesterday',
+                            'Week-to-Date Trades'
+                        ],
+                        'Value': [
+                            len(display_df),
+                            len(display_df[display_df['Today PNL (USD)'] > 0]),
+                            len(display_df[display_df['Today PNL (USD)'] < 0]),
+                            display_df.loc[display_df['Today PNL (USD)'].idxmax()]['Trading Pair'] if not display_df.empty and display_df['Today PNL (USD)'].max() > 0 else 'N/A',
+                            display_df.loc[display_df['Today PNL (USD)'].idxmin()]['Trading Pair'] if not display_df.empty and display_df['Today PNL (USD)'].min() < 0 else 'N/A',
+                            f"${display_df['Today PNL/Trade'].max():.2f}" if 'Today PNL/Trade' in display_df.columns and not display_df.empty else 'N/A',
+                            f"${display_df['Today PNL/Trade'].mean():.2f}" if 'Today PNL/Trade' in display_df.columns and not display_df.empty else 'N/A',
+                            f"${display_df['Today PNL (USD)'].sum():.2f}",
+                            f"${display_df['Yesterday PNL (USD)'].sum():.2f}",
+                            f"${display_df['Week PNL (USD)'].sum():.2f}",
+                            f"${(display_df['Week PNL (USD)'].sum() / 7 * 30):.2f}",
+                            f"{display_df['Today Trades'].sum():,}",
+                            f"{display_df['Yesterday Trades'].sum():,}",
+                            f"{display_df['Week Trades'].sum():,}"
+                        ]
                     })
-                
-                chart_df = pd.DataFrame(chart_data)
-                
-                # Create the stacked bar chart
-                fig = px.bar(
-                    chart_df,
-                    x='Trading Pair',
-                    y=['Today', 'Yesterday', 'Rest of Week'],
-                    title='PNL Breakdown for Top 10 Pairs',
-                    labels={'value': 'PNL (USD)', 'variable': 'Time Period'},
-                    barmode='group'
-                )
-                
-                fig.update_layout(height=500)
-                st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Display statistics
+                    st.dataframe(stats_df, hide_index=True, height=400, use_container_width=True)
+                    
+                    # Visualize PNL breakdown by time period
+                    st.subheader("PNL Breakdown by Time Period")
+                    
+                    # For Top 10 Pairs
+                    top_10_pairs = display_df.nlargest(min(10, len(display_df)), 'Week PNL (USD)')['Trading Pair'].tolist()
+                    top_10_df = display_df[display_df['Trading Pair'].isin(top_10_pairs)].copy()
+                    
+                    if not top_10_df.empty:
+                        # Prepare data for stacked bar chart
+                        chart_data = []
+                        for _, row in top_10_df.iterrows():
+                            chart_data.append({
+                                'Trading Pair': row['Trading Pair'],
+                                'Today': row['Today PNL (USD)'],
+                                'Yesterday': row['Yesterday PNL (USD)'],
+                                'Rest of Week': row['Week PNL (USD)'] - row['Today PNL (USD)'] - row['Yesterday PNL (USD)']
+                            })
+                        
+                        chart_df = pd.DataFrame(chart_data)
+                        
+                        # Create the stacked bar chart
+                        fig = px.bar(
+                            chart_df,
+                            x='Trading Pair',
+                            y=['Today', 'Yesterday', 'Rest of Week'],
+                            title='PNL Breakdown for Top 10 Pairs',
+                            labels={'value': 'PNL (USD)', 'variable': 'Time Period'},
+                            barmode='group'
+                        )
+                        
+                        fig.update_layout(height=500)
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("No data available for PNL breakdown visualization.")
+                except Exception as e:
+                    st.error(f"Error creating statistics and insights: {str(e)}")
+                    if debug_mode:
+                        st.error(traceback.format_exc())
             
             # Add explanation of the dashboard
             with st.expander("Understanding the PNL Dashboard"):
@@ -1772,13 +1655,10 @@ def render_platformpnl_dashboard():
                 - **Statistics & Insights**: Trends, correlations, and deeper analysis
                 """)
         
-        # Restore the original functions
-        st.set_page_config = original_st_set_page_config
-        st.title = original_st_title
-        st.subheader = original_st_subheader
-        
     except Exception as e:
-        st.error(f"Error rendering Platform PNL dashboard: {e}")
+        st.error(f"Error rendering Platform PNL dashboard: {str(e)}")
+        if debug_mode:
+            st.error(traceback.format_exc())
 
 def render_all_in_one_dashboard():
     """Render a consolidated view of key metrics from all dashboards"""
@@ -1790,17 +1670,22 @@ def render_all_in_one_dashboard():
             st.markdown("## All-In-One Dashboard Overview")
             st.markdown("This dashboard provides a comprehensive view of key metrics from all dashboards in one place.")
             
+            # Display a message about implementation status
+            st.info("This consolidated dashboard is under development. Please use the individual tabs for complete functionality.")
+            
             # Create two columns for top metrics
             col1, col2 = st.columns(2)
             
             with col1:
                 st.markdown("### 📊 Market Overview")
-                # This would show a summary of market statistics, regime distributions, etc.
+                # Example visualization - replace with actual data integration when available
+                if "Macro_view" in imported_modules:
+                    st.success("Hurst data is available - integration pending")
+                    # Here we would add code to extract and visualize Hurst regime distribution
+                else:
+                    st.warning("Hurst data is not available - please run the Macro View tab first")
                 
-                # Placeholder for market data - you would integrate actual data here
-                st.info("Market summary will be integrated here, showing the distribution of market regimes, volatility levels, and spread metrics.")
-                
-                # Example visualization - replace with actual data integration
+                # Placeholder chart
                 labels = ['Mean-Reverting', 'Random Walk', 'Trending']
                 values = [30, 40, 30]  # Example values
                 
@@ -1812,7 +1697,7 @@ def render_all_in_one_dashboard():
                 )])
                 
                 fig.update_layout(
-                    title="Current Market Regime Distribution",
+                    title="Current Market Regime Distribution (Example)",
                     height=300
                 )
                 
@@ -1820,12 +1705,13 @@ def render_all_in_one_dashboard():
             
             with col2:
                 st.markdown("### 💰 Platform Performance")
-                # This would show a summary of PNL and trading metrics
+                if "platformpnl" in imported_modules:
+                    st.success("PNL data is available - integration pending")
+                    # Here we would add code to extract and visualize PNL data
+                else:
+                    st.warning("PNL data is not available - please run the Platform PNL tab first")
                 
-                # Placeholder for PNL data - you would integrate actual data here
-                st.info("Platform performance summary will be integrated here, showing total PNL, trade counts, and top performing pairs.")
-                
-                # Example visualization - replace with actual data integration
+                # Placeholder chart
                 x = ['Today', 'Yesterday', 'Day Before']
                 y = [5000, 4500, 6000]  # Example values
                 
@@ -1836,126 +1722,149 @@ def render_all_in_one_dashboard():
                 )])
                 
                 fig.update_layout(
-                    title="Platform PNL by Day",
+                    title="Platform PNL by Day (Example)",
                     height=300,
                     yaxis_title="PNL (USD)"
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
             
-            # Create tabs for different metric categories
-            subtab1, subtab2, subtab3 = st.tabs(["Market Metrics", "Trading Activity", "Opportunity Finder"])
+            # Add implementation roadmap
+            st.subheader("Integration Roadmap")
+            st.markdown("""
+            This All-In-One dashboard will eventually provide:
             
-            with subtab1:
-                st.markdown("### Market Metrics Dashboard")
-                
-                # Create columns for key metric displays
-                metric_col1, metric_col2, metric_col3 = st.columns(3)
-                
-                with metric_col1:
-                    st.markdown("#### Spread Analysis")
-                    st.info("Spread metrics will be displayed here, showing the best opportunities based on exchange price differences.")
-                
-                with metric_col2:
-                    st.markdown("#### Volatility Analysis")
-                    st.info("Volatility metrics will be displayed here, highlighting tokens with unusual price movement patterns.")
-                
-                with metric_col3:
-                    st.markdown("#### Hurst Analysis")
-                    st.info("Hurst exponent metrics will be displayed here, indicating which tokens are trending vs. mean-reverting.")
-            
-            with subtab2:
-                st.markdown("### Trading Activity Dashboard")
-                
-                # Create columns for trading metrics
-                trade_col1, trade_col2 = st.columns(2)
-                
-                with trade_col1:
-                    st.markdown("#### Recent Trading Volume")
-                    st.info("Recent trading volumes will be displayed here, showing the most active tokens.")
-                
-                with trade_col2:
-                    st.markdown("#### PNL Performance")
-                    st.info("PNL performance metrics will be displayed here, highlighting the most profitable trading pairs.")
-                
-                # Additional trading metrics
-                st.markdown("#### Trading Activity Heatmap")
-                st.info("A heatmap showing trading activity by time of day will be displayed here.")
-            
-            with subtab3:
-                st.markdown("### Opportunity Finder")
-                st.markdown("This tab helps identify potential trading opportunities based on combined metrics from all dashboards.")
-                
-                # Create sliders for filtering opportunities
-                st.subheader("Filter Criteria")
-                
-                vol_threshold = st.slider("Minimum Volatility (%)", 0, 100, 30, 5)
-                regime_options = st.multiselect("Market Regime", ["Mean-Reverting", "Random Walk", "Trending"], ["Trending"])
-                min_spread = st.slider("Minimum Spread Difference (bps)", 0, 50, 10, 1)
-                
-                # Button to find opportunities
-                if st.button("Find Opportunities", key="find_opps"):
-                    st.info("Opportunity finder will analyze cross-dashboard metrics and present potential trading setups based on your criteria.")
+            1. **Real-time Market Overview**: Combining Hurst exponent, volatility, and spread metrics
+            2. **Comprehensive Trading Performance**: Visualizing PNL, trade volumes, and key metrics
+            3. **Opportunity Finder**: Identifying potential trading setups based on cross-dashboard metrics
+            4. **Trend Analysis**: Tracking changes in market regimes and performance over time
+            """)
                     
-                    # Placeholder for opportunity results
-                    st.markdown("#### Potential Opportunities")
-                    
-                    # This would be an actual data table with opportunities
-                    opportunity_data = {
-                        "Token/Pair": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
-                        "Volatility": ["45%", "62%", "87%"],
-                        "Hurst": ["0.65", "0.72", "0.58"],
-                        "Best Spread": ["3.2 bps", "4.1 bps", "5.7 bps"],
-                        "PnL Trend": ["↑", "↑", "→"],
-                        "Strategy": ["Momentum", "Momentum", "Volatility Break"]
-                    }
-                    
-                    opportunity_df = pd.DataFrame(opportunity_data)
-                    st.dataframe(opportunity_df, use_container_width=True)
-            
-            # Disclaimer
-            st.markdown("---")
-            st.markdown("*Note: This All-In-One dashboard is a consolidated view. For more detailed analysis, please refer to the individual tabs.*")
-            
     except Exception as e:
-        st.error(f"Error rendering All-In-One dashboard: {e}")
+        st.error(f"Error rendering All-In-One dashboard: {str(e)}")
+        if debug_mode:
+            st.error(traceback.format_exc())
 
-# --- Utility Functions ---
-@st.cache_data(ttl=600, show_spinner="Fetching tokens...")
-def fetch_all_tokens(_engine):
-    """Fetch all available tokens from the database"""
-    query = """
-    SELECT DISTINCT pair_name 
-    FROM oracle_exchange_fee 
-    ORDER BY pair_name
-    """
+# --- Main Application ---
+def main():
+    # Title and current time
+    singapore_timezone = pytz.timezone('Asia/Singapore')
+    now_utc = datetime.now(pytz.utc)
+    now_sg = now_utc.astimezone(singapore_timezone)
+    
+    st.markdown('<div class="header-style">Unified Regime Dashboard Suite</div>', unsafe_allow_html=True)
+    st.markdown(f"Current Singapore Time: **{now_sg.strftime('%Y-%m-%d %H:%M:%S')}**")
+    
+    # Sidebar controls
+    st.sidebar.markdown('<div class="sidebar-header">Dashboard Controls</div>', unsafe_allow_html=True)
+    
+    # Debug Mode Toggle
+    global debug_mode
+    debug_mode = st.sidebar.checkbox("Debug Mode", value=False)
+    
+    # Global refresh button
+    if st.sidebar.button("🔄 Refresh All Dashboards", use_container_width=True, key="global_refresh"):
+        # Clear all cached data
+        st.cache_data.clear()
+        st.experimental_rerun()
+    
+    st.sidebar.markdown(f'<div class="last-refresh">Last global refresh: {now_sg.strftime("%H:%M:%S")}</div>', unsafe_allow_html=True)
+    
+    # Initialize database connection
+    global engine
+    engine = connect_to_database()
+    
+    # Test database connection
     try:
-        df = pd.read_sql(query, engine)
-        if df.empty:
-            st.error("No tokens found in the database.")
-            return []
-        return df['pair_name'].tolist()
+        with engine.connect() as conn:
+            result = conn.execute("SELECT 1")
+            st.sidebar.success("✅ Database connection active")
     except Exception as e:
-        st.error(f"Error fetching tokens: {e}")
-        print(f"Error fetching tokens: {e}")
-        return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]  # Default fallback
+        st.sidebar.error(f"Database connection error: {str(e)}")
+        st.error("Please check database connection to continue")
+        st.stop()
+    
+    # Import all required modules
+    if not import_all_modules():
+        st.warning("Some modules could not be imported. Some dashboard functionality may be limited.")
+    
+    # Create tabs
+    tabs = st.tabs([
+        "Exchange Spread Matrix", 
+        "Hurst matrix", 
+        "Volatility matrix", 
+        "PnL & Trades matrix (Daily)", 
+        "PnL Cumulative matrix",
+        "All-In-One"
+    ])
+    
+    # Render each tab
+    with tabs[0]:  # Exchange Spread Matrix
+        st.markdown("## Exchange Spread Matrix")
+        col1, col2 = st.columns([10, 1])
+        with col2:
+            if st.button("🔄", key="refresh_spread_matrix"):
+                # Clear cache for this specific module
+                st.cache_data.clear()
+                st.experimental_rerun()
+                
+        render_spread_matrix_dashboard()
+    
+    with tabs[1]:  # Macro View (Hurst)
+        st.markdown("## Macro View (Hurst Exponent)")
+        col1, col2 = st.columns([10, 1])
+        with col2:
+            if st.button("🔄", key="refresh_macro_view"):
+                # Clear cache for this specific module
+                st.cache_data.clear()
+                st.experimental_rerun()
+                
+        render_macro_view_dashboard()
+    
+    with tabs[2]:  # Vol & Hurst
+        st.markdown("## Volatility & Hurst")
+        col1, col2 = st.columns([10, 1])
+        with col2:
+            if st.button("🔄", key="refresh_vol_hurst"):
+                # Clear cache for this specific module
+                st.cache_data.clear()
+                st.experimental_rerun()
+                
+        render_volandhurst_dashboard()
+    
+    with tabs[3]:  # PnL & Trades
+        st.markdown("## PnL & Trades")
+        col1, col2 = st.columns([10, 1])
+        with col2:
+            if st.button("🔄", key="refresh_pnl_trades"):
+                # Clear cache for this specific module
+                st.cache_data.clear()
+                st.experimental_rerun()
+                
+        render_pnlandtrades_dashboard()
+    
+    with tabs[4]:  # PnL Cumulative
+        st.markdown("## Platform PnL Cumulative")
+        col1, col2 = st.columns([10, 1])
+        with col2:
+            if st.button("🔄", key="refresh_platform_pnl"):
+                # Clear cache for this specific module
+                st.cache_data.clear()
+                st.experimental_rerun()
+                
+        render_platformpnl_dashboard()
+    
+    with tabs[5]:  # All-In-One
+        st.markdown("## All-In-One Dashboard")
+        col1, col2 = st.columns([10, 1])
+        with col2:
+            if st.button("🔄", key="refresh_all_in_one"):
+                # Clear cache for this specific module
+                st.cache_data.clear()
+                st.experimental_rerun()
+                
+        render_all_in_one_dashboard()
 
-@st.cache_data(ttl=600, show_spinner="Fetching pairs...")
-def fetch_all_pairs(_engine):
-    """Fetch all available trading pairs from the database"""
-    query = "SELECT DISTINCT pair_name FROM public.trade_pool_pairs ORDER BY pair_name"
-    try:
-        df = pd.read_sql(query, engine)
-        if df.empty:
-            st.error("No pairs found in the database.")
-            return []
-        return df['pair_name'].tolist()
-    except Exception as e:
-        st.error(f"Error fetching pairs: {e}")
-        return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "PEPE/USDT"]  # Default fallback
-
-# --- Run the app ---
+# Run the app
 if __name__ == "__main__":
     main()
-                        
-            
