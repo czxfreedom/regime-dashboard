@@ -115,11 +115,11 @@ engine = connect_to_database()
 # Import all dashboard modules
 # These should be your existing Python files with modifications for integration
 try:
-    import Spread_matrix as spread_matrix_module
-    import Macro_view as macro_view_module
-    import Volandhurst as volandhurst_module
-    import Pnlandtrades as pnlandtrades_module
-    import platformpnlcumulative as platformpnl_module
+    import Spread_matrix
+    import Macro_view
+    import Volandhurst
+    import Pnlandtrades
+    import platformpnlcumulative
 except ImportError:
     st.error("Some dashboard modules could not be imported. Please check file paths and names.")
 
@@ -147,10 +147,10 @@ def main():
     # Create tabs
     tabs = st.tabs([
         "Exchange Spread Matrix", 
-        "Macro View (Hurst)", 
-        "Vol & Hurst", 
-        "PnL & Trades", 
-        "PnL Cumulative",
+        "Hurst matrix", 
+        "Volatility matrix", 
+        "PnL & Trades matrix (Daily)", 
+        "PnL Cumulative matrix",
         "All-In-One"
     ])
     
