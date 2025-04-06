@@ -1,11 +1,12 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
 import math
+import pytz
+from ib_insync import *
 
 # Set page configuration
 st.set_page_config(page_title="US Stocks Volatility Dashboard", layout="wide")
@@ -19,10 +20,33 @@ This dashboard analyzes realized volatility for major US stocks across different
 * **Tab 3**: Trading strategies and volatility analytics with 2-year backtest
 """)
 
+# Function to connect to Interactive Brokers
+@st.cache_resource
+def connect_to_ib():
+    ib = IB()
+    try:
+        # Try to connect to TWS
+        ib.connect('127.0.0.1', 7497, clientId=1)  # 7497 for TWS paper trading, 7496 for TWS real, 4002 for IB Gateway paper
+        st.sidebar.success("Connected to Interactive Brokers")
+        return ib
+    except:
+        try:
+            # Try to connect to IB Gateway
+            ib.connect('127.0.0.1', 4001, clientId=1)  # 4001 for IB Gateway real
+            st.sidebar.success("Connected to Interactive Brokers Gateway")
+            return ib
+        except Exception as e:
+            st.sidebar.error(f"Failed to connect to Interactive Brokers: {str(e)}")
+            st.sidebar.info("Make sure TWS or IB Gateway is running and API connections are enabled")
+            return None
+
 # Sidebar for stock selection
 st.sidebar.header("Settings")
 ticker_options = ["SPY", "QQQ", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "NVDA", "AMD"]
 selected_ticker = st.sidebar.selectbox("Select stock:", ticker_options)
+    
+# Connect to IB when the app starts
+ib = connect_to_ib()
 
 # Function to calculate realized volatility
 def calculate_realized_volatility(returns, window, sampling_rate):
@@ -39,18 +63,51 @@ def calculate_realized_volatility(returns, window, sampling_rate):
     
     return realized_vol
 
-# Function to fetch and prepare data
-@st.cache_data(ttl=3600)  # Cache data for 1 hour
-def get_stock_data(ticker, period, interval):
-    data = yf.download(ticker, period=period, interval=interval)
-    if data.empty:
-        st.error(f"No data available for {ticker} with interval {interval} for period {period}.")
+# Function to fetch historical data from Interactive Brokers
+def get_ib_historical_data(ib, ticker, duration, bar_size):
+    """
+    Fetch historical data from Interactive Brokers
+    
+    Parameters:
+    ib: IB connection
+    ticker: Stock symbol
+    duration: e.g., '2 D', '1 W', '2 Y'
+    bar_size: e.g., '5 mins', '30 mins', '1 day'
+    
+    Returns:
+    pandas DataFrame with historical data
+    """
+    if ib is None:
         return None
     
-    # Calculate returns
-    data['returns'] = data['Close'].pct_change()
+    # Create contract
+    contract = Stock(ticker, 'SMART', 'USD')
     
-    return data
+    try:
+        # Request historical data
+        bars = ib.reqHistoricalData(
+            contract,
+            endDateTime='',  # '' for latest data
+            durationStr=duration,
+            barSizeSetting=bar_size,
+            whatToShow='TRADES',
+            useRTH=True
+        )
+        
+        # Convert to DataFrame
+        if bars:
+            df = util.df(bars)
+            # Convert time to datetime with Eastern Time Zone
+            df['date'] = pd.to_datetime(df['date'])
+            # Calculate returns
+            df['returns'] = df['close'].pct_change()
+            return df
+        else:
+            st.error(f"No data returned for {ticker}")
+            return None
+    except Exception as e:
+        st.error(f"Error fetching data for {ticker}: {str(e)}")
+        return None
 
 # Function to compute backtest metrics including profit factor
 def compute_backtest_metrics(returns):
@@ -136,925 +193,826 @@ def compute_backtest_metrics(returns):
 # Create tabs
 tab1, tab2, tab3 = st.tabs(["5-Min Vol (24h)", "30-Min Vol (7d)", "Trading Strategies"])
 
-# Tab 1: 5-minute sampling volatility averaged over 30 minutes (last 24 hours)
-with tab1:
-    st.header(f"5-Minute Sampling Volatility for {selected_ticker}")
-    st.subheader("Averaged over 30 minutes (Last 24 hours)")
-    
-    # Get 5-minute data for the last 2 days (to ensure we have a full 24 hours)
-    data_5min = get_stock_data(selected_ticker, "2d", "5m")
-    
-    if data_5min is not None:
-        # Keep only last 24 hours of data
-        last_24h = datetime.now() - timedelta(days=1)
-        data_5min = data_5min[data_5min.index > last_24h]
+# Check if IB connection is available
+if ib is None:
+    st.error("Interactive Brokers connection is required. Please make sure TWS or IB Gateway is running.")
+else:
+    # Tab 1: 5-minute sampling volatility averaged over 30 minutes (last 24 hours)
+    with tab1:
+        st.header(f"5-Minute Sampling Volatility for {selected_ticker}")
+        st.subheader("Averaged over 30 minutes (Last 24 hours)")
         
-        if len(data_5min) > 0:
-            # Calculate 5-min realized volatility (6 periods = 30 minutes)
-            data_5min['realized_vol'] = calculate_realized_volatility(data_5min['returns'], window=6, sampling_rate=5)
+        # Get 5-minute data for the last 2 days
+        data_5min = get_ib_historical_data(ib, selected_ticker, "2 D", "5 mins")
+        
+        if data_5min is not None and not data_5min.empty:
+            # Set index to date column
+            data_5min = data_5min.set_index('date')
             
-            # Create plots
-            fig1 = go.Figure()
+            # Keep only last 24 hours of data
+            last_24h = datetime.now(pytz.timezone('US/Eastern')) - timedelta(days=1)
+            data_5min = data_5min[data_5min.index > last_24h]
             
-            # Add price line
-            fig1.add_trace(go.Scatter(
-                x=data_5min.index,
-                y=data_5min['Close'],
-                name='Price',
-                line=dict(color='blue')
-            ))
-            
-            # Create a secondary y-axis for volatility
-            fig1.update_layout(
-                yaxis=dict(title='Price'),
-                yaxis2=dict(title='Volatility (%)', overlaying='y', side='right')
-            )
-            
-            # Add volatility line
-            fig1.add_trace(go.Scatter(
-                x=data_5min.index,
-                y=data_5min['realized_vol'],
-                name='30-min Avg Volatility',
-                line=dict(color='red'),
-                yaxis='y2'
-            ))
-            
-            fig1.update_layout(
-                title='Price vs. Realized Volatility (5-min sampling)',
-                height=600,
-                hovermode='x unified',
-                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
-            )
-            
-            st.plotly_chart(fig1, use_container_width=True)
-            
-            # Show statistics
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                current_vol = data_5min['realized_vol'].dropna().iloc[-1]
-                st.metric("Current Volatility", f"{current_vol:.2f}%")
-            
-            with col2:
-                avg_vol = data_5min['realized_vol'].dropna().mean()
-                st.metric("Average 24h Volatility", f"{avg_vol:.2f}%")
-            
-            with col3:
-                max_vol = data_5min['realized_vol'].dropna().max()
-                st.metric("Max 24h Volatility", f"{max_vol:.2f}%")
-            
-            # Hourly breakdown table
-            st.subheader("Hourly Volatility Breakdown")
-            data_5min['hour'] = data_5min.index.hour
-            hourly_vol = data_5min.groupby('hour')['realized_vol'].mean().reset_index()
-            hourly_vol.columns = ['Hour', 'Average Volatility (%)']
-            hourly_vol['Hour'] = hourly_vol['Hour'].apply(lambda x: f"{x:02d}:00")
-            hourly_vol['Average Volatility (%)'] = hourly_vol['Average Volatility (%)'].apply(lambda x: f"{x:.2f}%")
-            st.dataframe(hourly_vol, use_container_width=True)
+            if len(data_5min) > 0:
+                # Calculate 5-min realized volatility (6 periods = 30 minutes)
+                data_5min['realized_vol'] = calculate_realized_volatility(data_5min['returns'], window=6, sampling_rate=5)
+                
+                # Create plots
+                fig1 = go.Figure()
+                
+                # Add price line
+                fig1.add_trace(go.Scatter(
+                    x=data_5min.index,
+                    y=data_5min['close'],
+                    name='Price',
+                    line=dict(color='blue')
+                ))
+                
+                # Create a secondary y-axis for volatility
+                fig1.update_layout(
+                    yaxis=dict(title='Price'),
+                    yaxis2=dict(title='Volatility (%)', overlaying='y', side='right')
+                )
+                
+                # Add volatility line
+                fig1.add_trace(go.Scatter(
+                    x=data_5min.index,
+                    y=data_5min['realized_vol'],
+                    name='30-min Avg Volatility',
+                    line=dict(color='red'),
+                    yaxis='y2'
+                ))
+                
+                fig1.update_layout(
+                    title='Price vs. Realized Volatility (5-min sampling)',
+                    height=600,
+                    hovermode='x unified',
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+                )
+                
+                st.plotly_chart(fig1, use_container_width=True)
+                
+                # Show statistics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    current_vol = data_5min['realized_vol'].dropna().iloc[-1]
+                    st.metric("Current Volatility", f"{current_vol:.2f}%")
+                
+                with col2:
+                    avg_vol = data_5min['realized_vol'].dropna().mean()
+                    st.metric("Average 24h Volatility", f"{avg_vol:.2f}%")
+                
+                with col3:
+                    max_vol = data_5min['realized_vol'].dropna().max()
+                    st.metric("Max 24h Volatility", f"{max_vol:.2f}%")
+                
+                # Hourly breakdown table
+                st.subheader("Hourly Volatility Breakdown")
+                data_5min['hour'] = data_5min.index.hour
+                hourly_vol = data_5min.groupby('hour')['realized_vol'].mean().reset_index()
+                hourly_vol.columns = ['Hour', 'Average Volatility (%)']
+                hourly_vol['Hour'] = hourly_vol['Hour'].apply(lambda x: f"{x:02d}:00")
+                hourly_vol['Average Volatility (%)'] = hourly_vol['Average Volatility (%)'].apply(lambda x: f"{x:.2f}%")
+                st.dataframe(hourly_vol, use_container_width=True)
+            else:
+                st.warning("Not enough 5-minute data available for the last 24 hours.")
         else:
-            st.warning("Not enough 5-minute data available for the last 24 hours.")
-    else:
-        st.error("Failed to fetch 5-minute data for selected ticker.")
-
-# Tab 2: 30-minute sampling volatility averaged over 1 day (last 7 days)
-with tab2:
-    st.header(f"30-Minute Sampling Volatility for {selected_ticker}")
-    st.subheader("Averaged over 1 day (Last 7 days)")
+            st.error("Failed to fetch 5-minute data for selected ticker.")
     
-    # Get 30-minute data for the last 7 days
-    data_30min = get_stock_data(selected_ticker, "10d", "30m")
-    
-    if data_30min is not None:
-        # Keep only last 7 days of data
-        last_7d = datetime.now() - timedelta(days=7)
-        data_30min = data_30min[data_30min.index > last_7d]
+    # Tab 2: 30-minute sampling volatility averaged over 1 day (last 7 days)
+    with tab2:
+        st.header(f"30-Minute Sampling Volatility for {selected_ticker}")
+        st.subheader("Averaged over 1 day (Last 7 days)")
         
-        if len(data_30min) > 0:
-            # Calculate 30-min realized volatility (48 periods = 1 day (24 hours))
-            data_30min['realized_vol'] = calculate_realized_volatility(data_30min['returns'], window=16, sampling_rate=30)
+        # Get 30-minute data for the last 10 days (to ensure we have a full 7 days)
+        data_30min = get_ib_historical_data(ib, selected_ticker, "10 D", "30 mins")
+        
+        if data_30min is not None and not data_30min.empty:
+            # Set index to date column
+            data_30min = data_30min.set_index('date')
             
-            # Create plots
-            fig2 = go.Figure()
+            # Keep only last 7 days of data
+            last_7d = datetime.now(pytz.timezone('US/Eastern')) - timedelta(days=7)
+            data_30min = data_30min[data_30min.index > last_7d]
             
-            # Add price line
-            fig2.add_trace(go.Scatter(
-                x=data_30min.index,
-                y=data_30min['Close'],
-                name='Price',
-                line=dict(color='blue')
-            ))
-            
-            # Create a secondary y-axis for volatility
-            fig2.update_layout(
-                yaxis=dict(title='Price'),
-                yaxis2=dict(title='Volatility (%)', overlaying='y', side='right')
-            )
-            
-            # Add volatility line
-            fig2.add_trace(go.Scatter(
-                x=data_30min.index,
-                y=data_30min['realized_vol'],
-                name='1-day Avg Volatility',
-                line=dict(color='red'),
-                yaxis='y2'
-            ))
-            
-            fig2.update_layout(
-                title='Price vs. Realized Volatility (30-min sampling)',
-                height=600,
-                hovermode='x unified',
-                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
-            )
-            
-            st.plotly_chart(fig2, use_container_width=True)
-            
-            # Show statistics
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                current_vol = data_30min['realized_vol'].dropna().iloc[-1]
-                st.metric("Current Volatility", f"{current_vol:.2f}%")
-            
-            with col2:
-                avg_vol = data_30min['realized_vol'].dropna().mean()
-                st.metric("Average 7d Volatility", f"{avg_vol:.2f}%")
-            
-            with col3:
-                max_vol = data_30min['realized_vol'].dropna().max()
-                st.metric("Max 7d Volatility", f"{max_vol:.2f}%")
-            
-            # Daily breakdown table
-            st.subheader("Daily Volatility Breakdown")
-            data_30min['date'] = data_30min.index.date
-            daily_vol = data_30min.groupby('date')['realized_vol'].mean().reset_index()
-            daily_vol.columns = ['Date', 'Average Volatility (%)']
-            daily_vol['Average Volatility (%)'] = daily_vol['Average Volatility (%)'].apply(lambda x: f"{x:.2f}%")
-            st.dataframe(daily_vol, use_container_width=True)
-            
-            # Volatility distribution
-            st.subheader("Volatility Distribution")
-            fig_hist = px.histogram(
-                data_30min.dropna(), 
-                x='realized_vol',
-                nbins=20,
-                labels={'realized_vol': 'Realized Volatility (%)'},
-                title='Distribution of 30-Min Volatility over Last 7 Days'
-            )
-            st.plotly_chart(fig_hist, use_container_width=True)
+            if len(data_30min) > 0:
+                # Calculate 30-min realized volatility (16 periods ~= 1 trading day of 8 hours)
+                data_30min['realized_vol'] = calculate_realized_volatility(data_30min['returns'], window=16, sampling_rate=30)
+                
+                # Create plots
+                fig2 = go.Figure()
+                
+                # Add price line
+                fig2.add_trace(go.Scatter(
+                    x=data_30min.index,
+                    y=data_30min['close'],
+                    name='Price',
+                    line=dict(color='blue')
+                ))
+                
+                # Create a secondary y-axis for volatility
+                fig2.update_layout(
+                    yaxis=dict(title='Price'),
+                    yaxis2=dict(title='Volatility (%)', overlaying='y', side='right')
+                )
+                
+                # Add volatility line
+                fig2.add_trace(go.Scatter(
+                    x=data_30min.index,
+                    y=data_30min['realized_vol'],
+                    name='1-day Avg Volatility',
+                    line=dict(color='red'),
+                    yaxis='y2'
+                ))
+                
+                fig2.update_layout(
+                    title='Price vs. Realized Volatility (30-min sampling)',
+                    height=600,
+                    hovermode='x unified',
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+                )
+                
+                st.plotly_chart(fig2, use_container_width=True)
+                
+                # Show statistics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    current_vol = data_30min['realized_vol'].dropna().iloc[-1]
+                    st.metric("Current Volatility", f"{current_vol:.2f}%")
+                
+                with col2:
+                    avg_vol = data_30min['realized_vol'].dropna().mean()
+                    st.metric("Average 7d Volatility", f"{avg_vol:.2f}%")
+                
+                with col3:
+                    max_vol = data_30min['realized_vol'].dropna().max()
+                    st.metric("Max 7d Volatility", f"{max_vol:.2f}%")
+                
+                # Daily breakdown table
+                st.subheader("Daily Volatility Breakdown")
+                data_30min['date'] = data_30min.index.date
+                daily_vol = data_30min.groupby('date')['realized_vol'].mean().reset_index()
+                daily_vol.columns = ['Date', 'Average Volatility (%)']
+                daily_vol['Average Volatility (%)'] = daily_vol['Average Volatility (%)'].apply(lambda x: f"{x:.2f}%")
+                st.dataframe(daily_vol, use_container_width=True)
+                
+                # Volatility distribution
+                st.subheader("Volatility Distribution")
+                fig_hist = px.histogram(
+                    data_30min.dropna(), 
+                    x='realized_vol',
+                    nbins=20,
+                    labels={'realized_vol': 'Realized Volatility (%)'},
+                    title='Distribution of 30-Min Volatility over Last 7 Days'
+                )
+                st.plotly_chart(fig_hist, use_container_width=True)
+            else:
+                st.warning("Not enough 30-minute data available for the last 7 days.")
         else:
-            st.warning("Not enough 30-minute data available for the last 7 days.")
-    else:
-        st.error("Failed to fetch 30-minute data for selected ticker.")
-
-# Tab 3: Trading strategies and analytics
-with tab3:
-    st.header("Volatility-Based Trading Strategies")
+            st.error("Failed to fetch 30-minute data for selected ticker.")
     
-    # Fetch daily data for a 2-year historical period for thorough backtest
-    historical_data = get_stock_data(selected_ticker, "2y", "1d")
-    
-    if historical_data is not None:
-        # Calculate different volatility measures
-        historical_data['10d_vol'] = calculate_realized_volatility(historical_data['returns'], window=10, sampling_rate=1440)
-        historical_data['20d_vol'] = calculate_realized_volatility(historical_data['returns'], window=20, sampling_rate=1440)
-        historical_data['vol_ratio'] = historical_data['10d_vol'] / historical_data['20d_vol']
+    # Tab 3: Trading strategies and analytics
+    with tab3:
+        st.header("Volatility-Based Trading Strategies")
         
-        # Add some additional volatility metrics for more sophisticated strategies
-        historical_data['5d_vol'] = calculate_realized_volatility(historical_data['returns'], window=5, sampling_rate=1440)
-        historical_data['30d_vol'] = calculate_realized_volatility(historical_data['returns'], window=30, sampling_rate=1440)
-        historical_data['60d_vol'] = calculate_realized_volatility(historical_data['returns'], window=60, sampling_rate=1440)
-        historical_data['vol_zscore'] = (historical_data['10d_vol'] - historical_data['10d_vol'].rolling(60).mean()) / historical_data['10d_vol'].rolling(60).std()
+        # Fetch daily data for a 2-year historical period for thorough backtest
+        historical_data = get_ib_historical_data(ib, selected_ticker, "2 Y", "1 day")
         
-        st.subheader("Volatility Term Structure")
-        
-        # Volatility term structure visualization
-        fig_term = go.Figure()
-        
-        fig_term.add_trace(go.Scatter(
-            x=historical_data.index,
-            y=historical_data['10d_vol'],
-            name='10-Day Volatility',
-            line=dict(color='blue')
-        ))
-        
-        fig_term.add_trace(go.Scatter(
-            x=historical_data.index,
-            y=historical_data['20d_vol'],
-            name='20-Day Volatility',
-            line=dict(color='green')
-        ))
-        
-        fig_term.add_trace(go.Scatter(
-            x=historical_data.index,
-            y=historical_data['vol_ratio'] * 10,  # Scale for visibility
-            name='Vol Ratio (10d/20d) x10',
-            line=dict(color='red', dash='dash'),
-            yaxis='y2'
-        ))
-        
-        fig_term.update_layout(
-            title='Volatility Term Structure',
-            height=500,
-            yaxis=dict(title='Volatility (%)'),
-            yaxis2=dict(title='Ratio (scaled)', overlaying='y', side='right'),
-            hovermode='x unified',
-            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
-        )
-        
-        st.plotly_chart(fig_term, use_container_width=True)
-        
-        # Strategy selector and backtest
-        st.subheader("2-Year Backtested Volatility Trading Strategies")
-        
-        strategy_option = st.selectbox(
-            "Select a volatility-based trading strategy:",
-            ["Mean Reversion on High Volatility", "Volatility Breakout Momentum", "Volatility Regime Switching", 
-             "Volatility Term Structure", "Volatility Range Breakout"]
-        )
-        
-        # Create placeholder for all strategies' backtests
-        all_strategies_results = {}
-        
-        # Strategy 1: Mean Reversion on High Volatility
-        historical_data['vol_z_score'] = (historical_data['10d_vol'] - historical_data['10d_vol'].rolling(60).mean()) / historical_data['10d_vol'].rolling(60).std()
-        historical_data['mean_reversion_signal'] = np.where(historical_data['vol_z_score'] > 1.5, -1, 0)
-        historical_data['mean_reversion_signal'] = np.where(historical_data['vol_z_score'] < 0, 1, historical_data['mean_reversion_signal'])
-        historical_data['mean_reversion_signal'] = historical_data['mean_reversion_signal'].shift(1)
-        historical_data['mean_reversion_return'] = historical_data['mean_reversion_signal'] * historical_data['returns']
-        all_strategies_results['Mean Reversion'] = compute_backtest_metrics(historical_data['mean_reversion_return'].dropna())
-        
-        # Strategy 2: Volatility Breakout Momentum
-        historical_data['vol_change_pct'] = historical_data['10d_vol'].pct_change() * 100
-        historical_data['price_direction'] = np.sign(historical_data['returns'])
-        historical_data['breakout_signal'] = np.where(historical_data['vol_change_pct'] > 30, historical_data['price_direction'], 0)
-        historical_data['breakout_signal'] = historical_data['breakout_signal'].shift(1)
-        historical_data['breakout_return'] = historical_data['breakout_signal'] * historical_data['returns']
-        all_strategies_results['Volatility Breakout'] = compute_backtest_metrics(historical_data['breakout_return'].dropna())
-        
-        # Strategy 3: Volatility Regime Switching
-        low_vol = historical_data['10d_vol'].rolling(60).quantile(0.25)
-        high_vol = historical_data['10d_vol'].rolling(60).quantile(0.75)
-        
-        historical_data['regime'] = np.where(historical_data['10d_vol'] <= low_vol, 'low', 
-                                     np.where(historical_data['10d_vol'] >= high_vol, 'high', 'medium'))
-        
-        historical_data['regime_signal'] = np.where(historical_data['regime'] == 'low', 
-                                     np.sign(historical_data['returns'].rolling(5).mean()), 
-                                     np.where(historical_data['regime'] == 'high', 
-                                             -np.sign(historical_data['returns']), 0))
-        
-        historical_data['regime_signal'] = historical_data['regime_signal'].shift(1)
-        historical_data['regime_return'] = historical_data['regime_signal'] * historical_data['returns']
-        all_strategies_results['Regime Switching'] = compute_backtest_metrics(historical_data['regime_return'].dropna())
-        
-        # Strategy 4: Volatility Term Structure
-        historical_data['term_signal'] = np.where(historical_data['vol_ratio'] > 1.1, 1, 
-                                        np.where(historical_data['vol_ratio'] < 0.9, -1, 0))
-        historical_data['term_signal'] = historical_data['term_signal'].shift(1)
-        historical_data['term_return'] = historical_data['term_signal'] * historical_data['returns']
-        all_strategies_results['Term Structure'] = compute_backtest_metrics(historical_data['term_return'].dropna())
-        
-        # Strategy 5: Volatility Range Breakout
-        historical_data['vol_upper'] = historical_data['10d_vol'].rolling(20).mean() + 2 * historical_data['10d_vol'].rolling(20).std()
-        historical_data['vol_lower'] = historical_data['10d_vol'].rolling(20).mean() - 2 * historical_data['10d_vol'].rolling(20).std()
-        
-        historical_data['range_signal'] = np.where(historical_data['10d_vol'] > historical_data['vol_upper'], -1,
-                                         np.where(historical_data['10d_vol'] < historical_data['vol_lower'], 1, 0))
-        historical_data['range_signal'] = historical_data['range_signal'].shift(1)
-        historical_data['range_return'] = historical_data['range_signal'] * historical_data['returns']
-        all_strategies_results['Range Breakout'] = compute_backtest_metrics(historical_data['range_return'].dropna())
-        
-        # Determine active strategy based on selection
-        if strategy_option == "Mean Reversion on High Volatility":
-            active_strategy = "mean_reversion"
-            strategy_signal = historical_data['mean_reversion_signal']
-            strategy_returns = historical_data['mean_reversion_return']
-            strategy_metrics = all_strategies_results['Mean Reversion']
+        if historical_data is not None and not historical_data.empty:
+            # Set index to date column
+            historical_data = historical_data.set_index('date')
             
-            # Show strategy description
-            st.markdown("""
-            ### Mean Reversion Strategy
+            # Calculate different volatility measures
+            historical_data['10d_vol'] = calculate_realized_volatility(historical_data['returns'], window=10, sampling_rate=1440)
+            historical_data['20d_vol'] = calculate_realized_volatility(historical_data['returns'], window=20, sampling_rate=1440)
+            historical_data['vol_ratio'] = historical_data['10d_vol'] / historical_data['20d_vol']
             
-            This strategy assumes that periods of high volatility tend to revert to the mean. It:
-            - Goes short when volatility is significantly higher than its historical average (Z-score > 1.5)
-            - Goes long when volatility returns to normal levels (Z-score < 0)
-            - Remains neutral in between these thresholds
+            # Add some additional volatility metrics for more sophisticated strategies
+            historical_data['5d_vol'] = calculate_realized_volatility(historical_data['returns'], window=5, sampling_rate=1440)
+            historical_data['30d_vol'] = calculate_realized_volatility(historical_data['returns'], window=30, sampling_rate=1440)
+            historical_data['60d_vol'] = calculate_realized_volatility(historical_data['returns'], window=60, sampling_rate=1440)
+            historical_data['vol_zscore'] = (historical_data['10d_vol'] - historical_data['10d_vol'].rolling(60).mean()) / historical_data['10d_vol'].rolling(60).std()
             
-            The strategy is based on the tendency of volatility to cluster but eventually revert to its long-term average.
-            """)
+            st.subheader("Volatility Term Structure")
             
-            # Strategy parameters
-            vol_threshold = st.slider("Volatility Threshold (Z-score)", 1.0, 3.0, 1.5, 0.1)
-            st.info(f"The strategy goes short when volatility Z-score exceeds {vol_threshold} and goes long when it falls below 0.")
+            # Volatility term structure visualization
+            fig_term = go.Figure()
             
-        elif strategy_option == "Volatility Breakout Momentum":
-            active_strategy = "breakout"
-            strategy_signal = historical_data['breakout_signal']
-            strategy_returns = historical_data['breakout_return']
-            strategy_metrics = all_strategies_results['Volatility Breakout']
-            
-            st.markdown("""
-            ### Volatility Breakout Strategy
-            
-            This strategy capitalizes on momentum following volatility breakouts:
-            - When volatility increases significantly (>30% day-over-day), it follows the prevailing price direction
-            - Takes no position when volatility is stable or declining
-            
-            The strategy is based on the observation that sharp volatility increases often signal the start of a strong directional move.
-            """)
-            
-            # Parameters
-            breakout_threshold = st.slider("Volatility Breakout Threshold (%)", 10, 100, 30, 5)
-            st.info(f"The strategy takes a position in the direction of the price move when volatility increases by more than {breakout_threshold}%.")
-            
-        elif strategy_option == "Volatility Regime Switching":
-            active_strategy = "regime"
-            strategy_signal = historical_data['regime_signal']
-            strategy_returns = historical_data['regime_return']
-            strategy_metrics = all_strategies_results['Regime Switching']
-            
-            st.markdown("""
-            ### Volatility Regime Switching Strategy
-            
-            This strategy adapts to different volatility regimes:
-            - In low volatility regimes (bottom 25%), it follows trends (5-day momentum)
-            - In high volatility regimes (top 25%), it takes counter-trend positions
-            - In medium volatility regimes, it stays neutral
-            
-            The strategy is based on research showing that different trading approaches work better in different volatility environments.
-            """)
-            
-            # Parameters
-            low_vol_threshold = st.slider("Low Volatility Threshold (percentile)", 0, 50, 25, 5)
-            high_vol_threshold = st.slider("High Volatility Threshold (percentile)", 50, 100, 75, 5)
-            st.info(f"The strategy uses trend-following in low volatility (below {low_vol_threshold}th percentile) and counter-trend in high volatility (above {high_vol_threshold}th percentile).")
-            
-        elif strategy_option == "Volatility Term Structure":
-            active_strategy = "term"
-            strategy_signal = historical_data['term_signal']
-            strategy_returns = historical_data['term_return']
-            strategy_metrics = all_strategies_results['Term Structure']
-            
-            st.markdown("""
-            ### Volatility Term Structure Strategy
-            
-            This strategy trades based on the relationship between short and long-term volatility:
-            - Goes long when short-term volatility (10-day) is significantly higher than long-term volatility (20-day)
-            - Goes short when short-term volatility is significantly lower than long-term volatility
-            - Stays neutral when the volatility term structure is flat
-            
-            The strategy is based on the forward-looking expectations implied by the volatility term structure.
-            """)
-            
-            # Parameters
-            term_high = st.slider("Upper Term Structure Threshold", 1.0, 1.5, 1.1, 0.05)
-            term_low = st.slider("Lower Term Structure Threshold", 0.5, 1.0, 0.9, 0.05)
-            st.info(f"The strategy goes long when 10d/20d vol ratio > {term_high} and short when 10d/20d vol ratio < {term_low}.")
-            
-        elif strategy_option == "Volatility Range Breakout":
-            active_strategy = "range"
-            strategy_signal = historical_data['range_signal']
-            strategy_returns = historical_data['range_return']
-            strategy_metrics = all_strategies_results['Range Breakout']
-            
-            st.markdown("""
-            ### Volatility Range Breakout Strategy
-            
-            This strategy trades based on significant deviations from the recent volatility range:
-            - Goes short when volatility breaks above its upper range (mean + 2 std)
-            - Goes long when volatility breaks below its lower range (mean - 2 std)
-            - Stays neutral when volatility is within its normal range
-            
-            The strategy is based on statistical mean reversion principles applied to volatility.
-            """)
-            
-            # Parameters
-            std_range = st.slider("Standard Deviation Range", 1.0, 3.0, 2.0, 0.1)
-            st.info(f"The strategy uses a range of mean ± {std_range} standard deviations to determine breakouts.")
-        
-        # Calculate buy & hold returns for comparison
-        historical_data['buy_hold_cumret'] = (1 + historical_data['returns'].fillna(0)).cumprod() - 1
-        historical_data[f'{active_strategy}_cumret'] = (1 + historical_data[f'{active_strategy}_return'].fillna(0)).cumprod() - 1
-        
-        # Compare strategy performance with buy & hold
-        st.subheader("Strategy Performance")
-        
-        # Plot cumulative returns
-        fig_perf = go.Figure()
-        
-        fig_perf.add_trace(go.Scatter(
-            x=historical_data.index,
-            y=historical_data[f'{active_strategy}_cumret'] * 100,
-            name='Strategy Returns (%)',
-            line=dict(color='green')
-        ))
-        
-        fig_perf.add_trace(go.Scatter(
-            x=historical_data.index,
-            y=historical_data['buy_hold_cumret'] * 100,
-            name='Buy & Hold Returns (%)',
-            line=dict(color='gray')
-        ))
-        
-        fig_perf.update_layout(
-            title='Strategy Performance vs. Buy & Hold (2-Year Backtest)',
-            height=500,
-            yaxis=dict(title='Cumulative Return (%)'),
-            hovermode='x unified',
-            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
-        )
-        
-        st.plotly_chart(fig_perf, use_container_width=True)
-        
-        # Display key performance metrics
-        st.subheader("Performance Metrics")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("Total Return", f"{strategy_metrics['total_return']*100:.2f}%")
-            st.metric("Annualized Return", f"{strategy_metrics['annualized_return']*100:.2f}%")
-            st.metric("Win Rate", f"{strategy_metrics['win_rate']*100:.2f}%")
-            st.metric("Max Drawdown", f"{strategy_metrics['max_drawdown']*100:.2f}%")
-            
-        with col2:
-            st.metric("Profit Factor", f"{strategy_metrics['profit_factor']:.2f}")
-            st.metric("Sharpe Ratio", f"{strategy_metrics['sharpe_ratio']:.2f}")
-            st.metric("Sortino Ratio", f"{strategy_metrics['sortino_ratio']:.2f}")
-            st.metric("Calmar Ratio", f"{strategy_metrics['calmar_ratio']:.2f}")
-            
-        with col3:
-            st.metric("Annualized Volatility", f"{strategy_metrics['annualized_volatility']*100:.2f}%")
-            st.metric("Gain/Loss Ratio", f"{strategy_metrics['gain_to_loss_ratio']:.2f}")
-            st.metric("% Profitable Months", f"{strategy_metrics['percent_profitable_months']*100:.2f}%")
-            st.metric("Max Consecutive Wins", f"{int(strategy_metrics['max_consecutive_wins'])}")
-        
-        # Strategy comparison - display a comprehensive backtest comparison
-        st.subheader("Strategy Comparison")
-        
-        # Prepare comparison dataframe
-        comparison_metrics = ['total_return', 'annualized_return', 'profit_factor', 'win_rate', 'max_drawdown', 'sharpe_ratio']
-        comparison_labels = ['Total Return', 'Ann. Return', 'Profit Factor', 'Win Rate', 'Max Drawdown', 'Sharpe Ratio']
-        
-        comparison_data = {}
-        for strategy_name, metrics in all_strategies_results.items():
-            comparison_data[strategy_name] = [
-                f"{metrics['total_return']*100:.2f}%",
-                f"{metrics['annualized_return']*100:.2f}%",
-                f"{metrics['profit_factor']:.2f}",
-                f"{metrics['win_rate']*100:.2f}%",
-                f"{metrics['max_drawdown']*100:.2f}%",
-                f"{metrics['sharpe_ratio']:.2f}"
-            ]
-        
-        comparison_df = pd.DataFrame(comparison_data, index=comparison_labels)
-        st.dataframe(comparison_df, use_container_width=True)
-        
-        # Show strategy equity curve for all strategies
-        st.subheader("Equity Curves for All Strategies")
-        
-        # Calculate equity curves for all strategies
-        equity_fig = go.Figure()
-        
-        for strategy, returns_col in {
-            'Mean Reversion': 'mean_reversion_return',
-            'Volatility Breakout': 'breakout_return',
-            'Regime Switching': 'regime_return',
-            'Term Structure': 'term_return',
-            'Range Breakout': 'range_return'
-        }.items():
-            equity = (1 + historical_data[returns_col].fillna(0)).cumprod() - 1
-            equity_fig.add_trace(go.Scatter(
-                x=historical_data.index,
-                y=equity * 100,
-                name=f"{strategy} ({all_strategies_results[strategy]['profit_factor']:.2f} PF)",
-                mode='lines'
-            ))
-        
-        # Add buy & hold for reference
-        equity_fig.add_trace(go.Scatter(
-            x=historical_data.index,
-            y=historical_data['buy_hold_cumret'] * 100,
-            name='Buy & Hold',
-            line=dict(color='gray')
-        ))
-        
-        equity_fig.update_layout(
-            title='Equity Curves Comparison (2-Year Backtest)',
-            height=600,
-            yaxis=dict(title='Cumulative Return (%)'),
-            hovermode='x unified',
-            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
-        )
-        
-        st.plotly_chart(equity_fig, use_container_width=True)
-        
-        # Drawdown analysis
-        st.subheader("Drawdown Analysis")
-        
-        def calculate_drawdown(returns):
-            wealth_index = (1 + returns.fillna(0)).cumprod()
-            previous_peaks = wealth_index.cummax()
-            drawdown = (wealth_index - previous_peaks) / previous_peaks
-            return drawdown
-        
-        historical_data[f'{active_strategy}_dd'] = calculate_drawdown(historical_data[f'{active_strategy}_return'])
-        historical_data['buy_hold_dd'] = calculate_drawdown(historical_data['returns'])
-        
-        fig_dd = go.Figure()
-        
-        fig_dd.add_trace(go.Scatter(
-            x=historical_data.index,
-            y=historical_data[f'{active_strategy}_dd'] * 100,
-            name='Strategy Drawdown',
-            line=dict(color='red')
-        ))
-        
-        fig_dd.add_trace(go.Scatter(
-            x=historical_data.index,
-            y=historical_data['buy_hold_dd'] * 100,
-            name='Buy & Hold Drawdown',
-            line=dict(color='gray')
-        ))
-        
-        fig_dd.update_layout(
-            title='Drawdown Comparison',
-            height=400,
-            yaxis=dict(title='Drawdown (%)', autorange="reversed"),  # Reversed y-axis for drawdown
-            hovermode='x unified',
-            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
-        )
-        
-        st.plotly_chart(fig_dd, use_container_width=True)
-        
-        # Monthly returns heatmap
-        st.subheader("Monthly Returns Heatmap")
-        
-        # Resample to monthly returns
-        monthly_returns = historical_data[f'{active_strategy}_return'].fillna(0).resample('M').apply(lambda x: (1 + x).prod() - 1)
-        monthly_returns_df = pd.DataFrame(monthly_returns)
-        monthly_returns_df.index = monthly_returns_df.index.to_period('M')
-        
-        # Pivot table for heatmap
-        monthly_returns_pivot = monthly_returns_df.copy()
-        monthly_returns_pivot['year'] = monthly_returns_pivot.index.year
-        monthly_returns_pivot['month'] = monthly_returns_pivot.index.month
-        monthly_returns_pivot = monthly_returns_pivot.pivot_table(
-            index='year',
-            columns='month',
-            values=f'{active_strategy}_return'
-        )
-        
-        # Get month names
-        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-        monthly_returns_pivot.columns = [month_names[i-1] for i in monthly_returns_pivot.columns]
-        
-        # Format values as percentages
-        formatted_pivot = monthly_returns_pivot.copy()
-        for col in formatted_pivot.columns:
-            formatted_pivot[col] = formatted_pivot[col].apply(lambda x: f"{x*100:.2f}%" if pd.notnull(x) else "")
-        
-        st.dataframe(formatted_pivot, use_container_width=True)
-        
-        # Strategy insights
-        st.subheader("Strategy Insights and Recommendations")
-        
-        # Determine the best strategy
-        best_strategy = max(all_strategies_results.items(), key=lambda x: x[1]['profit_factor'])[0]
-        best_profit_factor = max(all_strategies_results.items(), key=lambda x: x[1]['profit_factor'])[1]['profit_factor']
-        best_sharpe = max(all_strategies_results.items(), key=lambda x: x[1]['sharpe_ratio'])[0]
-        
-        st.markdown(f"""
-        ### Key Insights:
-        
-        * **Best Overall Strategy**: {best_strategy} with a profit factor of {best_profit_factor:.2f}
-        * **Best Risk-Adjusted Strategy**: {best_sharpe} with the highest Sharpe ratio
-        * **Current Strategy Performance**: The {strategy_option.split()[0]} strategy has a profit factor of {strategy_metrics['profit_factor']:.2f} and Sharpe ratio of {strategy_metrics['sharpe_ratio']:.2f}
-        
-        ### Strategy Recommendations:
-        
-        1. **Optimal Allocation**: Based on the backtests, consider allocating:
-           - 40% to {best_strategy} Strategy
-           - 30% to {best_sharpe} Strategy  
-           - 30% to a complementary strategy with low correlation to these two
-        
-        2. **Position Sizing**: Scale position sizes inversely with current volatility level:
-           - Current 10-day volatility: {historical_data['10d_vol'].iloc[-1]:.2f}%
-           - Long-term average volatility: {historical_data['10d_vol'].rolling(252).mean().iloc[-1]:.2f}%
-           - Suggested position size scaling: {(historical_data['10d_vol'].rolling(252).mean().iloc[-1] / historical_data['10d_vol'].iloc[-1]):.2f}x baseline
-        
-        3. **Risk Management**:
-           - Set stop-loss at {max(1.5, historical_data['10d_vol'].iloc[-1] / 10):.1f}x daily ATR
-           - Use dynamic trailing stops of {max(2.0, historical_data['10d_vol'].iloc[-1] / 8):.1f}x daily ATR on profitable trades
-           - Implement strict position limits of 5% maximum portfolio allocation per trade
-        """)
-        
-        # Volatility Analytics
-        st.header("Advanced Volatility Analytics")
-        
-        # Volatility seasonality
-        st.subheader("Volatility Seasonality")
-        
-        # Calculate daily volatility for each day of the week
-        historical_data['day_of_week'] = historical_data.index.dayofweek
-        day_of_week_vol = historical_data.groupby('day_of_week')['10d_vol'].mean()
-        day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
-        day_of_week_vol.index = [day_names[i] for i in day_of_week_vol.index]
-        
-        # Plot day of week volatility
-        fig_dow = px.bar(
-            day_of_week_vol,
-            labels={'index': 'Day of Week', 'value': 'Average Volatility (%)'},
-            title='Average Volatility by Day of Week'
-        )
-        st.plotly_chart(fig_dow, use_container_width=True)
-        
-        # Get month-of-year seasonality
-        historical_data['month'] = historical_data.index.month
-        month_vol = historical_data.groupby('month')['10d_vol'].mean()
-        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-        month_vol.index = [month_names[i-1] for i in month_vol.index]
-        
-        fig_month = px.bar(
-            month_vol,
-            labels={'index': 'Month', 'value': 'Average Volatility (%)'},
-            title='Average Volatility by Month'
-        )
-        st.plotly_chart(fig_month, use_container_width=True)
-        
-        # Volatility regimes detection
-        st.subheader("Volatility Regime Detection")
-        
-        # Implement a simple Hidden Markov Model (emulated with thresholds for simplicity)
-        low_percentile = historical_data['10d_vol'].rolling(252).quantile(0.3)
-        high_percentile = historical_data['10d_vol'].rolling(252).quantile(0.7)
-        
-        # Determine regimes
-        historical_data['vol_regime'] = np.where(historical_data['10d_vol'] <= low_percentile, 'Low', 
-                                        np.where(historical_data['10d_vol'] >= high_percentile, 'High', 'Normal'))
-        
-        # Calculate regime duration and transitions
-        historical_data['regime_change'] = historical_data['vol_regime'] != historical_data['vol_regime'].shift(1)
-        regime_changes = historical_data[historical_data['regime_change']].copy()
-        
-        # Calculate duration of each regime
-        regime_durations = []
-        current_regime = None
-        regime_start = None
-        
-        for date, row in historical_data.iterrows():
-            if row['vol_regime'] != current_regime:
-                if current_regime is not None:
-                    duration = (date - regime_start).days
-                    regime_durations.append({
-                        'regime': current_regime,
-                        'start': regime_start,
-                        'end': date,
-                        'duration_days': duration
-                    })
-                current_regime = row['vol_regime']
-                regime_start = date
-        
-        # Add the last regime if it exists
-        if current_regime is not None and regime_start is not None:
-            duration = (historical_data.index[-1] - regime_start).days
-            regime_durations.append({
-                'regime': current_regime,
-                'start': regime_start,
-                'end': historical_data.index[-1],
-                'duration_days': duration
-            })
-        
-        # Create a dataframe of regime durations
-        if regime_durations:
-            regime_df = pd.DataFrame(regime_durations)
-            
-            # Calculate average duration by regime
-            avg_duration = regime_df.groupby('regime')['duration_days'].mean()
-            
-            st.write("Average Duration of Volatility Regimes (days):")
-            st.dataframe(avg_duration)
-            
-            # Show current regime
-            current_regime = historical_data['vol_regime'].iloc[-1]
-            days_in_current = (historical_data.index[-1] - regime_durations[-1]['start']).days
-            avg_duration_current = avg_duration[current_regime]
-            
-            st.info(f"Current Volatility Regime: **{current_regime}** (Duration: {days_in_current} days, Average: {avg_duration_current:.1f} days)")
-            
-            # Create a regime timeline
-            fig_regime = go.Figure()
-            
-            # Add volatility line
-            fig_regime.add_trace(go.Scatter(
+            fig_term.add_trace(go.Scatter(
                 x=historical_data.index,
                 y=historical_data['10d_vol'],
                 name='10-Day Volatility',
                 line=dict(color='blue')
             ))
             
-            # Add regime backgrounds
-            colors = {'Low': 'rgba(0, 255, 0, 0.1)', 'Normal': 'rgba(255, 255, 0, 0.1)', 'High': 'rgba(255, 0, 0, 0.1)'}
+            fig_term.add_trace(go.Scatter(
+                x=historical_data.index,
+                y=historical_data['20d_vol'],
+                name='20-Day Volatility',
+                line=dict(color='green')
+            ))
             
-            for regime in regime_durations:
-                fig_regime.add_vrect(
-                    x0=regime['start'],
-                    x1=regime['end'],
-                    fillcolor=colors[regime['regime']],
-                    opacity=0.5,
-                    layer="below",
-                    line_width=0,
-                )
+            fig_term.add_trace(go.Scatter(
+                x=historical_data.index,
+                y=historical_data['vol_ratio'] * 10,  # Scale for visibility
+                name='Vol Ratio (10d/20d) x10',
+                line=dict(color='red', dash='dash'),
+                yaxis='y2'
+            ))
             
-            # Add regime labels at midpoints
-            for regime in regime_durations:
-                if (regime['end'] - regime['start']).days > 30:  # Only add labels for longer regimes
-                    midpoint = regime['start'] + (regime['end'] - regime['start']) / 2
-                    fig_regime.add_annotation(
-                        x=midpoint,
-                        y=historical_data['10d_vol'].max() * 0.95,
-                        text=regime['regime'],
-                        showarrow=False,
-                        font=dict(color="black", size=14)
-                    )
-            
-            fig_regime.update_layout(
-                title='Volatility Regimes Timeline',
+            fig_term.update_layout(
+                title='Volatility Term Structure',
                 height=500,
                 yaxis=dict(title='Volatility (%)'),
+                yaxis2=dict(title='Ratio (scaled)', overlaying='y', side='right'),
+                hovermode='x unified',
+                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+            )
+            
+            st.plotly_chart(fig_term, use_container_width=True)
+            
+            # Strategy selector and backtest
+            st.subheader("2-Year Backtested Volatility Trading Strategies")
+            
+            strategy_option = st.selectbox(
+                "Select a volatility-based trading strategy:",
+                ["Mean Reversion on High Volatility", "Volatility Breakout Momentum", "Volatility Regime Switching", 
+                 "Volatility Term Structure", "Volatility Range Breakout"]
+            )
+            
+            # Create placeholder for all strategies' backtests
+            all_strategies_results = {}
+            
+            # Strategy 1: Mean Reversion on High Volatility
+            historical_data['vol_z_score'] = (historical_data['10d_vol'] - historical_data['10d_vol'].rolling(60).mean()) / historical_data['10d_vol'].rolling(60).std()
+            historical_data['mean_reversion_signal'] = np.where(historical_data['vol_z_score'] > 1.5, -1, 0)
+            historical_data['mean_reversion_signal'] = np.where(historical_data['vol_z_score'] < 0, 1, historical_data['mean_reversion_signal'])
+            historical_data['mean_reversion_signal'] = historical_data['mean_reversion_signal'].shift(1)
+            historical_data['mean_reversion_return'] = historical_data['mean_reversion_signal'] * historical_data['returns']
+            all_strategies_results['Mean Reversion'] = compute_backtest_metrics(historical_data['mean_reversion_return'].dropna())
+            
+            # Strategy 2: Volatility Breakout Momentum
+            historical_data['vol_change_pct'] = historical_data['10d_vol'].pct_change() * 100
+            historical_data['price_direction'] = np.sign(historical_data['returns'])
+            historical_data['breakout_signal'] = np.where(historical_data['vol_change_pct'] > 30, historical_data['price_direction'], 0)
+            historical_data['breakout_signal'] = historical_data['breakout_signal'].shift(1)
+            historical_data['breakout_return'] = historical_data['breakout_signal'] * historical_data['returns']
+            all_strategies_results['Volatility Breakout'] = compute_backtest_metrics(historical_data['breakout_return'].dropna())
+            
+            # Strategy 3: Volatility Regime Switching
+            low_vol = historical_data['10d_vol'].rolling(60).quantile(0.25)
+            high_vol = historical_data['10d_vol'].rolling(60).quantile(0.75)
+            
+            historical_data['regime'] = np.where(historical_data['10d_vol'] <= low_vol, 'low', 
+                                         np.where(historical_data['10d_vol'] >= high_vol, 'high', 'medium'))
+            
+            historical_data['regime_signal'] = np.where(historical_data['regime'] == 'low', 
+                                         np.sign(historical_data['returns'].rolling(5).mean()), 
+                                         np.where(historical_data['regime'] == 'high', 
+                                                 -np.sign(historical_data['returns']), 0))
+            
+            historical_data['regime_signal'] = historical_data['regime_signal'].shift(1)
+            historical_data['regime_return'] = historical_data['regime_signal'] * historical_data['returns']
+            all_strategies_results['Regime Switching'] = compute_backtest_metrics(historical_data['regime_return'].dropna())
+            
+            # Strategy 4: Volatility Term Structure
+            historical_data['term_signal'] = np.where(historical_data['vol_ratio'] > 1.1, 1, 
+                                            np.where(historical_data['vol_ratio'] < 0.9, -1, 0))
+            historical_data['term_signal'] = historical_data['term_signal'].shift(1)
+            historical_data['term_return'] = historical_data['term_signal'] * historical_data['returns']
+            all_strategies_results['Term Structure'] = compute_backtest_metrics(historical_data['term_return'].dropna())
+            
+            # Strategy 5: Volatility Range Breakout
+            historical_data['vol_upper'] = historical_data['10d_vol'].rolling(20).mean() + 2 * historical_data['10d_vol'].rolling(20).std()
+            historical_data['vol_lower'] = historical_data['10d_vol'].rolling(20).mean() - 2 * historical_data['10d_vol'].rolling(20).std()
+            
+            historical_data['range_signal'] = np.where(historical_data['10d_vol'] > historical_data['vol_upper'], -1,
+                                             np.where(historical_data['10d_vol'] < historical_data['vol_lower'], 1, 0))
+            historical_data['range_signal'] = historical_data['range_signal'].shift(1)
+            historical_data['range_return'] = historical_data['range_signal'] * historical_data['returns']
+            all_strategies_results['Range Breakout'] = compute_backtest_metrics(historical_data['range_return'].dropna())
+            
+            # Determine active strategy based on selection
+            if strategy_option == "Mean Reversion on High Volatility":
+                active_strategy = "mean_reversion"
+                strategy_signal = historical_data['mean_reversion_signal']
+                strategy_returns = historical_data['mean_reversion_return']
+                strategy_metrics = all_strategies_results['Mean Reversion']
+                
+                # Show strategy description
+                st.markdown("""
+                ### Mean Reversion Strategy
+                
+                This strategy assumes that periods of high volatility tend to revert to the mean. It:
+                - Goes short when volatility is significantly higher than its historical average (Z-score > 1.5)
+                - Goes long when volatility returns to normal levels (Z-score < 0)
+                - Remains neutral in between these thresholds
+                
+                The strategy is based on the tendency of volatility to cluster but eventually revert to its long-term average.
+                """)
+                
+                # Strategy parameters
+                vol_threshold = st.slider("Volatility Threshold (Z-score)", 1.0, 3.0, 1.5, 0.1)
+                st.info(f"The strategy goes short when volatility Z-score exceeds {vol_threshold} and goes long when it falls below 0.")
+                
+            elif strategy_option == "Volatility Breakout Momentum":
+                active_strategy = "breakout"
+                strategy_signal = historical_data['breakout_signal']
+                strategy_returns = historical_data['breakout_return']
+                strategy_metrics = all_strategies_results['Volatility Breakout']
+                
+                st.markdown("""
+                ### Volatility Breakout Strategy
+                
+                This strategy capitalizes on momentum following volatility breakouts:
+                - When volatility increases significantly (>30% day-over-day), it follows the prevailing price direction
+                - Takes no position when volatility is stable or declining
+                
+                The strategy is based on the observation that sharp volatility increases often signal the start of a strong directional move.
+                """)
+                
+                # Parameters
+                breakout_threshold = st.slider("Volatility Breakout Threshold (%)", 10, 100, 30, 5)
+                st.info(f"The strategy takes a position in the direction of the price move when volatility increases by more than {breakout_threshold}%.")
+                
+            elif strategy_option == "Volatility Regime Switching":
+                active_strategy = "regime"
+                strategy_signal = historical_data['regime_signal']
+                strategy_returns = historical_data['regime_return']
+                strategy_metrics = all_strategies_results['Regime Switching']
+                
+                st.markdown("""
+                ### Volatility Regime Switching Strategy
+                
+                This strategy adapts to different volatility regimes:
+                - In low volatility regimes (bottom 25%), it follows trends (5-day momentum)
+                - In high volatility regimes (top 25%), it takes counter-trend positions
+                - In medium volatility regimes, it stays neutral
+                
+                The strategy is based on research showing that different trading approaches work better in different volatility environments.
+                """)
+                
+                # Parameters
+                low_vol_threshold = st.slider("Low Volatility Threshold (percentile)", 0, 50, 25, 5)
+                high_vol_threshold = st.slider("High Volatility Threshold (percentile)", 50, 100, 75, 5)
+                st.info(f"The strategy uses trend-following in low volatility (below {low_vol_threshold}th percentile) and counter-trend in high volatility (above {high_vol_threshold}th percentile).")
+                
+            elif strategy_option == "Volatility Term Structure":
+                active_strategy = "term"
+                strategy_signal = historical_data['term_signal']
+                strategy_returns = historical_data['term_return']
+                strategy_metrics = all_strategies_results['Term Structure']
+                
+                st.markdown("""
+                ### Volatility Term Structure Strategy
+                
+                This strategy trades based on the relationship between short-term and long-term volatility:
+                - Goes long when short-term volatility (10-day) is significantly higher than long-term volatility (20-day), ratio > 1.1
+                - Goes short when short-term volatility is significantly lower than long-term volatility, ratio < 0.9
+                - Stays neutral when the volatility term structure is flat (ratio between 0.9 and 1.1)
+                
+                The strategy capitalizes on the mean-reverting nature of volatility term structure.
+                """)
+                
+                # Parameters
+                upper_ratio = st.slider("Upper Ratio Threshold", 1.01, 1.5, 1.1, 0.01)
+                lower_ratio = st.slider("Lower Ratio Threshold", 0.5, 0.99, 0.9, 0.01)
+                st.info(f"The strategy goes long when 10d/20d volatility ratio exceeds {upper_ratio} and short when it falls below {lower_ratio}.")
+                
+            elif strategy_option == "Volatility Range Breakout":
+                active_strategy = "range"
+                strategy_signal = historical_data['range_signal']
+                strategy_returns = historical_data['range_return']
+                strategy_metrics = all_strategies_results['Range Breakout']
+                
+                st.markdown("""
+                ### Volatility Range Breakout Strategy
+                
+                This strategy identifies statistical extremes in volatility:
+                - Goes short when volatility breaks above its 2-standard deviation upper band
+                - Goes long when volatility breaks below its 2-standard deviation lower band
+                - Stays neutral when volatility is within its normal range
+                
+                The strategy is based on the principle that extreme volatility levels tend to revert to the mean.
+                """)
+                
+                # Parameters
+                std_dev_multiplier = st.slider("Standard Deviation Multiplier", 1.0, 3.0, 2.0, 0.1)
+                lookback_period = st.slider("Lookback Period (days)", 10, 60, 20, 5)
+                st.info(f"The strategy identifies volatility extremes using a {std_dev_multiplier}-standard deviation band calculated over a {lookback_period}-day period.")
+            
+            # Display equity curve for selected strategy
+            st.subheader("Strategy Performance")
+            
+            # Determine which strategy's returns to use based on selection
+            if strategy_option == "Mean Reversion on High Volatility":
+                strategy_returns = historical_data['mean_reversion_return']
+                strategy_metrics = all_strategies_results['Mean Reversion']
+            elif strategy_option == "Volatility Breakout Momentum":
+                strategy_returns = historical_data['breakout_return']
+                strategy_metrics = all_strategies_results['Volatility Breakout']
+            elif strategy_option == "Volatility Regime Switching":
+                strategy_returns = historical_data['regime_return']
+                strategy_metrics = all_strategies_results['Regime Switching']
+            elif strategy_option == "Volatility Term Structure":
+                strategy_returns = historical_data['term_return']
+                strategy_metrics = all_strategies_results['Term Structure']
+            elif strategy_option == "Volatility Range Breakout":
+                strategy_returns = historical_data['range_return']
+                strategy_metrics = all_strategies_results['Range Breakout']
+            
+            # Calculate equity curve
+            strategy_equity = (1 + strategy_returns.fillna(0)).cumprod()
+            buy_hold_equity = (1 + historical_data['returns'].fillna(0)).cumprod()
+            
+            # Plot equity curves
+            fig_equity = go.Figure()
+            
+            fig_equity.add_trace(go.Scatter(
+                x=strategy_equity.index,
+                y=strategy_equity,
+                name='Strategy Equity',
+                line=dict(color='green', width=2)
+            ))
+            
+            fig_equity.add_trace(go.Scatter(
+                x=buy_hold_equity.index,
+                y=buy_hold_equity,
+                name='Buy & Hold Equity',
+                line=dict(color='gray', width=1.5, dash='dot')
+            ))
+            
+            fig_equity.update_layout(
+                title='Strategy Equity Curve vs. Buy & Hold',
+                height=500,
+                yaxis=dict(title='Growth of $1 Invested'),
+                hovermode='x unified',
+                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+            )
+            
+            st.plotly_chart(fig_equity, use_container_width=True)
+            
+            # Display strategy metrics
+            st.subheader("Strategy Metrics")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Return", f"{strategy_metrics['total_return']:.2%}")
+                st.metric("Annualized Return", f"{strategy_metrics['annualized_return']:.2%}")
+                st.metric("Annualized Volatility", f"{strategy_metrics['annualized_volatility']:.2%}")
+                st.metric("Sharpe Ratio", f"{strategy_metrics['sharpe_ratio']:.2f}")
+            
+            with col2:
+                st.metric("Max Drawdown", f"{strategy_metrics['max_drawdown']:.2%}")
+                st.metric("Sortino Ratio", f"{strategy_metrics['sortino_ratio']:.2f}")
+                st.metric("Calmar Ratio", f"{strategy_metrics['calmar_ratio']:.2f}")
+                st.metric("Win Rate", f"{strategy_metrics['win_rate']:.2%}")
+            
+            with col3:
+                st.metric("Profit Factor", f"{strategy_metrics['profit_factor']:.2f}")
+                st.metric("Gain/Loss Ratio", f"{strategy_metrics['gain_to_loss_ratio']:.2f}")
+                st.metric("% Profitable Months", f"{strategy_metrics['percent_profitable_months']:.2%}")
+                st.metric("Max Consecutive Wins", f"{strategy_metrics['max_consecutive_wins']:.0f}")
+            
+            # Strategy signal distribution
+            st.subheader("Signal Distribution")
+            
+            # Determine which strategy's signals to analyze
+            if strategy_option == "Mean Reversion on High Volatility":
+                signal_col = 'mean_reversion_signal'
+            elif strategy_option == "Volatility Breakout Momentum":
+                signal_col = 'breakout_signal'
+            elif strategy_option == "Volatility Regime Switching":
+                signal_col = 'regime_signal'
+            elif strategy_option == "Volatility Term Structure":
+                signal_col = 'term_signal'
+            elif strategy_option == "Volatility Range Breakout":
+                signal_col = 'range_signal'
+            
+            # Create signal distribution chart
+            signal_counts = historical_data[signal_col].value_counts()
+            
+            fig_signal = px.pie(
+                values=signal_counts.values,
+                names=signal_counts.index.map({1: 'Long', -1: 'Short', 0: 'Neutral'}),
+                title='Strategy Signal Distribution',
+                color=signal_counts.index.map({1: 'Long', -1: 'Short', 0: 'Neutral'}),
+                color_discrete_map={'Long': 'green', 'Short': 'red', 'Neutral': 'gray'}
+            )
+            
+            st.plotly_chart(fig_signal, use_container_width=True)
+            
+            # Show monthly returns heatmap
+            st.subheader("Monthly Returns Heatmap")
+            
+            # Resample returns to month
+            monthly_returns = strategy_returns.resample('M').apply(lambda x: (1 + x).prod() - 1)
+            
+            # Create a DataFrame for heatmap
+            monthly_returns_df = pd.DataFrame(monthly_returns)
+            monthly_returns_df['year'] = monthly_returns_df.index.year
+            monthly_returns_df['month'] = monthly_returns_df.index.month
+            
+            # Pivot the DataFrame
+            heatmap_data = monthly_returns_df.pivot_table(
+                index='year',
+                columns='month',
+                values=0,
+                aggfunc='sum'
+            ).fillna(0)
+            
+            # Rename columns to month names
+            heatmap_data.columns = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+            
+            # Convert to percentages
+            heatmap_data = heatmap_data * 100
+            
+            # Create heatmap
+            fig_heatmap = px.imshow(
+                heatmap_data,
+                text_auto='.2f',
+                aspect="auto",
+                title="Monthly Returns (%)",
+                labels=dict(x="Month", y="Year", color="Return (%)"),
+                x=heatmap_data.columns,
+                y=heatmap_data.index,
+                color_continuous_scale=[[0, 'red'], [0.5, 'white'], [1, 'green']],
+                zmin=-max(abs(heatmap_data.min().min()), abs(heatmap_data.max().max())),
+                zmax=max(abs(heatmap_data.min().min()), abs(heatmap_data.max().max()))
+            )
+            
+            st.plotly_chart(fig_heatmap, use_container_width=True)
+            
+            # Display drawdown chart
+            st.subheader("Drawdown Analysis")
+            
+            # Calculate drawdowns
+            equity_curve = (1 + strategy_returns.fillna(0)).cumprod()
+            running_max = equity_curve.cummax()
+            drawdown = (equity_curve - running_max) / running_max
+            
+            # Create drawdown chart
+            fig_drawdown = go.Figure()
+            
+            fig_drawdown.add_trace(go.Scatter(
+                x=drawdown.index,
+                y=drawdown,
+                name='Drawdown',
+                fill='tozeroy',
+                line=dict(color='red')
+            ))
+            
+            fig_drawdown.update_layout(
+                title='Drawdown Over Time',
+                height=400,
+                yaxis=dict(title='Drawdown (%)', tickformat='.0%'),
                 hovermode='x unified'
             )
             
-            st.plotly_chart(fig_regime, use_container_width=True)
+            st.plotly_chart(fig_drawdown, use_container_width=True)
             
-            # Regime transition probabilities
-            st.subheader("Regime Transition Probabilities")
+            # Display a table of worst drawdowns
+            def find_drawdown_periods(drawdown_series):
+                drawdown_start = None
+                drawdown_end = None
+                drawdown_periods = []
+                
+                for date, value in drawdown_series.items():
+                    if drawdown_start is None and value < 0:
+                        drawdown_start = date
+                    elif drawdown_start is not None and value == 0:
+                        drawdown_end = date
+                        max_drawdown = drawdown_series[drawdown_start:drawdown_end].min()
+                        max_drawdown_date = drawdown_series[drawdown_start:drawdown_end].idxmin()
+                        recovery_days = (drawdown_end - max_drawdown_date).days
+                        duration = (drawdown_end - drawdown_start).days
+                        
+                        drawdown_periods.append({
+                            'Start': drawdown_start,
+                            'Bottom': max_drawdown_date,
+                            'End': drawdown_end,
+                            'Depth': max_drawdown,
+                            'Length (days)': duration,
+                            'Recovery (days)': recovery_days
+                        })
+                        
+                        drawdown_start = None
+                
+                # Handle ongoing drawdown
+                if drawdown_start is not None:
+                    drawdown_end = drawdown_series.index[-1]
+                    max_drawdown = drawdown_series[drawdown_start:drawdown_end].min()
+                    max_drawdown_date = drawdown_series[drawdown_start:drawdown_end].idxmin()
+                    duration = (drawdown_end - drawdown_start).days
+                    
+                    drawdown_periods.append({
+                        'Start': drawdown_start,
+                        'Bottom': max_drawdown_date,
+                        'End': 'Ongoing',
+                        'Depth': max_drawdown,
+                        'Length (days)': duration,
+                        'Recovery (days)': float('nan')
+                    })
+                
+                return pd.DataFrame(drawdown_periods).sort_values('Depth')
             
-            # Calculate transition matrix
-            transitions = historical_data['vol_regime'].shift(-1).dropna()
-            transition_matrix = pd.crosstab(
-                historical_data['vol_regime'].iloc[:-1], 
-                transitions,
-                normalize='index'
-            )
+            drawdown_periods = find_drawdown_periods(drawdown)
             
-            # Display transition probabilities
-            st.write("Probability of transitioning from current regime (rows) to next regime (columns):")
-            transition_formatted = transition_matrix.copy()
-            for col in transition_formatted.columns:
-                transition_formatted[col] = transition_formatted[col].apply(lambda x: f"{x*100:.1f}%")
+            if not drawdown_periods.empty:
+                # Keep only the 5 worst drawdowns
+                worst_drawdowns = drawdown_periods.head(5)
+                
+                # Format the data for display
+                display_drawdowns = worst_drawdowns.copy()
+                display_drawdowns['Depth'] = display_drawdowns['Depth'].apply(lambda x: f"{x:.2%}")
+                
+                st.subheader("Worst Drawdowns")
+                st.dataframe(display_drawdowns, use_container_width=True)
             
-            st.dataframe(transition_formatted)
+            # Strategy settings and explanation
+            st.subheader("Strategy Settings")
             
-            # Trading recommendations based on current regime
-            st.subheader("Regime-Based Trading Recommendations")
-            
-            if current_regime == 'Low':
+            # Create expander for detailed strategy explanation
+            with st.expander("Strategy Details and Implementation"):
+                # Display Python code for implementing the selected strategy
+                if strategy_option == "Mean Reversion on High Volatility":
+                    st.code("""
+def mean_reversion_strategy(data, z_score_threshold=1.5):
+    # Calculate 10-day volatility
+    data['10d_vol'] = calculate_realized_volatility(data['returns'], window=10, sampling_rate=1440)
+    
+    # Calculate volatility Z-score using 60-day lookback
+    data['vol_z_score'] = (data['10d_vol'] - data['10d_vol'].rolling(60).mean()) / data['10d_vol'].rolling(60).std()
+    
+    # Generate signals
+    data['signal'] = 0  # Initialize with neutral position
+    data.loc[data['vol_z_score'] > z_score_threshold, 'signal'] = -1  # Short when volatility is high
+    data.loc[data['vol_z_score'] < 0, 'signal'] = 1  # Long when volatility is below average
+    
+    # Shift signals for next-day execution
+    data['signal'] = data['signal'].shift(1)
+    
+    # Calculate strategy returns
+    data['strategy_return'] = data['signal'] * data['returns']
+    
+    return data
+""", language="python")
+                
+                elif strategy_option == "Volatility Breakout Momentum":
+                    st.code("""
+def volatility_breakout_strategy(data, volatility_change_threshold=30):
+    # Calculate 10-day volatility
+    data['10d_vol'] = calculate_realized_volatility(data['returns'], window=10, sampling_rate=1440)
+    
+    # Calculate day-over-day volatility change percentage
+    data['vol_change_pct'] = data['10d_vol'].pct_change() * 100
+    
+    # Determine price direction
+    data['price_direction'] = np.sign(data['returns'])
+    
+    # Generate signals - go with price direction when volatility spikes
+    data['signal'] = 0  # Initialize with neutral position
+    data.loc[data['vol_change_pct'] > volatility_change_threshold, 'signal'] = data['price_direction']
+    
+    # Shift signals for next-day execution
+    data['signal'] = data['signal'].shift(1)
+    
+    # Calculate strategy returns
+    data['strategy_return'] = data['signal'] * data['returns']
+    
+    return data
+""", language="python")
+                
+                elif strategy_option == "Volatility Regime Switching":
+                    st.code("""
+def regime_switching_strategy(data, low_percentile=25, high_percentile=75):
+    # Calculate 10-day volatility
+    data['10d_vol'] = calculate_realized_volatility(data['returns'], window=10, sampling_rate=1440)
+    
+    # Determine volatility regimes
+    low_vol = data['10d_vol'].rolling(60).quantile(low_percentile/100)
+    high_vol = data['10d_vol'].rolling(60).quantile(high_percentile/100)
+    
+    data['regime'] = 'medium'  # Default regime
+    data.loc[data['10d_vol'] <= low_vol, 'regime'] = 'low'
+    data.loc[data['10d_vol'] >= high_vol, 'regime'] = 'high'
+    
+    # Generate signals based on regime
+    data['signal'] = 0  # Initialize with neutral position (medium volatility)
+    
+    # In low volatility - trend following (5-day momentum)
+    data.loc[data['regime'] == 'low', 'signal'] = np.sign(data['returns'].rolling(5).mean())
+    
+    # In high volatility - counter-trend
+    data.loc[data['regime'] == 'high', 'signal'] = -np.sign(data['returns'])
+    
+    # Shift signals for next-day execution
+    data['signal'] = data['signal'].shift(1)
+    
+    # Calculate strategy returns
+    data['strategy_return'] = data['signal'] * data['returns']
+    
+    return data
+""", language="python")
+                
+                elif strategy_option == "Volatility Term Structure":
+                    st.code("""
+def term_structure_strategy(data, upper_threshold=1.1, lower_threshold=0.9):
+    # Calculate volatility for different time periods
+    data['10d_vol'] = calculate_realized_volatility(data['returns'], window=10, sampling_rate=1440)
+    data['20d_vol'] = calculate_realized_volatility(data['returns'], window=20, sampling_rate=1440)
+    
+    # Calculate the ratio of short-term to longer-term volatility
+    data['vol_ratio'] = data['10d_vol'] / data['20d_vol']
+    
+    # Generate signals based on the term structure
+    data['signal'] = 0  # Initialize with neutral position
+    data.loc[data['vol_ratio'] > upper_threshold, 'signal'] = 1  # Long when short-term vol is higher
+    data.loc[data['vol_ratio'] < lower_threshold, 'signal'] = -1  # Short when short-term vol is lower
+    
+    # Shift signals for next-day execution
+    data['signal'] = data['signal'].shift(1)
+    
+    # Calculate strategy returns
+    data['strategy_return'] = data['signal'] * data['returns']
+    
+    return data
+""", language="python")
+                
+                elif strategy_option == "Volatility Range Breakout":
+                    st.code("""
+def range_breakout_strategy(data, std_dev_multiplier=2.0, lookback_period=20):
+    # Calculate 10-day volatility
+    data['10d_vol'] = calculate_realized_volatility(data['returns'], window=10, sampling_rate=1440)
+    
+    # Calculate the upper and lower bands
+    data['vol_ma'] = data['10d_vol'].rolling(lookback_period).mean()
+    data['vol_std'] = data['10d_vol'].rolling(lookback_period).std()
+    data['vol_upper'] = data['vol_ma'] + std_dev_multiplier * data['vol_std']
+    data['vol_lower'] = data['vol_ma'] - std_dev_multiplier * data['vol_std']
+    
+    # Generate signals
+    data['signal'] = 0  # Initialize with neutral position
+    data.loc[data['10d_vol'] > data['vol_upper'], 'signal'] = -1  # Short when volatility breaks upper band
+    data.loc[data['10d_vol'] < data['vol_lower'], 'signal'] = 1  # Long when volatility breaks lower band
+    
+    # Shift signals for next-day execution
+    data['signal'] = data['signal'].shift(1)
+    
+    # Calculate strategy returns
+    data['strategy_return'] = data['signal'] * data['returns']
+    
+    return data
+""", language="python")
+                
                 st.markdown("""
-                ### Low Volatility Regime Recommendations:
+                #### Implementation Notes:
+                - All strategies use realized volatility calculated from daily returns
+                - Signals are shifted by 1 day to avoid look-ahead bias
+                - Position sizing is simplified (equal size for all positions)
+                - No transaction costs or slippage are considered in the backtest
                 
-                1. **Strategy Approach**:
-                   - Focus on trend-following strategies
-                   - Look for breakouts with volume confirmation
-                   - Consider longer holding periods
-                
-                2. **Position Sizing**:
-                   - Increase position sizes by 20-30%
-                   - Spread capital across more positions
-                
-                3. **Options Strategies**:
-                   - Sell options premium (credit spreads, iron condors)
-                   - Consider calendar spreads
-                   - Target lower delta positions (0.20-0.30)
-                
-                4. **Risk Management**:
-                   - Widen stop-loss levels
-                   - Use time-based exits
-                   - Set profit targets at key resistance levels
+                #### Potential Enhancements:
+                - Add position sizing based on volatility (risk parity approach)
+                - Implement stop-loss mechanisms
+                - Add transaction costs and slippage
+                - Combine multiple volatility strategies for diversification
+                - Add volatility targeting to control overall risk
                 """)
             
-            elif current_regime == 'Normal':
-                st.markdown("""
-                ### Normal Volatility Regime Recommendations:
-                
-                1. **Strategy Approach**:
-                   - Balance between trend and counter-trend strategies
-                   - Focus on sectors showing relative strength
-                   - Use standard technical analysis setups
-                
-                2. **Position Sizing**:
-                   - Standard position sizing (1-2% risk per trade)
-                   - Moderate diversification
-                
-                3. **Options Strategies**:
-                   - Balance between debit and credit spreads
-                   - Vertical spreads offer good risk/reward
-                   - Target ATM to slight OTM options
-                
-                4. **Risk Management**:
-                   - Standard 1-2 ATR stop-losses
-                   - Trailing stops on profitable trades
-                   - Partial profit taking at targets
-                """)
+            # Add export functionality
+            st.subheader("Export Results")
             
-            else:  # High volatility
-                st.markdown("""
-                ### High Volatility Regime Recommendations:
-                
-                1. **Strategy Approach**:
-                   - Focus on mean-reversion strategies
-                   - Look for oversold/overbought conditions
-                   - Reduce holding periods
-                
-                2. **Position Sizing**:
-                   - Reduce position sizes by 30-50%
-                   - Concentrate on fewer, high-conviction trades
-                
-                3. **Options Strategies**:
-                   - Long options (puts, calls, straddles) to benefit from large moves
-                   - Avoid naked short options positions
-                   - Consider put spreads for protection
-                
-                4. **Risk Management**:
-                   - Tighten stop-losses (0.5-1 ATR)
-                   - Use time-based exits (1-3 days maximum)
-                   - Take profits quickly
-                """)
-        
-        # Additional analytics: Correlation between volatility and returns
-        st.subheader("Volatility-Return Correlation Analysis")
-        
-        # Calculate correlation between returns and volatility
-        returns_vs_vol = historical_data[['returns', '10d_vol']].copy()
-        returns_vs_vol['abs_returns'] = returns_vs_vol['returns'].abs()
-        returns_vs_vol['next_day_return'] = returns_vs_vol['returns'].shift(-1)
-        returns_vs_vol['vol_change'] = returns_vs_vol['10d_vol'].pct_change()
-        
-        # Correlation coefficient
-        corr_vol_ret = returns_vs_vol['10d_vol'].corr(returns_vs_vol['returns'])
-        corr_vol_abs_ret = returns_vs_vol['10d_vol'].corr(returns_vs_vol['abs_returns'])
-        corr_vol_next_ret = returns_vs_vol['10d_vol'].corr(returns_vs_vol['next_day_return'])
-        corr_vol_change_ret = returns_vs_vol['vol_change'].corr(returns_vs_vol['returns'])
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.metric("Vol vs. Return Correlation", f"{corr_vol_ret:.3f}")
-            st.metric("Vol vs. Absolute Return", f"{corr_vol_abs_ret:.3f}")
+            export_format = st.radio("Export Format", ["CSV", "Excel", "JSON"], horizontal=True)
+            export_button = st.button("Generate Export")
             
-        with col2:
-            st.metric("Vol vs. Next Day Return", f"{corr_vol_next_ret:.3f}")
-            st.metric("Vol Change vs. Return", f"{corr_vol_change_ret:.3f}")
-        
-        # Scatter plot of volatility vs returns
-        fig_corr = px.scatter(
-            returns_vs_vol.dropna(),
-            x='10d_vol',
-            y='returns',
-            trendline='ols',
-            labels={'10d_vol': '10-Day Volatility (%)', 'returns': 'Daily Return (%)'},
-            title='Relationship Between Volatility and Returns'
-        )
-        
-        fig_corr.update_layout(height=400)
-        st.plotly_chart(fig_corr, use_container_width=True)
-        
-        # Volatility clustering analysis
-        st.subheader("Volatility Clustering Analysis")
-        
-        # Calculate autocorrelation of volatility
-        autocorr_lags = 10
-        autocorr = [historical_data['10d_vol'].autocorr(lag=i) for i in range(1, autocorr_lags + 1)]
-        
-        fig_autocorr = px.bar(
-            x=list(range(1, autocorr_lags + 1)),
-            y=autocorr,
-            labels={'x': 'Lag (Days)', 'y': 'Autocorrelation'},
-            title='Volatility Autocorrelation'
-        )
-        
-        st.plotly_chart(fig_autocorr, use_container_width=True)
-        
-        # Check if volatility shows significant autocorrelation
-        if max(autocorr) > 0.3:
-            st.info("""
-            **Volatility Clustering Detected**: The data shows significant autocorrelation in volatility, confirming the presence of volatility clustering.
-            
-            This suggests that:
-            1. High volatility periods tend to be followed by more high volatility
-            2. Low volatility periods tend to be followed by more low volatility
-            3. Volatility forecasts based on recent volatility have predictive value
-            """)
+            if export_button:
+                # Create a DataFrame with the signals, returns, and equity curve
+                export_data = pd.DataFrame({
+                    'Date': historical_data.index,
+                    'Price': historical_data['close'],
+                    'Volatility': historical_data['10d_vol'],
+                    'Signal': strategy_signal,
+                    'Strategy_Return': strategy_returns,
+                    'Equity_Curve': strategy_equity
+                })
+                
+                if export_format == "CSV":
+                    csv = export_data.to_csv(index=False)
+                    st.download_button("Download CSV", csv, f"{selected_ticker}_{active_strategy}_results.csv", "text/csv")
+                elif export_format == "Excel":
+                    st.warning("Excel export is not directly supported in Streamlit. Please use CSV or JSON format.")
+                elif export_format == "JSON":
+                    json_data = export_data.to_json(orient="records", date_format="iso")
+                    st.download_button("Download JSON", json_data, f"{selected_ticker}_{active_strategy}_results.json", "application/json")
         else:
-            st.info("""
-            **Limited Volatility Clustering**: The data shows relatively weak autocorrelation in volatility.
-            
-            This suggests that:
-            1. Volatility changes may be more random for this asset
-            2. Forecasts based solely on recent volatility might be less reliable
-            3. Consider incorporating other factors in volatility predictions
-            """)
-    else:
-        st.error("Failed to fetch historical data for strategy analysis.")
+            st.error("Failed to fetch historical daily data for selected ticker.")
 
-# Footer
-st.markdown("---")
-st.markdown("**US Stocks Volatility Dashboard** | Data source: Yahoo Finance")
+# Clean up IB connection when app is closed
+def disconnect_ib():
+    if 'ib' in locals() and ib is not None:
+        ib.disconnect()
+
+# Register the cleanup function to run at app shutdown
+import atexit
+atexit.register(disconnect_ib)
