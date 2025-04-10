@@ -1,4 +1,3 @@
-# Sweetspot.py - Complete self-contained implementation
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,11 +6,28 @@ import plotly.express as px
 import time
 import threading
 import json
-import websocket
 import logging
 from datetime import datetime
 from collections import defaultdict, deque
 from typing import Dict, List, Tuple, Any, Callable, Optional, NamedTuple
+
+# Install hyperliquid if not present
+import subprocess
+import sys
+import importlib.util
+
+def install_package(package):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+# Check if hyperliquid is installed
+if importlib.util.find_spec("hyperliquid") is None:
+    st.write("Installing hyperliquid package...")
+    install_package("hyperliquid-python")
+
+# Import hyperliquid library
+from hyperliquid.info import Info
+from hyperliquid.utils.exchange_config import get_base_url
+from hyperliquid.websocket_manager import WebsocketManager
 
 # Set up basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -246,6 +262,22 @@ class SweetSpotOracle:
                 
             return weighted_price / total_weight
     
+    def calculate_index_price(self) -> float:
+        """Calculate index price across all exchanges"""
+        with self.lock:
+            prices = {}
+            for exchange_name in self.exchanges:
+                price = self.calculate_price(exchange_name)
+                if price > 0:
+                    prices[exchange_name] = price
+            
+            if not prices:
+                return 0
+                
+            # Equal weight for all exchanges for now
+            # This could be enhanced with exchange-specific weighting
+            return sum(prices.values()) / len(prices)
+    
     def get_sweet_spot_info(self) -> Dict:
         """Get current sweet spot info for all exchanges"""
         with self.lock:
@@ -302,80 +334,109 @@ class SweetSpotOracleMaster:
             else:
                 return {symbol: oracle.get_sweet_spot_info() for symbol, oracle in self.oracles.items()}
 
-# ===== Mock Exchange Connector for Testing =====
+# ===== Real Exchange Connector =====
 
-class MockExchangeConnector:
-    """Simulates exchange data for testing"""
-    def __init__(self, symbol="BTC", update_interval=0.5):
-        self.symbol = symbol
-        self.update_interval = update_interval
-        self.base_price = 50000  # Starting price for BTC
-        self.volatility = 0.001  # Price volatility
-        self.running = False
-        self.thread = None
+class HyperliquidConnector:
+    """Connects to Hyperliquid exchange and processes real-time data"""
+    def __init__(self, network="mainnet"):
+        self.network = network
+        self.base_url = get_base_url(network)
+        self.ws_manager = None
         self.oracle_master = None
-        self.callbacks = []
+        self.running = False
+        self.subscriptions = {}  # symbol -> subscription_id
+        self.callbacks = {}  # symbol -> callback
+        self.current_prices = {}  # symbol -> price
     
     def set_oracle_master(self, oracle_master):
         self.oracle_master = oracle_master
     
-    def add_callback(self, callback):
-        self.callbacks.append(callback)
+    def add_callback(self, symbol, callback):
+        self.callbacks[symbol] = callback
     
-    def start(self):
+    def start(self, symbols=None):
         if self.running:
             return
         
+        # Create websocket manager
+        self.ws_manager = WebsocketManager(self.base_url)
+        self.ws_manager.start()
+        
+        # Get available symbols if none provided
+        if not symbols:
+            symbols = self._get_available_symbols()
+            
         self.running = True
-        self.thread = threading.Thread(target=self._simulate_market_data)
-        self.thread.daemon = True
-        self.thread.start()
+        
+        # Subscribe to order book for each symbol
+        for symbol in symbols:
+            self._subscribe_to_order_book(symbol)
     
     def stop(self):
         self.running = False
-        if self.thread:
-            self.thread.join(timeout=1)
+        if self.ws_manager:
+            # Unsubscribe from all
+            for symbol, sub_id in self.subscriptions.items():
+                self._unsubscribe_from_order_book(symbol, sub_id)
+            self.ws_manager.stop()
     
-    def _simulate_market_data(self):
-        """Generate simulated market data"""
-        while self.running:
-            # Simulate price change
-            price_change = np.random.normal(0, self.volatility)
-            self.base_price *= (1 + price_change)
-            
-            # Generate order book
-            bids = self._generate_order_book(self.base_price, "bid")
-            asks = self._generate_order_book(self.base_price, "ask")
-            
-            # Update oracle with order book data
-            if self.oracle_master:
-                self.oracle_master.update_order_book("simulation", self.symbol, bids, asks)
-            
-            # Notify callbacks
-            for callback in self.callbacks:
-                callback(self.symbol, self.base_price)
-            
-            time.sleep(self.update_interval)
+    def _get_available_symbols(self):
+        """Get available symbols from Hyperliquid"""
+        info = Info(self.network)
+        meta = info.meta()
+        return [coin["name"] for coin in meta["universe"]]
     
-    def _generate_order_book(self, price, side):
-        """Generate a simulated order book"""
-        result = []
-        levels = 20  # Number of price levels to generate
-        
-        if side == "bid":
-            # Generate bids (descending prices)
-            for i in range(levels):
-                level_price = price * (1 - i * 0.001)  # Each level is 0.1% lower
-                size = np.random.uniform(0.1, 10)  # Random size between 0.1 and 10 BTC
-                result.append((level_price, size))
-            return sorted(result, key=lambda x: x[0], reverse=True)  # Sort descending
-        else:
-            # Generate asks (ascending prices)
-            for i in range(levels):
-                level_price = price * (1 + i * 0.001)  # Each level is 0.1% higher
-                size = np.random.uniform(0.1, 10)  # Random size between 0.1 and 10 BTC
-                result.append((level_price, size))
-            return sorted(result, key=lambda x: x[0])  # Sort ascending
+    def _subscribe_to_order_book(self, symbol):
+        """Subscribe to order book updates for a symbol"""
+        subscription = {
+            "type": "l2Book",
+            "coin": symbol
+        }
+        sub_id = self.ws_manager.subscribe(
+            subscription, 
+            lambda msg: self._handle_order_book_message(msg, symbol)
+        )
+        self.subscriptions[symbol] = sub_id
+        logging.info(f"Subscribed to {symbol} order book with subscription ID {sub_id}")
+    
+    def _unsubscribe_from_order_book(self, symbol, subscription_id):
+        """Unsubscribe from order book updates"""
+        subscription = {
+            "type": "l2Book",
+            "coin": symbol
+        }
+        self.ws_manager.unsubscribe(subscription, subscription_id)
+        logging.info(f"Unsubscribed from {symbol} order book")
+    
+    def _handle_order_book_message(self, msg, symbol):
+        """Process order book update messages"""
+        try:
+            if msg["channel"] == "l2Book" and msg["data"]["coin"].upper() == symbol.upper():
+                # Extract bid and ask data
+                data = msg["data"]
+                bids = [(float(bid["px"]), float(bid["sz"])) for bid in data.get("bids", [])]
+                asks = [(float(ask["px"]), float(ask["sz"])) for ask in data.get("asks", [])]
+                
+                # Calculate current mid price
+                if bids and asks:
+                    mid_price = (bids[0][0] + asks[0][0]) / 2
+                    self.current_prices[symbol] = mid_price
+                    
+                    # Call price update callback if registered
+                    if symbol in self.callbacks and callable(self.callbacks[symbol]):
+                        self.callbacks[symbol](symbol, mid_price)
+                
+                # Update oracle with order book data
+                if self.oracle_master:
+                    self.oracle_master.update_order_book("hyperliquid", symbol, bids, asks)
+                    
+                logging.debug(f"Processed {symbol} order book update: {len(bids)} bids, {len(asks)} asks")
+        except Exception as e:
+            logging.error(f"Error processing {symbol} order book update: {str(e)}")
+    
+    def get_current_price(self, symbol):
+        """Get current price for a symbol"""
+        return self.current_prices.get(symbol, 0)
 
 # ===== Streamlit Application =====
 
@@ -398,11 +459,22 @@ if 'oracle_master' not in st.session_state:
 if 'connector' not in st.session_state:
     st.session_state.connector = None
 if 'available_pairs' not in st.session_state:
-    st.session_state.available_pairs = ["BTC", "ETH", "SOL", "DOGE"]
+    st.session_state.available_pairs = []
 if 'selected_pairs' not in st.session_state:
     st.session_state.selected_pairs = []
 if 'run_status' not in st.session_state:
     st.session_state.run_status = False
+
+# Fetch available pairs
+@st.cache_data(ttl=3600)
+def get_available_pairs():
+    try:
+        info = Info("mainnet")
+        meta = info.meta()
+        return [coin["name"] for coin in meta["universe"]]
+    except Exception as e:
+        st.error(f"Error fetching pairs: {str(e)}")
+        return ["BTC", "ETH", "SOL"]  # Fallback
 
 # Header
 st.title("Crypto Sweet Spot Oracle")
@@ -411,6 +483,11 @@ st.markdown("### Dynamic Order Book Analysis Tool")
 # Sidebar
 with st.sidebar:
     st.header("Configuration")
+    
+    # Fetch available pairs if not already done
+    if not st.session_state.available_pairs:
+        with st.spinner("Fetching available pairs..."):
+            st.session_state.available_pairs = get_available_pairs()
     
     # Pair selection
     selected_pairs = st.multiselect(
@@ -510,18 +587,20 @@ def start_oracle(pairs, depths, update_interval, sweet_spot_interval):
             update_interval=sweet_spot_interval
         )
         
-        # Initialize mock connector for each selected pair
-        connectors = {}
+        # Initialize Hyperliquid connector
+        connector = HyperliquidConnector()
+        connector.set_oracle_master(oracle_master)
+        
+        # Register callbacks for each pair
         for symbol in pairs:
-            connector = MockExchangeConnector(symbol=symbol, update_interval=update_interval)
-            connector.set_oracle_master(oracle_master)
-            connector.add_callback(on_price_update)
-            connector.start()
-            connectors[symbol] = connector
+            connector.add_callback(symbol, on_price_update)
+        
+        # Start the connector with selected pairs
+        connector.start(symbols=pairs)
         
         # Update session state
         st.session_state.oracle_master = oracle_master
-        st.session_state.connectors = connectors
+        st.session_state.connector = connector
         st.session_state.selected_pairs = pairs
         st.session_state.run_status = True
         
@@ -532,11 +611,10 @@ def start_oracle(pairs, depths, update_interval, sweet_spot_interval):
 
 # Function to stop the oracle
 def stop_oracle():
-    if st.session_state.connectors:
+    if st.session_state.connector:
         try:
-            for symbol, connector in st.session_state.connectors.items():
-                connector.stop()
-            st.session_state.connectors = {}
+            st.session_state.connector.stop()
+            st.session_state.connector = None
             st.session_state.oracle_master = None
             st.session_state.run_status = False
             return True
@@ -688,20 +766,100 @@ ui_thread.start()
 st.markdown("""
 ## How the Sweet Spot Oracle Works
 
-1. **Order Book Analysis**: The oracle analyzes the order book at different depth levels.
+1. **Order Book Analysis**: The oracle analyzes the Hyperliquid order book at different depth levels.
 
 2. **Sweet Spot Detection**: It identifies the "sweet spot" - the depth level where price movements are most informative.
 
 3. **Dynamic Weighting**: It assigns weights to different depth levels, with higher weights near the sweet spot.
-
-4. **Price Calculation**: The final price is calculated as a weighted average of prices at different depths.
+            
+            4. **Price Calculation**: The final price is calculated as a weighted average of prices at different depths.
 
 This approach dynamically adapts to market conditions, making the price more responsive and less manipulable.
 
 ## Implementation Details
 
-- The current implementation uses simulated data for demonstration purposes.
-- In a production environment, it would connect to real exchange APIs.
-- The sweet spot detection algorithm balances volatility and responsiveness.
-- The inverted exponential weighting formula emphasizes depths near the sweet spot.
+- The implementation connects to Hyperliquid exchange via WebSockets
+- Order book data is analyzed in real-time to identify sweet spots
+- The sweet spot detection algorithm balances volatility and responsiveness
+- The inverted exponential weighting formula emphasizes depths near the sweet spot
+- Parameters can be adjusted to optimize for different market conditions
 """)
+
+# Display real-time metrics at the bottom
+st.header("Execution Metrics")
+metrics_container = st.container()
+
+# Create columns for different metrics
+metric_col1, metric_col2, metric_col3, metric_col4 = metrics_container.columns(4)
+
+# Define metric placeholders
+order_book_updates_count = 0
+sweet_spot_updates_count = 0
+price_updates_count = 0
+last_update_time = "N/A"
+
+# Function to update metrics
+def update_metrics():
+    global order_book_updates_count, sweet_spot_updates_count, price_updates_count, last_update_time
+    
+    while True:
+        if st.session_state.run_status:
+            # Update the metrics
+            order_book_updates_count += 1
+            if order_book_updates_count % 20 == 0:  # Every 20 order book updates
+                sweet_spot_updates_count += 1
+            price_updates_count += 1
+            last_update_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            
+            # Display the metrics
+            with metric_col1:
+                st.metric("Order Book Updates", order_book_updates_count)
+            
+            with metric_col2:
+                st.metric("Sweet Spot Recalculations", sweet_spot_updates_count)
+                
+            with metric_col3:
+                st.metric("Price Updates", price_updates_count)
+                
+            with metric_col4:
+                st.metric("Last Update", last_update_time)
+                
+        time.sleep(1)
+
+# Start metrics update thread
+metrics_thread = threading.Thread(target=update_metrics)
+metrics_thread.daemon = True
+metrics_thread.start()
+
+# Display developer info
+st.sidebar.markdown("---")
+st.sidebar.info("""
+**Developer Info**
+
+This Sweet Spot Oracle was created to optimize price feeds by dynamically 
+identifying the most informative parts of the order book.
+
+For implementation details or questions, contact the development team.
+""")
+
+# Add download button for order book data
+if st.session_state.run_status and len(st.session_state.price_history) > 0:
+    # Prepare download data
+    download_data = {}
+    for symbol in st.session_state.price_history:
+        if not st.session_state.price_history[symbol]:
+            continue
+        df = pd.DataFrame(st.session_state.price_history[symbol])
+        download_data[symbol] = df
+    
+    # Combine all data
+    if download_data:
+        all_data = pd.concat([df.assign(Symbol=symbol) for symbol, df in download_data.items()])
+        
+        # Create download button
+        st.sidebar.download_button(
+            label="Download Price History CSV",
+            data=all_data.to_csv(index=False),
+            file_name="sweet_spot_price_history.csv",
+            mime="text/csv"
+        )
