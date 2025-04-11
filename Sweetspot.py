@@ -11,13 +11,14 @@ from datetime import datetime
 from collections import defaultdict, deque
 from typing import Dict, List, Tuple, Any, Callable, Optional, NamedTuple
 
-# Import hyperliquid library - NO installation attempts, just clean import
+# Import hyperliquid library
 try:
     from hyperliquid.info import Info
     from hyperliquid.utils.exchange_config import get_base_url
     from hyperliquid.websocket_manager import WebsocketManager
-except ImportError:
-    st.error("Hyperliquid package is not installed. Please make sure it's in your requirements.txt file.")
+except ImportError as e:
+    st.error(f"Error importing Hyperliquid: {str(e)}")
+    st.error("Please check that hyperliquid-python is installed and available.")
     st.stop()
 
 # Set up basic logging
