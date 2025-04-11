@@ -7,11 +7,11 @@ import time
 import threading
 import json
 import logging
+import pkg_resources  # Add this import here
 from datetime import datetime
 from collections import defaultdict, deque
 from typing import Dict, List, Tuple, Any, Callable, Optional, NamedTuple
 
-# Import hyperliquid library
 try:
     from hyperliquid.info import Info
     from hyperliquid.utils.exchange_config import get_base_url
