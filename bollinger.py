@@ -8,6 +8,7 @@ import plotly.express as px
 from sqlalchemy import create_engine
 from datetime import datetime, timedelta
 import pkg_resources  # Add this import here
+import pytz
 
 st.set_page_config(
     page_title="Bollinger Bands Profitability Analysis",
@@ -102,6 +103,7 @@ if not selected_tokens:
     st.stop()
 
 # Function to calculate Bollinger Bands
+def calculate_bollinger_bands(df, period=20, std_dev=2.0):
     """
     Calculate Bollinger Bands for the provided dataframe without requiring TA-Lib
     """
