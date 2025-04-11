@@ -236,7 +236,8 @@ def fetch_and_calculate_direction_changes(token):
         # Create a DataFrame with the results
         changes_df = direction_changes.to_frame(name='direction_changes')
         changes_df['original_datetime'] = changes_df.index
-        changes_df['time_label'] = changes_df.index.strftime('%H:%M')
+        # Modify this line in your code
+        changes_df['time_label'] = changes_df.index.strftime('%Y-%m-%d %H:%M')  # Include date to make labels unique
         
         # Calculate the 24-hour average
         changes_df['avg_24h_changes'] = changes_df['direction_changes'].mean()
