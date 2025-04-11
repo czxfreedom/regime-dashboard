@@ -18,7 +18,7 @@ try:
     from hyperliquid.websocket_manager import WebsocketManager
 except ImportError as e:
     st.error(f"Error importing Hyperliquid: {str(e)}")
-    st.error("Please check that hyperliquid-python is installed and available.")
+    st.error(f"Installed packages: {', '.join(sorted([pkg.key for pkg in pkg_resources.working_set]))}")
     st.stop()
 
 # Set up basic logging
