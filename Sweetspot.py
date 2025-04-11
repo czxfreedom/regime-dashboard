@@ -11,23 +11,14 @@ from datetime import datetime
 from collections import defaultdict, deque
 from typing import Dict, List, Tuple, Any, Callable, Optional, NamedTuple
 
-# Install hyperliquid if not present
-import subprocess
-import sys
-import importlib.util
-
-def install_package(package):
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-
-# Check if hyperliquid is installed
-if importlib.util.find_spec("hyperliquid") is None:
-    st.write("Installing hyperliquid package...")
-    install_package("hyperliquid-python")
-
 # Import hyperliquid library
-from hyperliquid.info import Info
-from hyperliquid.utils.exchange_config import get_base_url
-from hyperliquid.websocket_manager import WebsocketManager
+try:
+    from hyperliquid.info import Info
+    from hyperliquid.utils.exchange_config import get_base_url
+    from hyperliquid.websocket_manager import WebsocketManager
+except ImportError:
+    st.error("Hyperliquid package is not installed. Please install it using: pip install hyperliquid-python")
+    st.stop()
 
 # Set up basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -347,6 +338,8 @@ class HyperliquidConnector:
         self.subscriptions = {}  # symbol -> subscription_id
         self.callbacks = {}  # symbol -> callback
         self.current_prices = {}  # symbol -> price
+        self._reconnect_attempts = 0
+        self._max_reconnect_attempts = 5
     
     def set_oracle_master(self, oracle_master):
         self.oracle_master = oracle_master
@@ -358,62 +351,99 @@ class HyperliquidConnector:
         if self.running:
             return
         
-        # Create websocket manager
-        self.ws_manager = WebsocketManager(self.base_url)
-        self.ws_manager.start()
-        
-        # Get available symbols if none provided
-        if not symbols:
-            symbols = self._get_available_symbols()
+        try:
+            # Create websocket manager
+            self.ws_manager = WebsocketManager(self.base_url)
+            self.ws_manager.start()
             
-        self.running = True
-        
-        # Subscribe to order book for each symbol
-        for symbol in symbols:
-            self._subscribe_to_order_book(symbol)
+            # Get available symbols if none provided
+            if not symbols:
+                symbols = self._get_available_symbols()
+                
+            self.running = True
+            
+            # Subscribe to order book for each symbol
+            for symbol in symbols:
+                self._subscribe_to_order_book(symbol)
+                
+            logging.info(f"Successfully connected to Hyperliquid and subscribed to {len(symbols)} symbols")
+            self._reconnect_attempts = 0  # Reset reconnect counter on successful connection
+            
+        except Exception as e:
+            self._reconnect_attempts += 1
+            logging.error(f"Error starting Hyperliquid connector: {str(e)}")
+            
+            if self._reconnect_attempts < self._max_reconnect_attempts:
+                logging.info(f"Reconnect attempt {self._reconnect_attempts} of {self._max_reconnect_attempts}...")
+                time.sleep(2)  # Wait before reconnecting
+                self.start(symbols)
+            else:
+                logging.error("Max reconnect attempts reached. Please check your connection and try again.")
+                raise e
     
     def stop(self):
         self.running = False
         if self.ws_manager:
-            # Unsubscribe from all
-            for symbol, sub_id in self.subscriptions.items():
-                self._unsubscribe_from_order_book(symbol, sub_id)
-            self.ws_manager.stop()
+            try:
+                # Unsubscribe from all
+                for symbol, sub_id in self.subscriptions.items():
+                    self._unsubscribe_from_order_book(symbol, sub_id)
+                self.ws_manager.stop()
+                logging.info("Hyperliquid connector stopped")
+            except Exception as e:
+                logging.error(f"Error stopping Hyperliquid connector: {str(e)}")
     
     def _get_available_symbols(self):
         """Get available symbols from Hyperliquid"""
-        info = Info(self.network)
-        meta = info.meta()
-        return [coin["name"] for coin in meta["universe"]]
+        try:
+            info = Info(self.network)
+            meta = info.meta()
+            return [coin["name"] for coin in meta["universe"]]
+        except Exception as e:
+            logging.error(f"Error fetching symbols: {str(e)}")
+            # Fallback to common symbols
+            return ["BTC", "ETH", "SOL"]
     
     def _subscribe_to_order_book(self, symbol):
         """Subscribe to order book updates for a symbol"""
-        subscription = {
-            "type": "l2Book",
-            "coin": symbol
-        }
-        sub_id = self.ws_manager.subscribe(
-            subscription, 
-            lambda msg: self._handle_order_book_message(msg, symbol)
-        )
-        self.subscriptions[symbol] = sub_id
-        logging.info(f"Subscribed to {symbol} order book with subscription ID {sub_id}")
+        try:
+            subscription = {
+                "type": "l2Book",
+                "coin": symbol
+            }
+            sub_id = self.ws_manager.subscribe(
+                subscription, 
+                lambda msg: self._handle_order_book_message(msg, symbol)
+            )
+            self.subscriptions[symbol] = sub_id
+            logging.info(f"Subscribed to {symbol} order book with subscription ID {sub_id}")
+        except Exception as e:
+            logging.error(f"Error subscribing to {symbol} order book: {str(e)}")
     
     def _unsubscribe_from_order_book(self, symbol, subscription_id):
         """Unsubscribe from order book updates"""
-        subscription = {
-            "type": "l2Book",
-            "coin": symbol
-        }
-        self.ws_manager.unsubscribe(subscription, subscription_id)
-        logging.info(f"Unsubscribed from {symbol} order book")
+        try:
+            subscription = {
+                "type": "l2Book",
+                "coin": symbol
+            }
+            self.ws_manager.unsubscribe(subscription, subscription_id)
+            logging.info(f"Unsubscribed from {symbol} order book")
+        except Exception as e:
+            logging.error(f"Error unsubscribing from {symbol} order book: {str(e)}")
     
     def _handle_order_book_message(self, msg, symbol):
         """Process order book update messages"""
         try:
-            if msg["channel"] == "l2Book" and msg["data"]["coin"].upper() == symbol.upper():
+            if msg and "channel" in msg and msg["channel"] == "l2Book" and "data" in msg and "coin" in msg["data"] and msg["data"]["coin"].upper() == symbol.upper():
                 # Extract bid and ask data
                 data = msg["data"]
+                
+                # Check if bids and asks exist
+                if "bids" not in data or "asks" not in data:
+                    logging.warning(f"Incomplete order book data for {symbol}: missing bids or asks")
+                    return
+                
                 bids = [(float(bid["px"]), float(bid["sz"])) for bid in data.get("bids", [])]
                 asks = [(float(ask["px"]), float(ask["sz"])) for ask in data.get("asks", [])]
                 
@@ -464,6 +494,8 @@ if 'selected_pairs' not in st.session_state:
     st.session_state.selected_pairs = []
 if 'run_status' not in st.session_state:
     st.session_state.run_status = False
+if 'connection_error' not in st.session_state:
+    st.session_state.connection_error = None
 
 # Fetch available pairs
 @st.cache_data(ttl=3600)
@@ -473,12 +505,21 @@ def get_available_pairs():
         meta = info.meta()
         return [coin["name"] for coin in meta["universe"]]
     except Exception as e:
-        st.error(f"Error fetching pairs: {str(e)}")
+        error_msg = f"Error fetching pairs: {str(e)}"
+        st.session_state.connection_error = error_msg
+        logging.error(error_msg)
         return ["BTC", "ETH", "SOL"]  # Fallback
 
 # Header
 st.title("Crypto Sweet Spot Oracle")
 st.markdown("### Dynamic Order Book Analysis Tool")
+
+# Display any connection errors
+if st.session_state.connection_error:
+    st.error(st.session_state.connection_error)
+    if st.button("Clear Error"):
+        st.session_state.connection_error = None
+        st.experimental_rerun()
 
 # Sidebar
 with st.sidebar:
@@ -502,7 +543,12 @@ with st.sidebar:
         "Order Book Depths (comma-separated)",
         value="5000,10000,25000,50000,100000,150000,200000,300000"
     )
-    depths = [float(d.strip()) for d in depths_input.split(",")]
+    
+    try:
+        depths = [float(d.strip()) for d in depths_input.split(",")]
+    except ValueError:
+        st.error("Invalid depth values. Please enter comma-separated numbers.")
+        depths = [5000, 10000, 25000, 50000, 100000, 150000, 200000, 300000]
     
     update_interval = st.slider(
         "Update Interval (seconds)",
@@ -519,6 +565,9 @@ with st.sidebar:
         value=60,
         step=10
     )
+    
+    # Network selection
+    network = st.radio("Network", ["mainnet", "testnet"], index=0)
     
     # Control buttons
     start_button = st.button("Start Oracle", type="primary", disabled=st.session_state.run_status)
@@ -575,12 +624,15 @@ def on_price_update(symbol, price):
     })
 
 # Function to start the oracle
-def start_oracle(pairs, depths, update_interval, sweet_spot_interval):
+def start_oracle(pairs, depths, update_interval, sweet_spot_interval, network="mainnet"):
     # Stop if already running
     if st.session_state.oracle_master is not None:
         stop_oracle()
     
     try:
+        # Clear any previous connection errors
+        st.session_state.connection_error = None
+        
         # Initialize Oracle Master
         oracle_master = SweetSpotOracleMaster(
             depths=depths,
@@ -588,7 +640,7 @@ def start_oracle(pairs, depths, update_interval, sweet_spot_interval):
         )
         
         # Initialize Hyperliquid connector
-        connector = HyperliquidConnector()
+        connector = HyperliquidConnector(network=network)
         connector.set_oracle_master(oracle_master)
         
         # Register callbacks for each pair
@@ -606,7 +658,10 @@ def start_oracle(pairs, depths, update_interval, sweet_spot_interval):
         
         return True
     except Exception as e:
-        st.error(f"Error starting oracle: {str(e)}")
+        error_msg = f"Error starting oracle: {str(e)}"
+        st.session_state.connection_error = error_msg
+        logging.error(error_msg)
+        st.session_state.run_status = False
         return False
 
 # Function to stop the oracle
@@ -619,13 +674,15 @@ def stop_oracle():
             st.session_state.run_status = False
             return True
         except Exception as e:
-            st.error(f"Error stopping oracle: {str(e)}")
+            error_msg = f"Error stopping oracle: {str(e)}"
+            st.session_state.connection_error = error_msg
+            logging.error(error_msg)
             return False
     return True
 
 # Handle button actions
 if start_button:
-    start_oracle(selected_pairs, depths, update_interval, sweet_spot_interval)
+    start_oracle(selected_pairs, depths, update_interval, sweet_spot_interval, network)
 
 if stop_button:
     stop_oracle()
@@ -771,8 +828,8 @@ st.markdown("""
 2. **Sweet Spot Detection**: It identifies the "sweet spot" - the depth level where price movements are most informative.
 
 3. **Dynamic Weighting**: It assigns weights to different depth levels, with higher weights near the sweet spot.
-            
-            4. **Price Calculation**: The final price is calculated as a weighted average of prices at different depths.
+
+4. **Price Calculation**: The final price is calculated as a weighted average of prices at different depths.
 
 This approach dynamically adapts to market conditions, making the price more responsive and less manipulable.
 
@@ -831,6 +888,52 @@ metrics_thread = threading.Thread(target=update_metrics)
 metrics_thread.daemon = True
 metrics_thread.start()
 
+# Status monitoring thread - checks for WebSocket health
+def monitor_connection():
+    while True:
+        if st.session_state.run_status and st.session_state.connector:
+            # Check if we're receiving data
+            active_symbols = list(st.session_state.price_history.keys())
+            data_received = False
+            
+            for symbol in active_symbols:
+                # Check if we have recent price updates (within last 10 seconds)
+                if (symbol in st.session_state.price_history and 
+                    st.session_state.price_history[symbol] and 
+                    len(st.session_state.price_history[symbol]) > 1):
+                    data_received = True
+                    break
+            
+            if not data_received and st.session_state.run_status:
+                # No data received, connection might be dead
+                logging.warning("No data received recently. Connection may be lost.")
+                
+                # Try to reconnect automatically
+                try:
+                    st.session_state.connector.stop()
+                    time.sleep(2)
+                    
+                    # Recreate connector and restart
+                    connector = HyperliquidConnector(network="mainnet")
+                    connector.set_oracle_master(st.session_state.oracle_master)
+                    
+                    for symbol in st.session_state.selected_pairs:
+                        connector.add_callback(symbol, on_price_update)
+                    
+                    connector.start(symbols=st.session_state.selected_pairs)
+                    st.session_state.connector = connector
+                    
+                    logging.info("Automatically reconnected to Hyperliquid")
+                except Exception as e:
+                    logging.error(f"Failed to auto-reconnect: {str(e)}")
+        
+        time.sleep(10)  # Check every 10 seconds
+
+# Start monitoring thread
+monitor_thread = threading.Thread(target=monitor_connection)
+monitor_thread.daemon = True
+monitor_thread.start()
+
 # Display developer info
 st.sidebar.markdown("---")
 st.sidebar.info("""
@@ -842,8 +945,39 @@ identifying the most informative parts of the order book.
 For implementation details or questions, contact the development team.
 """)
 
+# Debugging section (collapsible)
+with st.expander("Debug Information"):
+    st.subheader("WebSocket Connection Status")
+    
+    if st.session_state.connector:
+        if st.session_state.run_status:
+            st.success("WebSocket connected")
+            
+            # Show subscription info
+            if hasattr(st.session_state.connector, 'subscriptions'):
+                st.write("Active Subscriptions:")
+                for symbol, sub_id in st.session_state.connector.subscriptions.items():
+                    st.write(f"- {symbol}: ID {sub_id}")
+        else:
+            st.warning("WebSocket disconnected")
+    else:
+        st.info("WebSocket not initialized")
+    
+    # Manual reconnect button
+    if st.button("Force Reconnect"):
+        if st.session_state.run_status:
+            stop_oracle()
+            time.sleep(1)
+            start_oracle(
+                st.session_state.selected_pairs, 
+                depths,
+                update_interval, 
+                sweet_spot_interval
+            )
+            st.success("Reconnection initiated")
+
 # Add download button for order book data
-if st.session_state.run_status and len(st.session_state.price_history) > 0:
+if st.session_state.run_status and hasattr(st.session_state, 'price_history') and len(st.session_state.price_history) > 0:
     # Prepare download data
     download_data = {}
     for symbol in st.session_state.price_history:
@@ -862,4 +996,17 @@ if st.session_state.run_status and len(st.session_state.price_history) > 0:
             data=all_data.to_csv(index=False),
             file_name="sweet_spot_price_history.csv",
             mime="text/csv"
+        )
+        
+        # Add timestamp to filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        st.sidebar.download_button(
+            label="Download Full Analysis",
+            data=json.dumps({
+                "price_history": {k: v for k, v in st.session_state.price_history.items()},
+                "sweet_spots": {k: v for k, v in st.session_state.sweet_spots.items()},
+                "weights": {k: v for k, v in st.session_state.weights.items()}
+            }, indent=2),
+            file_name=f"sweet_spot_analysis_{timestamp}.json",
+            mime="application/json"
         )
