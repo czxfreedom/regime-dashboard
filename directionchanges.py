@@ -725,7 +725,8 @@ if token_results:
         avg_changes_by_time = avg_changes_by_time.sort_index()
         
         # Get the hour from the index (time label)
-        avg_changes_by_time['hour'] = avg_changes_by_time.index.str.split(':').str[0].astype(int)
+        # Extract the hour from the datetime index
+        avg_changes_by_time['hour'] = avg_changes_by_time.index.str.split(' ').str[1].str.split(':').str[0].astype(int)
         
         # Group by hour and calculate mean
         hourly_changes = avg_changes_by_time.groupby('hour')['avg_changes'].mean().reset_index()
