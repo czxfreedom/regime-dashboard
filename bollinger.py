@@ -1,5 +1,3 @@
-# Save this as jup_bollinger_analyzer.py in your Streamlit app folder
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -42,6 +40,9 @@ singapore_timezone = pytz.timezone('Asia/Singapore')
 now_utc = datetime.now(pytz.utc)
 now_sg = now_utc.astimezone(singapore_timezone)
 st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
+
+# Add a debug mode checkbox
+debug_mode = st.sidebar.checkbox("Debug Mode", value=False)
 
 # Fetch all available tokens from DB
 @st.cache_data(show_spinner="Fetching tokens...")
@@ -366,15 +367,27 @@ def bb_squeeze_strategy(df, take_profit_pct=3.0, stop_loss_pct=1.5, max_hold_tim
     
     # Define squeeze condition (when bandwidth is in bottom 20% of its range over lookback period)
     lookback = min(len(df), 100)
-    df['bandwidth_percentile'] = df['bb_bandwidth'].rolling(window=lookback).apply(
-        lambda x: np.percentile(x, 20)
-    )
     
-    # Identify squeeze
-    df['in_squeeze'] = df['bb_bandwidth'] <= df['bandwidth_percentile']
+    # Safely calculate bandwidth percentile - handle empty dataframes
+    if len(df) > lookback:
+        df['bandwidth_percentile'] = df['bb_bandwidth'].rolling(window=lookback).apply(
+            lambda x: np.percentile(x, 20) if len(x) > 0 else np.nan
+        )
+    else:
+        # If we don't have enough data for the lookback, use a smaller window
+        safe_lookback = max(5, len(df) // 2)
+        df['bandwidth_percentile'] = df['bb_bandwidth'].rolling(window=safe_lookback).apply(
+            lambda x: np.percentile(x, 20) if len(x) > 0 else np.nan
+        )
+    
+    # Identify squeeze - handle NaN values safely
+    df['in_squeeze'] = (df['bb_bandwidth'] <= df['bandwidth_percentile']).fillna(False)
     
     # Identify squeeze exit with upward momentum
-    df['squeeze_exit_long'] = (df['in_squeeze'].shift(1) & ~df['in_squeeze']) & (df['price'] > df['bb_middle']) & (df['price_change_pct'] > 0)
+    df['squeeze_exit_long'] = (df['in_squeeze'].shift(1).fillna(False) & 
+                              ~df['in_squeeze'] & 
+                              (df['price'] > df['bb_middle']) & 
+                              (df['price_change_pct'] > 0))
     
     # Generate signals
     df.loc[df['squeeze_exit_long'], 'signal'] = 1
@@ -446,49 +459,56 @@ def bb_squeeze_strategy(df, take_profit_pct=3.0, stop_loss_pct=1.5, max_hold_tim
     
     return df
 
-# Calculate strategy returns
+# Calculate strategy returns - FIXED VERSION
 def calculate_returns(df):
     """
     Calculate returns and equity curve based on position signals and trade details
     """
-    # Calculate trade returns based on entry and exit prices
-    trade_returns = []
+    # Get completed trades where we have both entry and exit prices
+    completed_trades = df[(df['entry_price'].notna()) & (df['exit_price'].notna())].copy()
     
-    # Group by position changes to identify complete trades
-    entry_indices = df[(df['position'] == 1) & (df['position'].shift(1) != 1)].index
-    exit_indices = df[(df['position'] == 0) & (df['position'].shift(1) == 1)].index
+    if completed_trades.empty:
+        df['trade_return'] = 0.0
+        df['cum_strategy_return'] = 0.0
+        return df
     
-    # Match entries and exits
-    for i, entry_idx in enumerate(entry_indices):
-        if i < len(exit_indices):
-            exit_idx = exit_indices[i]
-            entry_price = df.loc[entry_idx, 'price']
-            exit_price = df.loc[exit_idx, 'price']
-            
-            # Calculate return
-            trade_return = (exit_price / entry_price) - 1
-            trade_returns.append(trade_return)
-    
-    # Calculate cumulative returns
+    # Create a trade return column
     df['trade_return'] = 0.0
     
-    # Assign returns to the exit points
-    for i, exit_idx in enumerate(exit_indices):
-        if i < len(trade_returns):
-            df.loc[exit_idx, 'trade_return'] = trade_returns[i]
+    # Calculate individual trade returns at exit points
+    for idx in completed_trades.index:
+        profit_pct = completed_trades.loc[idx, 'trade_profit_pct']
+        df.loc[idx, 'trade_return'] = profit_pct / 100.0  # Convert percentage to decimal
     
-    # Calculate cumulative returns
-    df['cum_strategy_return'] = (1 + df['trade_return']).cumprod() - 1
+    # Calculate cumulative returns (progressive product of 1+return)
+    # Initialize cumulative return array
+    cum_returns = np.zeros(len(df))
+    cum_value = 1.0
+    
+    # Loop through each row and update cumulative value when a trade completes
+    for i, idx in enumerate(df.index):
+        if df.loc[idx, 'trade_return'] != 0:  # Only on exit points
+            ret = df.loc[idx, 'trade_return']
+            cum_value *= (1 + ret)
+        cum_returns[i] = cum_value - 1
+    
+    # Store cumulative returns in dataframe
+    df['cum_strategy_return'] = cum_returns
+    
+    if debug_mode:
+        st.write("Trade returns calculation complete")
+        st.write(f"Total trades found: {len(completed_trades)}")
+        st.write(f"Cumulative return: {df['cum_strategy_return'].iloc[-1]:.4f}")
     
     return df
 
-# Calculate performance metrics
+# Calculate performance metrics - FIXED VERSION
 def calculate_performance_metrics(df):
     """
     Calculate performance metrics for the strategy with focus on short-term trading
     """
-    # Filter for completed trades
-    completed_trades = df[(df['entry_price'].notna()) & (df['exit_price'].notna())]
+    # Filter for completed trades (where both entry and exit exist)
+    completed_trades = df[(df['entry_price'].notna()) & (df['exit_price'].notna())].copy()
     
     if completed_trades.empty:
         return {
@@ -502,12 +522,12 @@ def calculate_performance_metrics(df):
         }
     
     # Calculate trade metrics
-    trade_profits = completed_trades['trade_profit_pct']
+    trade_profits = completed_trades['trade_profit_pct'].fillna(0)
     winning_trades = trade_profits[trade_profits > 0]
     losing_trades = trade_profits[trade_profits <= 0]
     
     # Total return
-    total_return = df['cum_strategy_return'].iloc[-1] if not df.empty and 'cum_strategy_return' in df.columns else 0
+    total_return = df['cum_strategy_return'].iloc[-1] if 'cum_strategy_return' in df.columns else 0
     
     # Win rate
     total_trades = len(trade_profits)
@@ -515,31 +535,36 @@ def calculate_performance_metrics(df):
     
     # Profit factor
     total_profit = winning_trades.sum() if len(winning_trades) > 0 else 0
-    total_loss = abs(losing_trades.sum()) if len(losing_trades) > 0 else 0
-    profit_factor = total_profit / total_loss if total_loss > 0 else float('inf')
+    total_loss = abs(losing_trades.sum()) if len(losing_trades) > 0 else 0.00001  # Small value to avoid division by zero
+    profit_factor = total_profit / total_loss if total_loss > 0 else 0
     
     # Average return per trade
     avg_trade_return = trade_profits.mean() if len(trade_profits) > 0 else 0
     
     # Maximum drawdown
-    if 'cum_strategy_return' in df.columns and not df.empty:
+    if 'cum_strategy_return' in df.columns:
         df['peak'] = df['cum_strategy_return'].cummax()
         df['drawdown'] = df['peak'] - df['cum_strategy_return']
-        max_drawdown = df['drawdown'].max()
+        max_drawdown = df['drawdown'].max() if len(df['drawdown']) > 0 else 0
     else:
         max_drawdown = 0
     
-    # Average trade duration (in minutes/bars)
-    avg_trade_duration = completed_trades['trade_duration'].mean() if 'trade_duration' in completed_trades else 0
+    # Average trade duration
+    avg_trade_duration = completed_trades['trade_duration'].mean() if 'trade_duration' in completed_trades.columns else 0
     
     # Exit reasons count
-    exit_reasons = completed_trades['exit_reason'].value_counts().to_dict() if 'exit_reason' in completed_trades else {}
+    exit_reasons = completed_trades['exit_reason'].value_counts().to_dict() if 'exit_reason' in completed_trades.columns else {}
+    
+    if debug_mode:
+        st.write("Performance metrics calculation complete")
+        st.write(f"Win rate: {win_rate:.2f}, Profit factor: {profit_factor:.2f}")
+        st.write(f"Avg trade return: {avg_trade_return:.2f}%, Total trades: {total_trades}")
     
     return {
         'total_return': total_return,
         'win_rate': win_rate,
         'profit_factor': profit_factor,
-        'avg_trade_return': avg_trade_return,
+        'avg_trade_return': avg_trade_return, 
         'max_drawdown': max_drawdown,
         'total_trades': total_trades,
         'avg_trade_duration': avg_trade_duration,
@@ -605,15 +630,26 @@ def fetch_price_data_and_run_strategy(token, lookback_minutes, bb_period, bb_std
         df = pd.read_sql(query, engine)
 
         if df.empty:
+            if debug_mode:
+                st.error(f"No data found for {token} in the database")
             return None, None, None
 
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.set_index('timestamp').sort_index()
         
+        if debug_mode:
+            st.write(f"Initial data points: {len(df)}")
+            st.write(f"Data range: {df.index.min()} to {df.index.max()}")
+        
         # Apply time of day filter if requested
         if apply_time_filter and start_hour is not None and end_hour is not None:
+            before_filter = len(df)
             # Filter by hour of day in Singapore time
             df = df[(df.index.hour >= start_hour) & (df.index.hour <= end_hour)]
+            after_filter = len(df)
+            
+            if debug_mode:
+                st.write(f"Time filtered: {before_filter} -> {after_filter} points")
             
             if df.empty:
                 st.warning(f"No data available for {token} during the selected hours.")
@@ -624,6 +660,9 @@ def fetch_price_data_and_run_strategy(token, lookback_minutes, bb_period, bb_std
         
         # Resample to desired timeframe
         df = resample_data(df, candle_timeframe)
+        
+        if debug_mode:
+            st.write(f"After resampling to {candle_timeframe}: {len(df)} data points")
         
         # Calculate Bollinger Bands
         df = calculate_bollinger_bands(df, period=bb_period, std_dev=bb_std_dev)
@@ -648,24 +687,43 @@ def fetch_price_data_and_run_strategy(token, lookback_minutes, bb_period, bb_std
             best_strat_name = None
             
             for strat_name, strat_func in strategies.items():
+                if debug_mode:
+                    st.write(f"Testing strategy: {strat_name}")
+                
                 temp_df = df.copy()
                 temp_df = strat_func(temp_df, take_profit_pct, stop_loss_pct, max_hold_time)
                 temp_df = calculate_returns(temp_df)
                 
-                if not temp_df.empty and 'trade_profit_pct' in temp_df.columns:
-                    winning_trades = temp_df[temp_df['trade_profit_pct'] > 0]
-                    if not winning_trades.empty:
-                        total_profit = winning_trades['trade_profit_pct'].sum()
-                        if total_profit > best_return:
-                            best_return = total_profit
-                            best_df = temp_df
-                            best_strat_name = strat_name
+                # Count completed trades
+                completed_trades = temp_df[(temp_df['entry_price'].notna()) & (temp_df['exit_price'].notna())]
+                num_trades = len(completed_trades)
+                
+                if debug_mode:
+                    st.write(f"{strat_name}: {num_trades} trades identified")
+                
+                if num_trades > 0:
+                    # Calculate total profit
+                    total_profit = completed_trades['trade_profit_pct'].sum()
+                    
+                    if debug_mode:
+                        st.write(f"{strat_name} total profit: {total_profit:.2f}%")
+                    
+                    if total_profit > best_return:
+                        best_return = total_profit
+                        best_df = temp_df
+                        best_strat_name = strat_name
             
             if best_df is not None:
                 df = best_df
                 strategy_name = best_strat_name
+                
+                if debug_mode:
+                    st.write(f"Selected best strategy: {strategy_name} with return: {best_return:.2f}%")
             else:
                 strategy_name = "No valid strategy found"
+                
+                if debug_mode:
+                    st.warning("No valid trades found across all strategies")
         
         # Calculate returns
         df = calculate_returns(df)
@@ -678,6 +736,9 @@ def fetch_price_data_and_run_strategy(token, lookback_minutes, bb_period, bb_std
     
     except Exception as e:
         st.error(f"Error processing {token}: {e}")
+        if debug_mode:
+            import traceback
+            st.write(traceback.format_exc())
         return None, None, None
 
 # Show spinner while processing
@@ -698,75 +759,76 @@ with st.spinner(f"Analyzing {selected_token} with {selected_strategy} strategy..
     )
 
 # Display results
-    if df is not None and metrics is not None:
-        # Main metrics
-        st.header(f"{selected_token} Analysis Results - {metrics['strategy_name']} Strategy")
-        
-        # Performance metrics in neat columns
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric("Win Rate", f"{metrics['win_rate']*100:.1f}%", 
-                     delta=f"{(metrics['win_rate']-0.5)*100:.1f}%" if metrics['win_rate'] > 0 else None)
-            st.metric("Total Trades", f"{metrics['total_trades']}")
-        
-        with col2:
-            st.metric("Avg Trade Return", f"{metrics['avg_trade_return']:.2f}%")
-            st.metric("Avg Trade Duration", f"{metrics['avg_trade_duration']:.1f} bars")
-        
-        with col3:
-            st.metric("Profit Factor", f"{metrics['profit_factor']:.2f}")
-            st.metric("Total Return", f"{metrics['total_return']*100:.2f}%")
-        
-        with col4:
-            st.metric("Max Drawdown", f"{metrics['max_drawdown']*100:.2f}%")
-            if 'exit_reasons' in metrics and metrics['exit_reasons']:
-                top_exit = max(metrics['exit_reasons'].items(), key=lambda x: x[1])[0]
-                st.metric("Top Exit Reason", top_exit)
-        
-        # Price chart with Bollinger Bands and trades
-        st.subheader("Price Chart with Bollinger Bands and Trades")
-        
-        fig = go.Figure()
-        
-        # Add price
-        fig.add_trace(go.Scatter(
-            x=df.index,
-            y=df['price'],
-            mode='lines',
-            name='Price',
-            line=dict(color='blue', width=1)
-        ))
-        
-        # Add Bollinger Bands
-        fig.add_trace(go.Scatter(
-            x=df.index,
-            y=df['bb_upper'],
-            mode='lines',
-            line=dict(color='rgba(173, 216, 230, 0.7)', width=1),
-            name='Upper Band'
-        ))
-        
-        fig.add_trace(go.Scatter(
-            x=df.index,
-            y=df['bb_lower'],
-            mode='lines',
-            line=dict(color='rgba(173, 216, 230, 0.7)', width=1),
-            fill='tonexty',
-            fillcolor='rgba(173, 216, 230, 0.3)',
-            name='Lower Band'
-        ))
-        
-        fig.add_trace(go.Scatter(
-            x=df.index,
-            y=df['bb_middle'],
-            mode='lines',
-            line=dict(color='rgba(173, 216, 230, 0.9)', width=1, dash='dash'),
-            name='Middle Band'
-        ))
-        
-        # Add entry points
-        entries = df[df['entry_price'].notna()]
+if df is not None and metrics is not None:
+    # Main metrics
+    st.header(f"{selected_token} Analysis Results - {metrics['strategy_name']} Strategy")
+    
+    # Performance metrics in neat columns
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Win Rate", f"{metrics['win_rate']*100:.1f}%", 
+                 delta=f"{(metrics['win_rate']-0.5)*100:.1f}%" if metrics['win_rate'] > 0 else None)
+        st.metric("Total Trades", f"{metrics['total_trades']}")
+    
+    with col2:
+        st.metric("Avg Trade Return", f"{metrics['avg_trade_return']:.2f}%")
+        st.metric("Avg Trade Duration", f"{metrics['avg_trade_duration']:.1f} bars")
+    
+    with col3:
+        st.metric("Profit Factor", f"{metrics['profit_factor']:.2f}")
+        st.metric("Total Return", f"{metrics['total_return']*100:.2f}%")
+    
+    with col4:
+        st.metric("Max Drawdown", f"{metrics['max_drawdown']*100:.2f}%")
+        if 'exit_reasons' in metrics and metrics['exit_reasons']:
+            top_exit = max(metrics['exit_reasons'].items(), key=lambda x: x[1])[0]
+            st.metric("Top Exit Reason", top_exit)
+    
+    # Price chart with Bollinger Bands and trades
+    st.subheader("Price Chart with Bollinger Bands and Trades")
+    
+    fig = go.Figure()
+    
+    # Add price
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df['price'],
+        mode='lines',
+        name='Price',
+        line=dict(color='blue', width=1)
+    ))
+    
+    # Add Bollinger Bands
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df['bb_upper'],
+        mode='lines',
+        line=dict(color='rgba(173, 216, 230, 0.7)', width=1),
+        name='Upper Band'
+    ))
+    
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df['bb_lower'],
+        mode='lines',
+        line=dict(color='rgba(173, 216, 230, 0.7)', width=1),
+        fill='tonexty',
+        fillcolor='rgba(173, 216, 230, 0.3)',
+        name='Lower Band'
+    ))
+    
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df['bb_middle'],
+        mode='lines',
+        line=dict(color='rgba(173, 216, 230, 0.9)', width=1, dash='dash'),
+        name='Middle Band'
+    ))
+    
+    # Add entry points
+    entries = df[df['entry_price'].notna()]
+    if not entries.empty:
         fig.add_trace(go.Scatter(
             x=entries.index,
             y=entries['price'],
@@ -774,9 +836,10 @@ with st.spinner(f"Analyzing {selected_token} with {selected_strategy} strategy..
             marker=dict(color='green', size=10, symbol='triangle-up'),
             name='Entry Points'
         ))
-        
-        # Add exit points
-        exits = df[df['exit_price'].notna()]
+    
+    # Add exit points
+    exits = df[df['exit_price'].notna()]
+    if not exits.empty:
         fig.add_trace(go.Scatter(
             x=exits.index,
             y=exits['price'],
@@ -784,9 +847,10 @@ with st.spinner(f"Analyzing {selected_token} with {selected_strategy} strategy..
             marker=dict(color='red', size=10, symbol='triangle-down'),
             name='Exit Points'
         ))
-        
-        # Highlight squeeze periods if using squeeze strategy
-        if selected_strategy == "BB Squeeze" or (selected_strategy == "All Strategies" and metrics['strategy_name'] == "BB Squeeze"):
+    
+    # Highlight squeeze periods if using squeeze strategy
+    if selected_strategy == "BB Squeeze" or (selected_strategy == "All Strategies" and metrics['strategy_name'] == "BB Squeeze"):
+        if 'in_squeeze' in df.columns:
             squeeze_periods = df[df['in_squeeze']]
             if not squeeze_periods.empty:
                 fig.add_trace(go.Scatter(
@@ -796,92 +860,308 @@ with st.spinner(f"Analyzing {selected_token} with {selected_strategy} strategy..
                     marker=dict(color='purple', size=5, symbol='square'),
                     name='Squeeze Periods'
                 ))
+    
+    fig.update_layout(
+        title=f"{selected_token} Price with Bollinger Bands ({candle_timeframe} timeframe)",
+        xaxis_title="Time",
+        yaxis_title="Price",
+        height=600,
+        hovermode="x unified"
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Display equity curve
+    if 'cum_strategy_return' in df.columns:
+        st.subheader("Strategy Equity Curve")
+        
+        fig = go.Figure()
+        
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=df['cum_strategy_return'] * 100,
+            mode='lines',
+            name='Equity Curve',
+            line=dict(color='green', width=2)
+        ))
         
         fig.update_layout(
-            title=f"{selected_token} Price with Bollinger Bands ({candle_timeframe} timeframe)",
+            title=f"{selected_token} Strategy Performance ({metrics['strategy_name']})",
             xaxis_title="Time",
-            yaxis_title="Price",
-            height=600,
+            yaxis_title="Cumulative Return (%)",
+            height=400,
             hovermode="x unified"
         )
         
         st.plotly_chart(fig, use_container_width=True)
+    
+    # Trade analysis
+    st.subheader("Trade Analysis")
+    
+    # Filter for completed trades
+    completed_trades = df[(df['entry_price'].notna()) & (df['exit_price'].notna())].copy()
+    
+    if not completed_trades.empty:
+        # Calculate additional metrics for each trade
+        completed_trades['time_of_day'] = completed_trades.index.hour
         
-        # Display equity curve
-        if 'cum_strategy_return' in df.columns:
-            st.subheader("Strategy Equity Curve")
+        # Display trade distribution by hour
+        hour_counts = completed_trades.groupby('time_of_day').size()
+        hour_returns = completed_trades.groupby('time_of_day')['trade_profit_pct'].mean()
+        
+        # Combine into a single DataFrame
+        hour_analysis = pd.DataFrame({
+            'Trade Count': hour_counts,
+            'Avg Return (%)': hour_returns
+        }).fillna(0)
+        
+        # Plot trade distribution by hour
+        fig = go.Figure()
+        
+        fig.add_trace(go.Bar(
+            x=hour_analysis.index,
+            y=hour_analysis['Trade Count'],
+            name='Trade Count',
+            marker_color='blue',
+            opacity=0.7,
+            yaxis='y'
+        ))
+        
+        fig.add_trace(go.Scatter(
+            x=hour_analysis.index,
+            y=hour_analysis['Avg Return (%)'],
+            name='Avg Return (%)',
+            marker_color='green',
+            mode='lines+markers',
+            yaxis='y2'
+        ))
+        
+        fig.update_layout(
+            title=f"Trade Distribution by Hour of Day (Singapore Time)",
+            xaxis=dict(
+                title='Hour of Day',
+                tickmode='linear',
+                tickvals=list(range(0, 24)),
+                ticktext=[f"{h:02d}:00" for h in range(0, 24)]
+            ),
+            yaxis=dict(
+                title='Number of Trades',
+                titlefont=dict(color='blue'),
+                tickfont=dict(color='blue')
+            ),
+            yaxis2=dict(
+                title='Avg Return (%)',
+                titlefont=dict(color='green'),
+                tickfont=dict(color='green'),
+                anchor='x',
+                overlaying='y',
+                side='right'
+            ),
+            height=400,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            )
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Trade duration analysis
+        if 'trade_duration' in completed_trades.columns:
+            st.subheader("Trade Duration Analysis")
             
-            fig = go.Figure()
-            
-            fig.add_trace(go.Scatter(
-                x=df.index,
-                y=df['cum_strategy_return'] * 100,
-                mode='lines',
-                name='Equity Curve',
-                line=dict(color='green', width=2)
-            ))
-            
-            fig.update_layout(
-                title=f"{selected_token} Strategy Performance ({metrics['strategy_name']})",
-                xaxis_title="Time",
-                yaxis_title="Cumulative Return (%)",
-                height=400,
-                hovermode="x unified"
+            fig = px.histogram(
+                completed_trades, 
+                x='trade_duration',
+                nbins=20,
+                labels={'trade_duration': 'Trade Duration (bars)'},
+                title=f"Distribution of Trade Durations for {selected_token}",
+                color_discrete_sequence=['blue']
             )
             
+            fig.update_layout(height=400)
             st.plotly_chart(fig, use_container_width=True)
-        
-        # Trade analysis
-        st.subheader("Trade Analysis")
-        
-        # Filter for completed trades
-        completed_trades = df[(df['entry_price'].notna()) & (df['exit_price'].notna())].copy()
-        
-        if not completed_trades.empty:
-            # Calculate additional metrics for each trade
-            completed_trades['time_of_day'] = completed_trades.index.hour
             
-            # Display trade distribution by hour
-            hour_counts = completed_trades.groupby('time_of_day').size()
-            hour_returns = completed_trades.groupby('time_of_day')['trade_profit_pct'].mean()
+            # Analyze if shorter or longer trades are more profitable
+            duration_bins = [0, 1, 2, 3, 5, 10, max(completed_trades['trade_duration']) + 1]
+            completed_trades['duration_category'] = pd.cut(completed_trades['trade_duration'], bins=duration_bins, 
+                                                          labels=[f"{duration_bins[i]}-{duration_bins[i+1]-1}" for i in range(len(duration_bins)-1)])
             
-            # Combine into a single DataFrame
-            hour_analysis = pd.DataFrame({
-                'Trade Count': hour_counts,
-                'Avg Return (%)': hour_returns
-            }).fillna(0)
+            duration_analysis = completed_trades.groupby('duration_category')['trade_profit_pct'].agg(['mean', 'count']).reset_index()
+            duration_analysis.columns = ['Duration (bars)', 'Avg Return (%)', 'Trade Count']
             
-            # Plot trade distribution by hour
+            fig = px.bar(
+                duration_analysis,
+                x='Duration (bars)',
+                y='Avg Return (%)',
+                text='Trade Count',
+                color='Avg Return (%)',
+                color_continuous_scale='RdYlGn',
+                title='Returns by Trade Duration'
+            )
+            
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Determine optimal trade duration based on data
+            if not duration_analysis.empty:
+                best_duration = duration_analysis.loc[duration_analysis['Avg Return (%)'].idxmax()]
+                
+                st.info(f"""
+                **Optimal Trade Duration:**
+                
+                The most profitable trade duration is **{best_duration['Duration (bars)']} bars** with an average return of **{best_duration['Avg Return (%)']:.2f}%**.
+                
+                This duration had **{int(best_duration['Trade Count'])}** trades during the analyzed period.
+                """)
+        
+        # Exit reason analysis
+        if 'exit_reason' in completed_trades.columns:
+            st.subheader("Exit Reason Analysis")
+            
+            exit_counts = completed_trades['exit_reason'].value_counts().reset_index()
+            exit_counts.columns = ['Exit Reason', 'Count']
+            
+            exit_returns = completed_trades.groupby('exit_reason')['trade_profit_pct'].mean().reset_index()
+            exit_returns.columns = ['Exit Reason', 'Avg Return (%)']
+            
+            exit_analysis = exit_counts.merge(exit_returns, on='Exit Reason')
+            
+            fig = px.bar(
+                exit_analysis,
+                x='Exit Reason',
+                y='Count',
+                color='Avg Return (%)',
+                color_continuous_scale='RdYlGn',
+                text='Count',
+                title='Trade Distribution by Exit Reason'
+            )
+            
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Determine best exit reason
+            if not exit_analysis.empty:
+                best_exit = exit_analysis.loc[exit_analysis['Avg Return (%)'].idxmax()]
+                
+                st.info(f"""
+                **Most Profitable Exit Reason:**
+                
+                The most profitable exit reason is **{best_exit['Exit Reason']}** with an average return of **{best_exit['Avg Return (%)']:.2f}%**.
+                
+                This exit reason occurred **{int(best_exit['Count'])}** times during the analyzed period.
+                """)
+    
+    # Trade table
+    st.subheader("Trade Log")
+    trade_log = df[(df['entry_price'].notna()) | (df['exit_price'].notna())].copy()
+    
+    if not trade_log.empty:
+        # Format the trade log for display
+        trade_log['time'] = trade_log.index.strftime('%Y-%m-%d %H:%M:%S')
+        trade_log['price'] = trade_log['price'].round(4)
+        trade_log['entry_price'] = trade_log['entry_price'].round(4)
+        trade_log['exit_price'] = trade_log['exit_price'].round(4)
+        trade_log['trade_profit_pct'] = trade_log['trade_profit_pct'].round(2)
+        
+        # Select columns to display
+        display_columns = ['time', 'price', 'entry_price', 'exit_price', 'trade_profit_pct', 'trade_duration', 'exit_reason']
+        trade_log_display = trade_log[display_columns].fillna('')
+        
+        # Rename columns for display
+        trade_log_display.columns = ['Time', 'Price', 'Entry Price', 'Exit Price', 'Profit (%)', 'Duration (bars)', 'Exit Reason']
+        
+        # Display the trade log
+        st.dataframe(trade_log_display, use_container_width=True)
+    
+    # Strategy sensitivity analysis
+    st.subheader("Strategy Parameter Sensitivity")
+    
+    # Create tabs for parameter analysis
+    tab1, tab2 = st.tabs(["Period Sensitivity", "Standard Deviation Sensitivity"])
+    
+    with tab1:
+        # Analyze sensitivity to BB period
+        periods_to_test = [10, 15, 20, 25, 30]
+        period_results = []
+        
+        for period in periods_to_test:
+            with st.spinner(f"Testing period {period}..."):
+                test_df, test_metrics, _ = fetch_price_data_and_run_strategy(
+                    selected_token, 
+                    lookback_minutes, 
+                    period,  # Vary the period
+                    bb_std_dev, 
+                    selected_strategy,
+                    take_profit_pct,
+                    stop_loss_pct,
+                    max_hold_time,
+                    candle_timeframe,
+                    apply_time_filter,
+                    start_hour,
+                    end_hour
+                )
+                
+                if test_df is not None and test_metrics is not None:
+                    if debug_mode:
+                        st.write(f"Period {period}: {test_metrics['total_trades']} trades")
+                        
+                    period_results.append({
+                        'Period': period,
+                        'Win Rate': test_metrics['win_rate'] * 100,
+                        'Avg Return (%)': test_metrics['avg_trade_return'],
+                        'Total Trades': test_metrics['total_trades'],
+                        'Profit Factor': test_metrics['profit_factor']
+                    })
+        
+        if period_results:
+            period_df = pd.DataFrame(period_results)
+            
+            # Plot sensitivity to BB period
             fig = go.Figure()
             
+            # Add bars for Win Rate
             fig.add_trace(go.Bar(
-                x=hour_analysis.index,
-                y=hour_analysis['Trade Count'],
-                name='Trade Count',
+                x=period_df['Period'],
+                y=period_df['Win Rate'],
+                name='Win Rate (%)',
                 marker_color='blue',
                 opacity=0.7,
                 yaxis='y'
             ))
             
+            # Add lines for Avg Return
             fig.add_trace(go.Scatter(
-                x=hour_analysis.index,
-                y=hour_analysis['Avg Return (%)'],
+                x=period_df['Period'],
+                y=period_df['Avg Return (%)'],
                 name='Avg Return (%)',
                 marker_color='green',
                 mode='lines+markers',
                 yaxis='y2'
             ))
             
+            # Add total trades as text
+            for i, row in period_df.iterrows():
+                fig.add_annotation(
+                    x=row['Period'],
+                    y=row['Win Rate'] + 5,
+                    text=f"{int(row['Total Trades'])} trades",
+                    showarrow=False,
+                    font=dict(size=10)
+                )
+            
             fig.update_layout(
-                title=f"Trade Distribution by Hour of Day (Singapore Time)",
+                title="Sensitivity to Bollinger Band Period",
                 xaxis=dict(
-                    title='Hour of Day',
-                    tickmode='linear',
-                    tickvals=list(range(0, 24)),
-                    ticktext=[f"{h:02d}:00" for h in range(0, 24)]
+                    title='Period',
+                    tickmode='array',
+                    tickvals=period_df['Period']
                 ),
                 yaxis=dict(
-                    title='Number of Trades',
+                    title='Win Rate (%)',
                     titlefont=dict(color='blue'),
                     tickfont=dict(color='blue')
                 ),
@@ -905,219 +1185,10 @@ with st.spinner(f"Analyzing {selected_token} with {selected_strategy} strategy..
             
             st.plotly_chart(fig, use_container_width=True)
             
-            # Trade duration analysis
-            if 'trade_duration' in completed_trades.columns:
-                st.subheader("Trade Duration Analysis")
-                
-                fig = px.histogram(
-                    completed_trades, 
-                    x='trade_duration',
-                    nbins=20,
-                    labels={'trade_duration': 'Trade Duration (bars)'},
-                    title=f"Distribution of Trade Durations for {selected_token}",
-                    color_discrete_sequence=['blue']
-                )
-                
-                fig.update_layout(height=400)
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Analyze if shorter or longer trades are more profitable
-                duration_bins = [0, 1, 2, 3, 5, 10, max(completed_trades['trade_duration']) + 1]
-                completed_trades['duration_category'] = pd.cut(completed_trades['trade_duration'], bins=duration_bins, 
-                                                              labels=[f"{duration_bins[i]}-{duration_bins[i+1]-1}" for i in range(len(duration_bins)-1)])
-                
-                duration_analysis = completed_trades.groupby('duration_category')['trade_profit_pct'].agg(['mean', 'count']).reset_index()
-                duration_analysis.columns = ['Duration (bars)', 'Avg Return (%)', 'Trade Count']
-                
-                fig = px.bar(
-                    duration_analysis,
-                    x='Duration (bars)',
-                    y='Avg Return (%)',
-                    text='Trade Count',
-                    color='Avg Return (%)',
-                    color_continuous_scale='RdYlGn',
-                    title='Returns by Trade Duration'
-                )
-                
-                fig.update_layout(height=400)
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Determine optimal trade duration based on data
-                best_duration = duration_analysis.loc[duration_analysis['Avg Return (%)'].idxmax()]
-                
-                st.info(f"""
-                **Optimal Trade Duration:**
-                
-                The most profitable trade duration is **{best_duration['Duration (bars)']} bars** with an average return of **{best_duration['Avg Return (%)']:.2f}%**.
-                
-                This duration had **{int(best_duration['Trade Count'])}** trades during the analyzed period.
-                """)
-            
-            # Exit reason analysis
-            if 'exit_reason' in completed_trades.columns:
-                st.subheader("Exit Reason Analysis")
-                
-                exit_counts = completed_trades['exit_reason'].value_counts().reset_index()
-                exit_counts.columns = ['Exit Reason', 'Count']
-                
-                exit_returns = completed_trades.groupby('exit_reason')['trade_profit_pct'].mean().reset_index()
-                exit_returns.columns = ['Exit Reason', 'Avg Return (%)']
-                
-                exit_analysis = exit_counts.merge(exit_returns, on='Exit Reason')
-                
-                fig = px.bar(
-                    exit_analysis,
-                    x='Exit Reason',
-                    y='Count',
-                    color='Avg Return (%)',
-                    color_continuous_scale='RdYlGn',
-                    text='Count',
-                    title='Trade Distribution by Exit Reason'
-                )
-                
-                fig.update_layout(height=400)
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Determine best exit reason
-                best_exit = exit_analysis.loc[exit_analysis['Avg Return (%)'].idxmax()]
-                
-                st.info(f"""
-                **Most Profitable Exit Reason:**
-                
-                The most profitable exit reason is **{best_exit['Exit Reason']}** with an average return of **{best_exit['Avg Return (%)']:.2f}%**.
-                
-                This exit reason occurred **{int(best_exit['Count'])}** times during the analyzed period.
-                """)
-        
-        # Trade table
-        st.subheader("Trade Log")
-        trade_log = df[(df['entry_price'].notna()) | (df['exit_price'].notna())].copy()
-        
-        if not trade_log.empty:
-            # Format the trade log for display
-            trade_log['time'] = trade_log.index.strftime('%Y-%m-%d %H:%M:%S')
-            trade_log['price'] = trade_log['price'].round(4)
-            trade_log['entry_price'] = trade_log['entry_price'].round(4)
-            trade_log['exit_price'] = trade_log['exit_price'].round(4)
-            trade_log['trade_profit_pct'] = trade_log['trade_profit_pct'].round(2)
-            
-            # Select columns to display
-            display_columns = ['time', 'price', 'entry_price', 'exit_price', 'trade_profit_pct', 'trade_duration', 'exit_reason']
-            trade_log_display = trade_log[display_columns].fillna('')
-            
-            # Rename columns for display
-            trade_log_display.columns = ['Time', 'Price', 'Entry Price', 'Exit Price', 'Profit (%)', 'Duration (bars)', 'Exit Reason']
-            
-            # Display the trade log
-            st.dataframe(trade_log_display, use_container_width=True)
-        
-        # Strategy sensitivity analysis
-        st.subheader("Strategy Parameter Sensitivity")
-        
-        # Create tabs for parameter analysis
-        tab1, tab2 = st.tabs(["Period Sensitivity", "Standard Deviation Sensitivity"])
-        
-        with tab1:
-            # Analyze sensitivity to BB period
-            periods_to_test = [10, 15, 20, 25, 30]
-            period_results = []
-            
-            for period in periods_to_test:
-                with st.spinner(f"Testing period {period}..."):
-                    test_df, test_metrics, _ = fetch_price_data_and_run_strategy(
-                        selected_token, 
-                        lookback_minutes, 
-                        period,  # Vary the period
-                        bb_std_dev, 
-                        selected_strategy,
-                        take_profit_pct,
-                        stop_loss_pct,
-                        max_hold_time,
-                        candle_timeframe,
-                        apply_time_filter,
-                        start_hour,
-                        end_hour
-                    )
-                    
-                    if test_df is not None and test_metrics is not None:
-                        period_results.append({
-                            'Period': period,
-                            'Win Rate': test_metrics['win_rate'] * 100,
-                            'Avg Return (%)': test_metrics['avg_trade_return'],
-                            'Total Trades': test_metrics['total_trades'],
-                            'Profit Factor': test_metrics['profit_factor']
-                        })
-            
-            if period_results:
-                period_df = pd.DataFrame(period_results)
-                
-                # Plot sensitivity to BB period
-                fig = go.Figure()
-                
-                # Add bars for Win Rate
-                fig.add_trace(go.Bar(
-                    x=period_df['Period'],
-                    y=period_df['Win Rate'],
-                    name='Win Rate (%)',
-                    marker_color='blue',
-                    opacity=0.7,
-                    yaxis='y'
-                ))
-                
-                # Add lines for Avg Return
-                fig.add_trace(go.Scatter(
-                    x=period_df['Period'],
-                    y=period_df['Avg Return (%)'],
-                    name='Avg Return (%)',
-                    marker_color='green',
-                    mode='lines+markers',
-                    yaxis='y2'
-                ))
-                
-                # Add total trades as text
-                for i, row in period_df.iterrows():
-                    fig.add_annotation(
-                        x=row['Period'],
-                        y=row['Win Rate'] + 5,
-                        text=f"{int(row['Total Trades'])} trades",
-                        showarrow=False,
-                        font=dict(size=10)
-                    )
-                
-                fig.update_layout(
-                    title="Sensitivity to Bollinger Band Period",
-                    xaxis=dict(
-                        title='Period',
-                        tickmode='array',
-                        tickvals=period_df['Period']
-                    ),
-                    yaxis=dict(
-                        title='Win Rate (%)',
-                        titlefont=dict(color='blue'),
-                        tickfont=dict(color='blue')
-                    ),
-                    yaxis2=dict(
-                        title='Avg Return (%)',
-                        titlefont=dict(color='green'),
-                        tickfont=dict(color='green'),
-                        anchor='x',
-                        overlaying='y',
-                        side='right'
-                    ),
-                    height=400,
-                    legend=dict(
-                        orientation="h",
-                        yanchor="bottom",
-                        y=1.02,
-                        xanchor="right",
-                        x=1
-                    )
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Determine optimal period
-                period_df['Score'] = period_df['Win Rate'] * period_df['Avg Return (%)'] * period_df['Profit Factor']
+            # Determine optimal period
+            if not period_df.empty:
+                # Avoid division by zero
+                period_df['Score'] = period_df['Win Rate'] * period_df['Avg Return (%)'] * (period_df['Profit Factor'] + 0.0001)
                 best_period = period_df.loc[period_df['Score'].idxmax()]
                 
                 st.info(f"""
@@ -1129,108 +1200,113 @@ with st.spinner(f"Analyzing {selected_token} with {selected_strategy} strategy..
                 - Profit Factor: **{best_period['Profit Factor']:.2f}**
                 - Total Trades: **{int(best_period['Total Trades'])}**
                 """)
+    
+    with tab2:
+        # Analyze sensitivity to BB standard deviation
+        stds_to_test = [1.5, 2.0, 2.5, 3.0]
+        std_results = []
         
-        with tab2:
-            # Analyze sensitivity to BB standard deviation
-            stds_to_test = [1.5, 2.0, 2.5, 3.0]
-            std_results = []
-            
-            for std in stds_to_test:
-                with st.spinner(f"Testing standard deviation {std}..."):
-                    test_df, test_metrics, _ = fetch_price_data_and_run_strategy(
-                        selected_token, 
-                        lookback_minutes, 
-                        bb_period, 
-                        std,  # Vary the standard deviation
-                        selected_strategy,
-                        take_profit_pct,
-                        stop_loss_pct,
-                        max_hold_time,
-                        candle_timeframe,
-                        apply_time_filter,
-                        start_hour,
-                        end_hour
-                    )
-                    
-                    if test_df is not None and test_metrics is not None:
-                        std_results.append({
-                            'Std Dev': std,
-                            'Win Rate': test_metrics['win_rate'] * 100,
-                            'Avg Return (%)': test_metrics['avg_trade_return'],
-                            'Total Trades': test_metrics['total_trades'],
-                            'Profit Factor': test_metrics['profit_factor']
-                        })
-            
-            if std_results:
-                std_df = pd.DataFrame(std_results)
-                
-                # Plot sensitivity to BB standard deviation
-                fig = go.Figure()
-                
-                # Add bars for Win Rate
-                fig.add_trace(go.Bar(
-                    x=std_df['Std Dev'],
-                    y=std_df['Win Rate'],
-                    name='Win Rate (%)',
-                    marker_color='blue',
-                    opacity=0.7,
-                    yaxis='y'
-                ))
-                
-                # Add lines for Avg Return
-                fig.add_trace(go.Scatter(
-                    x=std_df['Std Dev'],
-                    y=std_df['Avg Return (%)'],
-                    name='Avg Return (%)',
-                    marker_color='green',
-                    mode='lines+markers',
-                    yaxis='y2'
-                ))
-                
-                # Add total trades as text
-                for i, row in std_df.iterrows():
-                    fig.add_annotation(
-                        x=row['Std Dev'],
-                        y=row['Win Rate'] + 5,
-                        text=f"{int(row['Total Trades'])} trades",
-                        showarrow=False,
-                        font=dict(size=10)
-                    )
-                
-                fig.update_layout(
-                    title="Sensitivity to Bollinger Band Standard Deviation",
-                    xaxis=dict(
-                        title='Standard Deviation',
-                        tickmode='array',
-                        tickvals=std_df['Std Dev']
-                    ),
-                    yaxis=dict(
-                        title='Win Rate (%)',
-                        titlefont=dict(color='blue'),
-                        tickfont=dict(color='blue')
-                    ),
-                    yaxis2=dict(
-                        title='Avg Return (%)',
-                        titlefont=dict(color='green'),
-                        tickfont=dict(color='green'),
-                        anchor='x',
-                        overlaying='y',
-                        side='right'
-                    ),
-                    height=400,
-                    legend=dict(
-                        orientation="h",
-                        yanchor="bottom",
-                        y=1.02,
-                        xanchor="right",
-                        x=1
-                    )
+        for std in stds_to_test:
+            with st.spinner(f"Testing standard deviation {std}..."):
+                test_df, test_metrics, _ = fetch_price_data_and_run_strategy(
+                    selected_token, 
+                    lookback_minutes, 
+                    bb_period, 
+                    std,  # Vary the standard deviation
+                    selected_strategy,
+                    take_profit_pct,
+                    stop_loss_pct,
+                    max_hold_time,
+                    candle_timeframe,
+                    apply_time_filter,
+                    start_hour,
+                    end_hour
                 )
                 
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Determine optimal standard deviation
-                std_df['Score'] = std_df['Win Rate'] * std_df['Avg Return (%)'] * std_df['Profit Factor']
+                if test_df is not None and test_metrics is not None:
+                    if debug_mode:
+                        st.write(f"Std Dev {std}: {test_metrics['total_trades']} trades")
+                        
+                    std_results.append({
+                        'Std Dev': std,
+                        'Win Rate': test_metrics['win_rate'] * 100,
+                        'Avg Return (%)': test_metrics['avg_trade_return'],
+                        'Total Trades': test_metrics['total_trades'],
+                        'Profit Factor': test_metrics['profit_factor']
+                    })
+        
+        if std_results:
+            std_df = pd.DataFrame(std_results)
+            
+            # Plot sensitivity to BB standard deviation
+            fig = go.Figure()
+            
+            # Add bars for Win Rate
+            fig.add_trace(go.Bar(
+                x=std_df['Std Dev'],
+                y=std_df['Win Rate'],
+                name='Win Rate (%)',
+                marker_color='blue',
+                opacity=0.7,
+                yaxis='y'
+            ))
+            
+            # Add lines for Avg Return
+            fig.add_trace(go.Scatter(
+                x=std_df['Std Dev'],
+                y=std_df['Avg Return (%)'],
+                name='Avg Return (%)',
+                marker_color='green',
+                mode='lines+markers',
+                yaxis='y2'
+            ))
+            
+            # Add total trades as text
+            for i, row in std_df.iterrows():
+                fig.add_annotation(
+                    x=row['Std Dev'],
+                    y=row['Win Rate'] + 5,
+                    text=f"{int(row['Total Trades'])} trades",
+                    showarrow=False,
+                    font=dict(size=10)
+                )
+            
+            fig.update_layout(
+                title="Sensitivity to Bollinger Band Standard Deviation",
+                xaxis=dict(
+                    title='Standard Deviation',
+                    tickmode='array',
+                    tickvals=std_df['Std Dev']
+                ),
+                yaxis=dict(
+                    title='Win Rate (%)',
+                    titlefont=dict(color='blue'),
+                    tickfont=dict(color='blue')
+                ),
+                yaxis2=dict(
+                    title='Avg Return (%)',
+                    titlefont=dict(color='green'),
+                    tickfont=dict(color='green'),
+                    anchor='x',
+                    overlaying='y',
+                    side='right'
+                ),
+                height=400,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Determine optimal standard deviation
+            if not std_df.empty:
+                # Avoid division by zero
+                std_df['Score'] = std_df['Win Rate'] * std_df['Avg Return (%)'] * (std_df['Profit Factor'] + 0.0001)
                 best_std = std_df.loc[std_df['Score'].idxmax()]
                 
                 st.info(f"""
@@ -1242,69 +1318,69 @@ with st.spinner(f"Analyzing {selected_token} with {selected_strategy} strategy..
                 - Profit Factor: **{best_std['Profit Factor']:.2f}**
                 - Total Trades: **{int(best_std['Total Trades'])}**
                 """)
-        
-        # Strategy recommendations
-        st.subheader("Strategy Recommendations")
-        
-        # Generate recommendations based on the analysis
-        recommendations = []
-        
-        # Time-based recommendations
-        if 'time_of_day' in locals() and 'hour_analysis' in locals():
-            best_hour = hour_analysis['Avg Return (%)'].idxmax()
-            recommendations.append(f"Focus trading activity around {best_hour:02d}:00 Singapore time, which shows the highest average returns.")
-        
-        # Parameter recommendations
-        if 'best_period' in locals():
-            recommendations.append(f"Use a Bollinger Band period of {int(best_period['Period'])} for optimal results.")
-        
-        if 'best_std' in locals():
-            recommendations.append(f"Set Bollinger Band standard deviation to {best_std['Std Dev']} for best performance.")
-        
-        # Trade duration recommendations
-        if 'best_duration' in locals():
-            recommendations.append(f"Target trade durations of {best_duration['Duration (bars)']} bars for maximum profitability.")
-        
-        # Exit strategy recommendations
-        if 'best_exit' in locals():
-            recommendations.append(f"Prioritize {best_exit['Exit Reason']} as your exit strategy, as it shows the highest average returns.")
-        
-        # Display recommendations
-        for i, rec in enumerate(recommendations):
-            st.markdown(f"{i+1}. {rec}")
-        
-        # Summary of findings
-        st.subheader("Executive Summary")
-        
-        win_rate_desc = "excellent" if metrics['win_rate'] > 0.7 else "good" if metrics['win_rate'] > 0.5 else "poor"
-        profit_factor_desc = "excellent" if metrics['profit_factor'] > 3 else "good" if metrics['profit_factor'] > 1.5 else "poor"
-        
-        # Determine if the strategy seems viable
-        viable = metrics['win_rate'] > 0.5 and metrics['profit_factor'] > 1.5 and metrics['total_trades'] >= 5
-        
-        conclusion = f"""
-        Based on the analysis of {selected_token} using the {metrics['strategy_name']} strategy with Bollinger Bands:
-        
-        - The strategy shows a {win_rate_desc} win rate of {metrics['win_rate']*100:.1f}% across {metrics['total_trades']} trades.
-        - The profit factor is {profit_factor_desc} at {metrics['profit_factor']:.2f}.
-        - Average trade return is {metrics['avg_trade_return']:.2f}% with holding periods of approximately {metrics['avg_trade_duration']:.1f} bars.
-        
-        **Conclusion:** This strategy {"appears viable and could be considered for real trading with appropriate risk management" if viable else "shows potential but needs further optimization or may not be suitable in current market conditions"}.
-        """
-        
-        st.markdown(conclusion)
-        
-        # Download results as CSV
-        if 'completed_trades' in locals() and not completed_trades.empty:
-            csv = completed_trades.to_csv().encode('utf-8')
-            st.download_button(
-                label="Download Trade Log as CSV",
-                data=csv,
-                file_name=f"{selected_token}_{metrics['strategy_name']}_{candle_timeframe}_analysis.csv",
-                mime="text/csv"
-            )
-    else:
-        st.warning(f"No results available for {selected_token} with the selected parameters. Try adjusting the time period or strategy settings.")
+    
+    # Strategy recommendations
+    st.subheader("Strategy Recommendations")
+    
+    # Generate recommendations based on the analysis
+    recommendations = []
+    
+    # Time-based recommendations
+    if 'hour_analysis' in locals() and not hour_analysis.empty:
+        best_hour = hour_analysis['Avg Return (%)'].idxmax()
+        recommendations.append(f"Focus trading activity around {best_hour:02d}:00 Singapore time, which shows the highest average returns.")
+    
+    # Parameter recommendations
+    if 'best_period' in locals():
+        recommendations.append(f"Use a Bollinger Band period of {int(best_period['Period'])} for optimal results.")
+    
+    if 'best_std' in locals():
+        recommendations.append(f"Set Bollinger Band standard deviation to {best_std['Std Dev']} for best performance.")
+    
+    # Trade duration recommendations
+    if 'best_duration' in locals():
+        recommendations.append(f"Target trade durations of {best_duration['Duration (bars)']} bars for maximum profitability.")
+    
+    # Exit strategy recommendations
+    if 'best_exit' in locals():
+        recommendations.append(f"Prioritize {best_exit['Exit Reason']} as your exit strategy, as it shows the highest average returns.")
+    
+    # Display recommendations
+    for i, rec in enumerate(recommendations):
+        st.markdown(f"{i+1}. {rec}")
+    
+    # Summary of findings
+    st.subheader("Executive Summary")
+    
+    win_rate_desc = "excellent" if metrics['win_rate'] > 0.7 else "good" if metrics['win_rate'] > 0.5 else "poor"
+    profit_factor_desc = "excellent" if metrics['profit_factor'] > 3 else "good" if metrics['profit_factor'] > 1.5 else "poor"
+    
+    # Determine if the strategy seems viable
+    viable = metrics['win_rate'] > 0.5 and metrics['profit_factor'] > 1.5 and metrics['total_trades'] >= 5
+    
+    conclusion = f"""
+    Based on the analysis of {selected_token} using the {metrics['strategy_name']} strategy with Bollinger Bands:
+    
+    - The strategy shows a {win_rate_desc} win rate of {metrics['win_rate']*100:.1f}% across {metrics['total_trades']} trades.
+    - The profit factor is {profit_factor_desc} at {metrics['profit_factor']:.2f}.
+    - Average trade return is {metrics['avg_trade_return']:.2f}% with holding periods of approximately {metrics['avg_trade_duration']:.1f} bars.
+    
+    **Conclusion:** This strategy {"appears viable and could be considered for real trading with appropriate risk management" if viable else "shows potential but needs further optimization or may not be suitable in current market conditions"}.
+    """
+    
+    st.markdown(conclusion)
+    
+    # Download results as CSV
+    if 'completed_trades' in locals() and not completed_trades.empty:
+        csv = completed_trades.to_csv().encode('utf-8')
+        st.download_button(
+            label="Download Trade Log as CSV",
+            data=csv,
+            file_name=f"{selected_token}_{metrics['strategy_name']}_{candle_timeframe}_analysis.csv",
+            mime="text/csv"
+        )
+else:
+    st.warning(f"No results available for {selected_token} with the selected parameters. Try adjusting the time period or strategy settings.")
 
 # Add helpful information about the analyzer
 with st.expander("About This Analysis Tool"):
