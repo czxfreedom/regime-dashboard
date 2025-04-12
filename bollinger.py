@@ -1,4 +1,4 @@
-# Save this as pages/07_Bollinger_Bands_Profitability.py in your Streamlit app folder
+# Save this as jup_bollinger_analyzer.py in your Streamlit app folder
 
 import streamlit as st
 import pandas as pd
@@ -7,15 +7,14 @@ import plotly.graph_objects as go
 import plotly.express as px
 from sqlalchemy import create_engine
 from datetime import datetime, timedelta
-# With this:
+import pytz
 try:
     import pkg_resources
 except ImportError:
     import importlib.metadata as pkg_resources
-import pytz
 
 st.set_page_config(
-    page_title="Bollinger Bands Profitability Analysis",
+    page_title="JUP Bollinger Bands Strategy Analyzer",
     page_icon="📈",
     layout="wide"
 )
@@ -33,11 +32,10 @@ except Exception as e:
     st.stop()
 
 # --- UI Setup ---
-st.title("Bollinger Bands Trading Profitability Analysis")
-st.subheader("1-Minute Data Analysis Across Trading Pairs")
+st.title("Jupiter (JUP) Bollinger Bands Trading Analysis")
+st.subheader("Short-Term Trading Opportunity Scanner")
 
 # Define parameters
-timeframe = "1min"  # Using 1-minute intervals as requested
 singapore_timezone = pytz.timezone('Asia/Singapore')
 
 # Get current time in Singapore timezone
@@ -57,7 +55,7 @@ def fetch_all_tokens():
         return df['pair_name'].tolist()
     except Exception as e:
         st.error(f"Error fetching tokens: {e}")
-        return ["BTC", "ETH", "SOL", "DOGE", "PEPE", "AI16Z"]  # Default fallback
+        return ["JUP", "BTC", "ETH", "SOL", "DOGE", "PEPE", "AI16Z"]  # Default fallback with JUP at the top
 
 all_tokens = fetch_all_tokens()
 
@@ -65,17 +63,13 @@ all_tokens = fetch_all_tokens()
 col1, col2, col3 = st.columns([2, 1, 1])
 
 with col1:
-    # Let user select tokens to analyze
-    select_all = st.checkbox("Select All Tokens", value=False)
-    
-    if select_all:
-        selected_tokens = all_tokens
-    else:
-        selected_tokens = st.multiselect(
-            "Select Tokens to Analyze", 
-            all_tokens,
-            default=all_tokens[:5] if len(all_tokens) > 5 else all_tokens
-        )
+    # Let user select tokens to analyze (with JUP preselected)
+    default_token = "JUP" if "JUP" in all_tokens else all_tokens[0]
+    selected_token = st.selectbox(
+        "Select Token to Analyze", 
+        all_tokens,
+        index=all_tokens.index(default_token) if default_token in all_tokens else 0
+    )
 
 with col2:
     # Bollinger Bands parameters
@@ -85,31 +79,66 @@ with col2:
 
 with col3:
     # Backtest parameters
-    st.subheader("Backtest Parameters")
-    lookback_days = st.slider("Lookback Days", min_value=1, max_value=30, value=7, step=1)
+    st.subheader("Time Parameters")
     
-    # Strategy parameters
-    strategy_options = {
-        "BB Bounce": "Trade when price bounces off the bands",
-        "BB Breakout": "Trade when price breaks through the bands",
-        "BB Squeeze": "Trade when bands narrow and then expand",
-        "All Strategies": "Test all strategies and show best"
-    }
-    selected_strategy = st.selectbox("Strategy Type", list(strategy_options.keys()))
+    timeframe_options = ["Days", "Hours", "Minutes"]
+    timeframe_type = st.selectbox("Lookback Unit", timeframe_options, index=1)  # Default to Hours
     
-    # Add a refresh button
-    if st.button("Refresh Data"):
-        st.cache_data.clear()
-        st.experimental_rerun()
+    if timeframe_type == "Days":
+        lookback_value = st.slider("Lookback Days", min_value=1, max_value=30, value=3, step=1)
+        lookback_minutes = lookback_value * 1440  # Convert to minutes
+    elif timeframe_type == "Hours":
+        lookback_value = st.slider("Lookback Hours", min_value=1, max_value=48, value=24, step=1)
+        lookback_minutes = lookback_value * 60  # Convert to minutes
+    else:  # Minutes
+        lookback_value = st.slider("Lookback Minutes", min_value=15, max_value=1440, value=240, step=15)
+        lookback_minutes = lookback_value
+    
+    # Candle timeframe for analysis
+    candle_options = ["1m", "3m", "5m", "15m", "30m", "1h"]
+    candle_timeframe = st.selectbox("Analysis Timeframe", candle_options, index=0)  # Default to 1-minute
 
-if not selected_tokens:
-    st.warning("Please select at least one token")
-    st.stop()
+# Time filtering options
+with st.expander("Time of Day Filtering (Singapore Time)"):
+    apply_time_filter = st.checkbox("Filter by Time of Day", value=True)
+    if apply_time_filter:
+        col1, col2 = st.columns(2)
+        with col1:
+            start_hour = st.slider("Start Hour (24h)", min_value=0, max_value=23, value=11, step=1)
+        with col2:
+            end_hour = st.slider("End Hour (24h)", min_value=0, max_value=23, value=17, step=1)
+        
+        st.info(f"Analyzing trades between {start_hour}:00 and {end_hour}:00 Singapore time")
+
+# Strategy parameters
+strategy_options = {
+    "BB Bounce": "Trade when price bounces off the bands",
+    "BB Breakout": "Trade when price breaks through the bands",
+    "BB Squeeze": "Trade when bands narrow and then expand",
+    "All Strategies": "Test all strategies and show best"
+}
+
+selected_strategy = st.selectbox("Strategy Type", list(strategy_options.keys()), index=0)  # Default to BB Bounce
+st.markdown(strategy_options[selected_strategy])
+
+# Add trade duration analysis options
+with st.expander("Trade Settings"):
+    col1, col2 = st.columns(2)
+    with col1:
+        max_hold_time = st.slider("Max Hold Time (minutes)", min_value=1, max_value=60, value=5, step=1)
+    with col2:
+        take_profit_pct = st.slider("Take Profit (%)", min_value=0.1, max_value=10.0, value=3.0, step=0.1)
+        stop_loss_pct = st.slider("Stop Loss (%)", min_value=0.1, max_value=10.0, value=1.5, step=0.1)
+
+# Add a refresh button
+if st.button("Refresh Data"):
+    st.cache_data.clear()
+    st.experimental_rerun()
 
 # Function to calculate Bollinger Bands
 def calculate_bollinger_bands(df, period=20, std_dev=2.0):
     """
-    Calculate Bollinger Bands for the provided dataframe without requiring TA-Lib
+    Calculate Bollinger Bands for the provided dataframe
     """
     df['bb_middle'] = df['price'].rolling(window=period).mean()
     rolling_std = df['price'].rolling(window=period).std(ddof=0)
@@ -122,70 +151,218 @@ def calculate_bollinger_bands(df, period=20, std_dev=2.0):
     # Calculate %B (where price is within the bands)
     df['bb_percent_b'] = (df['price'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
     
+    # Calculate rate of change for bandwidth (for squeeze detection)
+    df['bandwidth_change'] = df['bb_bandwidth'].pct_change(periods=3)
+    
+    # Calculate rate of change for price
+    df['price_change_pct'] = df['price'].pct_change() * 100
+    
     return df
 
-# Define trading strategies
-def bb_bounce_strategy(df):
+# Define trading strategies with specific focus on short-term trades
+def bb_bounce_strategy(df, take_profit_pct=3.0, stop_loss_pct=1.5, max_hold_time=5):
     """
-    Strategy: Buy when price touches lower band, sell when price touches upper band
+    Strategy: Buy when price touches lower band, sell when price bounces back
+    Enhanced for shorter timeframes with take profit, stop loss, and max hold time
     """
-    # Initialize position and signal columns
+    # Initialize columns
     df['position'] = 0
     df['signal'] = 0
+    df['entry_price'] = np.nan
+    df['exit_price'] = np.nan
+    df['trade_duration'] = np.nan  # in bars
+    df['exit_reason'] = ""
+    df['trade_profit_pct'] = np.nan
     
     # Generate buy signals (1) when price touches or goes below the lower band
-    df.loc[df['price'] <= df['bb_lower'], 'signal'] = 1
+    # AND price is near a support level (indicated by previous lows)
+    lower_band_touch = df['price'] <= df['bb_lower']
     
-    # Generate sell signals (-1) when price touches or goes above the upper band
-    df.loc[df['price'] >= df['bb_upper'], 'signal'] = -1
+    # Simple support detection: price is within 1% of recent lows
+    window_size = min(20, len(df))
+    df['recent_min'] = df['price'].rolling(window=window_size).min()
+    near_support = (df['price'] / df['recent_min'] - 1) < 0.01
     
-    # Track position (1 = long, 0 = no position, -1 = short)
-    position = 0
-    for i in range(len(df)):
-        if df['signal'].iloc[i] == 1 and position <= 0:  # Buy
-            position = 1
-        elif df['signal'].iloc[i] == -1 and position >= 0:  # Sell
-            position = -1
-        df['position'].iloc[i] = position
+    # Oversold condition using %B
+    oversold = df['bb_percent_b'] < 0.05
+    
+    # Combine conditions
+    df.loc[lower_band_touch & near_support & oversold, 'signal'] = 1
+    
+    # Track trades with take profit, stop loss and max hold time
+    in_position = False
+    entry_index = None
+    entry_price = None
+    position_count = 0
+    
+    for i in range(1, len(df)):
+        idx = df.index[i]
+        prev_idx = df.index[i-1]
         
+        # New buy signal
+        if df.loc[idx, 'signal'] == 1 and not in_position:
+            in_position = True
+            entry_index = i
+            entry_price = df.loc[idx, 'price']
+            df.loc[idx, 'position'] = 1
+            df.loc[idx, 'entry_price'] = entry_price
+            position_count += 1
+            
+        # Check for exit conditions if in a position
+        elif in_position:
+            current_price = df.loc[idx, 'price']
+            bars_in_trade = i - entry_index
+            
+            # Calculate current P&L for this position
+            current_profit_pct = (current_price / entry_price - 1) * 100
+            
+            # Exit conditions
+            take_profit_hit = current_profit_pct >= take_profit_pct
+            stop_loss_hit = current_profit_pct <= -stop_loss_pct
+            max_hold_reached = bars_in_trade >= max_hold_time
+            middle_band_reached = current_price >= df.loc[idx, 'bb_middle']
+            
+            # Determine if we should exit
+            exit_triggered = take_profit_hit or stop_loss_hit or max_hold_reached or middle_band_reached
+            
+            if exit_triggered:
+                # Record exit information
+                df.loc[idx, 'position'] = 0  # Exit position
+                df.loc[idx, 'exit_price'] = current_price
+                df.loc[idx, 'trade_duration'] = bars_in_trade
+                df.loc[idx, 'trade_profit_pct'] = current_profit_pct
+                
+                # Record exit reason
+                if take_profit_hit:
+                    df.loc[idx, 'exit_reason'] = "Take Profit"
+                elif stop_loss_hit:
+                    df.loc[idx, 'exit_reason'] = "Stop Loss"
+                elif max_hold_reached:
+                    df.loc[idx, 'exit_reason'] = "Max Hold Time"
+                elif middle_band_reached:
+                    df.loc[idx, 'exit_reason'] = "Middle Band"
+                
+                # Reset position tracking
+                in_position = False
+                entry_index = None
+                entry_price = None
+            else:
+                # Still in the position
+                df.loc[idx, 'position'] = 1
+        
+        # Propagate position status if no changes
+        elif df.loc[prev_idx, 'position'] == 1 and not in_position:
+            # This handles cases where we have position=1 from previous logic but not tracked in our loop
+            in_position = True
+            entry_index = i-1
+            entry_price = df.loc[prev_idx, 'price']
+    
     return df
 
-def bb_breakout_strategy(df):
+def bb_breakout_strategy(df, take_profit_pct=3.0, stop_loss_pct=1.5, max_hold_time=5):
     """
-    Strategy: Buy when price breaks above upper band, sell when price breaks below lower band
+    Strategy: Buy when price breaks above upper band with momentum, sell on reversal
+    Enhanced for shorter timeframes with take profit, stop loss, and max hold time
     """
-    # Initialize position and signal columns
+    # Initialize columns
     df['position'] = 0
     df['signal'] = 0
+    df['entry_price'] = np.nan
+    df['exit_price'] = np.nan
+    df['trade_duration'] = np.nan
+    df['exit_reason'] = ""
+    df['trade_profit_pct'] = np.nan
     
-    # Generate buy signals (1) when price breaks above the upper band
-    df.loc[df['price'] > df['bb_upper'], 'signal'] = 1
+    # Generate buy signals when price breaks above the upper band with momentum
+    # Momentum confirmed by increasing volume and price acceleration
+    upper_band_break = df['price'] > df['bb_upper']
     
-    # Generate sell signals (-1) when price breaks below the lower band
-    df.loc[df['price'] < df['bb_lower'], 'signal'] = -1
+    # Price momentum: current bar gain is greater than previous bar
+    df['price_momentum'] = df['price_change_pct'] > df['price_change_pct'].shift(1)
     
-    # Track position
-    position = 0
-    for i in range(len(df)):
-        if df['signal'].iloc[i] == 1 and position <= 0:  # Buy
-            position = 1
-        elif df['signal'].iloc[i] == -1 and position >= 0:  # Sell
-            position = -1
-        df['position'].iloc[i] = position
+    # Combine conditions
+    df.loc[upper_band_break & df['price_momentum'], 'signal'] = 1
+    
+    # Track trades with take profit, stop loss and max hold time
+    in_position = False
+    entry_index = None
+    entry_price = None
+    
+    for i in range(1, len(df)):
+        idx = df.index[i]
+        prev_idx = df.index[i-1]
         
+        # New buy signal
+        if df.loc[idx, 'signal'] == 1 and not in_position:
+            in_position = True
+            entry_index = i
+            entry_price = df.loc[idx, 'price']
+            df.loc[idx, 'position'] = 1
+            df.loc[idx, 'entry_price'] = entry_price
+            
+        # Check for exit conditions if in a position
+        elif in_position:
+            current_price = df.loc[idx, 'price']
+            bars_in_trade = i - entry_index
+            
+            # Calculate current P&L for this position
+            current_profit_pct = (current_price / entry_price - 1) * 100
+            
+            # Exit conditions
+            take_profit_hit = current_profit_pct >= take_profit_pct
+            stop_loss_hit = current_profit_pct <= -stop_loss_pct
+            max_hold_reached = bars_in_trade >= max_hold_time
+            momentum_reversal = df.loc[idx, 'price'] < df.loc[idx, 'bb_upper'] and df.loc[prev_idx, 'price'] >= df.loc[prev_idx, 'bb_upper']
+            
+            # Determine if we should exit
+            exit_triggered = take_profit_hit or stop_loss_hit or max_hold_reached or momentum_reversal
+            
+            if exit_triggered:
+                # Record exit information
+                df.loc[idx, 'position'] = 0  # Exit position
+                df.loc[idx, 'exit_price'] = current_price
+                df.loc[idx, 'trade_duration'] = bars_in_trade
+                df.loc[idx, 'trade_profit_pct'] = current_profit_pct
+                
+                # Record exit reason
+                if take_profit_hit:
+                    df.loc[idx, 'exit_reason'] = "Take Profit"
+                elif stop_loss_hit:
+                    df.loc[idx, 'exit_reason'] = "Stop Loss"
+                elif max_hold_reached:
+                    df.loc[idx, 'exit_reason'] = "Max Hold Time"
+                elif momentum_reversal:
+                    df.loc[idx, 'exit_reason'] = "Momentum Reversal"
+                
+                # Reset position tracking
+                in_position = False
+                entry_index = None
+                entry_price = None
+            else:
+                # Still in the position
+                df.loc[idx, 'position'] = 1
+        
+        # Propagate position status if no changes
+        elif df.loc[prev_idx, 'position'] == 1 and not in_position:
+            in_position = True
+            entry_index = i-1
+            entry_price = df.loc[prev_idx, 'price']
+    
     return df
 
-def bb_squeeze_strategy(df):
+def bb_squeeze_strategy(df, take_profit_pct=3.0, stop_loss_pct=1.5, max_hold_time=5):
     """
     Strategy: Buy when bands narrow and then expand with price moving upward
-    Sell when bands narrow and then expand with price moving downward
+    Enhanced for shorter timeframes with take profit, stop loss, and max hold time
     """
-    # Initialize position and signal columns
+    # Initialize columns
     df['position'] = 0
     df['signal'] = 0
-    
-    # Calculate the rate of change in bandwidth
-    df['bandwidth_change'] = df['bb_bandwidth'].pct_change(periods=5)
+    df['entry_price'] = np.nan
+    df['exit_price'] = np.nan
+    df['trade_duration'] = np.nan
+    df['exit_reason'] = ""
+    df['trade_profit_pct'] = np.nan
     
     # Define squeeze condition (when bandwidth is in bottom 20% of its range over lookback period)
     lookback = min(len(df), 100)
@@ -197,105 +374,218 @@ def bb_squeeze_strategy(df):
     df['in_squeeze'] = df['bb_bandwidth'] <= df['bandwidth_percentile']
     
     # Identify squeeze exit with upward momentum
-    df['squeeze_exit_long'] = (df['in_squeeze'].shift(1) & ~df['in_squeeze']) & (df['price'] > df['bb_middle'])
-    
-    # Identify squeeze exit with downward momentum
-    df['squeeze_exit_short'] = (df['in_squeeze'].shift(1) & ~df['in_squeeze']) & (df['price'] < df['bb_middle'])
+    df['squeeze_exit_long'] = (df['in_squeeze'].shift(1) & ~df['in_squeeze']) & (df['price'] > df['bb_middle']) & (df['price_change_pct'] > 0)
     
     # Generate signals
     df.loc[df['squeeze_exit_long'], 'signal'] = 1
-    df.loc[df['squeeze_exit_short'], 'signal'] = -1
     
-    # Track position
-    position = 0
-    for i in range(len(df)):
-        if df['signal'].iloc[i] == 1 and position <= 0:  # Buy
-            position = 1
-        elif df['signal'].iloc[i] == -1 and position >= 0:  # Sell
-            position = -1
-        df['position'].iloc[i] = position
+    # Track trades with take profit, stop loss and max hold time
+    in_position = False
+    entry_index = None
+    entry_price = None
+    
+    for i in range(1, len(df)):
+        idx = df.index[i]
+        prev_idx = df.index[i-1]
         
+        # New buy signal
+        if df.loc[idx, 'signal'] == 1 and not in_position:
+            in_position = True
+            entry_index = i
+            entry_price = df.loc[idx, 'price']
+            df.loc[idx, 'position'] = 1
+            df.loc[idx, 'entry_price'] = entry_price
+            
+        # Check for exit conditions if in a position
+        elif in_position:
+            current_price = df.loc[idx, 'price']
+            bars_in_trade = i - entry_index
+            
+            # Calculate current P&L for this position
+            current_profit_pct = (current_price / entry_price - 1) * 100
+            
+            # Exit conditions
+            take_profit_hit = current_profit_pct >= take_profit_pct
+            stop_loss_hit = current_profit_pct <= -stop_loss_pct
+            max_hold_reached = bars_in_trade >= max_hold_time
+            upper_band_reached = current_price >= df.loc[idx, 'bb_upper']
+            
+            # Determine if we should exit
+            exit_triggered = take_profit_hit or stop_loss_hit or max_hold_reached or upper_band_reached
+            
+            if exit_triggered:
+                # Record exit information
+                df.loc[idx, 'position'] = 0  # Exit position
+                df.loc[idx, 'exit_price'] = current_price
+                df.loc[idx, 'trade_duration'] = bars_in_trade
+                df.loc[idx, 'trade_profit_pct'] = current_profit_pct
+                
+                # Record exit reason
+                if take_profit_hit:
+                    df.loc[idx, 'exit_reason'] = "Take Profit"
+                elif stop_loss_hit:
+                    df.loc[idx, 'exit_reason'] = "Stop Loss"
+                elif max_hold_reached:
+                    df.loc[idx, 'exit_reason'] = "Max Hold Time"
+                elif upper_band_reached:
+                    df.loc[idx, 'exit_reason'] = "Upper Band"
+                
+                # Reset position tracking
+                in_position = False
+                entry_index = None
+                entry_price = None
+            else:
+                # Still in the position
+                df.loc[idx, 'position'] = 1
+        
+        # Propagate position status if no changes
+        elif df.loc[prev_idx, 'position'] == 1 and not in_position:
+            in_position = True
+            entry_index = i-1
+            entry_price = df.loc[prev_idx, 'price']
+    
     return df
 
 # Calculate strategy returns
 def calculate_returns(df):
     """
-    Calculate returns based on position signals
+    Calculate returns and equity curve based on position signals and trade details
     """
-    # Calculate price returns
-    df['price_return'] = df['price'].pct_change()
+    # Calculate trade returns based on entry and exit prices
+    trade_returns = []
     
-    # Calculate strategy returns
-    df['strategy_return'] = df['position'].shift(1) * df['price_return']
+    # Group by position changes to identify complete trades
+    entry_indices = df[(df['position'] == 1) & (df['position'].shift(1) != 1)].index
+    exit_indices = df[(df['position'] == 0) & (df['position'].shift(1) == 1)].index
+    
+    # Match entries and exits
+    for i, entry_idx in enumerate(entry_indices):
+        if i < len(exit_indices):
+            exit_idx = exit_indices[i]
+            entry_price = df.loc[entry_idx, 'price']
+            exit_price = df.loc[exit_idx, 'price']
+            
+            # Calculate return
+            trade_return = (exit_price / entry_price) - 1
+            trade_returns.append(trade_return)
     
     # Calculate cumulative returns
-    df['cum_price_return'] = (1 + df['price_return']).cumprod() - 1
-    df['cum_strategy_return'] = (1 + df['strategy_return']).cumprod() - 1
+    df['trade_return'] = 0.0
+    
+    # Assign returns to the exit points
+    for i, exit_idx in enumerate(exit_indices):
+        if i < len(trade_returns):
+            df.loc[exit_idx, 'trade_return'] = trade_returns[i]
+    
+    # Calculate cumulative returns
+    df['cum_strategy_return'] = (1 + df['trade_return']).cumprod() - 1
     
     return df
 
 # Calculate performance metrics
 def calculate_performance_metrics(df):
     """
-    Calculate performance metrics for the strategy
+    Calculate performance metrics for the strategy with focus on short-term trading
     """
-    # Calculate total return
-    total_return = df['cum_strategy_return'].iloc[-1] if not df.empty else 0
+    # Filter for completed trades
+    completed_trades = df[(df['entry_price'].notna()) & (df['exit_price'].notna())]
     
-    # Calculate annualized return
-    days = (df.index[-1] - df.index[0]).days
-    if days > 0:
-        annualized_return = ((1 + total_return) ** (365 / days)) - 1
-    else:
-        annualized_return = 0
+    if completed_trades.empty:
+        return {
+            'total_return': 0,
+            'win_rate': 0,
+            'profit_factor': 0,
+            'avg_trade_return': 0,
+            'max_drawdown': 0,
+            'total_trades': 0,
+            'avg_trade_duration': 0
+        }
     
-    # Calculate daily returns
-    df['daily_return'] = df['strategy_return'].resample('D').sum()
+    # Calculate trade metrics
+    trade_profits = completed_trades['trade_profit_pct']
+    winning_trades = trade_profits[trade_profits > 0]
+    losing_trades = trade_profits[trade_profits <= 0]
     
-    # Calculate Sharpe ratio (annualized, assuming risk-free rate of 0)
-    if df['daily_return'].std() > 0:
-        sharpe_ratio = (df['daily_return'].mean() / df['daily_return'].std()) * np.sqrt(365)
-    else:
-        sharpe_ratio = 0
+    # Total return
+    total_return = df['cum_strategy_return'].iloc[-1] if not df.empty and 'cum_strategy_return' in df.columns else 0
     
-    # Calculate maximum drawdown
-    df['cum_peak'] = df['cum_strategy_return'].cummax()
-    df['drawdown'] = df['cum_peak'] - df['cum_strategy_return']
-    max_drawdown = df['drawdown'].max()
+    # Win rate
+    total_trades = len(trade_profits)
+    win_rate = len(winning_trades) / total_trades if total_trades > 0 else 0
     
-    # Calculate win rate
-    df['trade'] = df['position'].diff().ne(0)
-    df['trade_return'] = np.where(df['trade'], df['strategy_return'], 0)
-    wins = (df[df['trade_return'] > 0]['trade_return'].count())
-    losses = (df[df['trade_return'] < 0]['trade_return'].count())
-    total_trades = wins + losses
-    win_rate = wins / total_trades if total_trades > 0 else 0
-    
-    # Calculate profit factor
-    total_profit = df[df['trade_return'] > 0]['trade_return'].sum()
-    total_loss = abs(df[df['trade_return'] < 0]['trade_return'].sum())
+    # Profit factor
+    total_profit = winning_trades.sum() if len(winning_trades) > 0 else 0
+    total_loss = abs(losing_trades.sum()) if len(losing_trades) > 0 else 0
     profit_factor = total_profit / total_loss if total_loss > 0 else float('inf')
+    
+    # Average return per trade
+    avg_trade_return = trade_profits.mean() if len(trade_profits) > 0 else 0
+    
+    # Maximum drawdown
+    if 'cum_strategy_return' in df.columns and not df.empty:
+        df['peak'] = df['cum_strategy_return'].cummax()
+        df['drawdown'] = df['peak'] - df['cum_strategy_return']
+        max_drawdown = df['drawdown'].max()
+    else:
+        max_drawdown = 0
+    
+    # Average trade duration (in minutes/bars)
+    avg_trade_duration = completed_trades['trade_duration'].mean() if 'trade_duration' in completed_trades else 0
+    
+    # Exit reasons count
+    exit_reasons = completed_trades['exit_reason'].value_counts().to_dict() if 'exit_reason' in completed_trades else {}
     
     return {
         'total_return': total_return,
-        'annualized_return': annualized_return,
-        'sharpe_ratio': sharpe_ratio,
-        'max_drawdown': max_drawdown,
         'win_rate': win_rate,
         'profit_factor': profit_factor,
-        'total_trades': total_trades
+        'avg_trade_return': avg_trade_return,
+        'max_drawdown': max_drawdown,
+        'total_trades': total_trades,
+        'avg_trade_duration': avg_trade_duration,
+        'exit_reasons': exit_reasons
     }
+
+# Function to resample data to desired timeframe
+def resample_data(df, timeframe):
+    """
+    Resample data to the desired timeframe
+    """
+    # Define the resample rule based on the timeframe
+    if timeframe == "1m":
+        rule = "1min"
+    elif timeframe == "3m":
+        rule = "3min"
+    elif timeframe == "5m":
+        rule = "5min"
+    elif timeframe == "15m":
+        rule = "15min"
+    elif timeframe == "30m":
+        rule = "30min"
+    elif timeframe == "1h":
+        rule = "1H"
+    else:
+        rule = "1min"  # Default to 1-minute
+    
+    # Resample OHLCV data
+    resampled = df.resample(rule).agg({
+        'price': 'last'
+    })
+    
+    return resampled.dropna()
 
 # Fetch price data and run strategy
 @st.cache_data(ttl=600, show_spinner="Fetching price data...")
-def fetch_price_data_and_run_strategy(token, lookback_days, bb_period, bb_std_dev, strategy_name):
+def fetch_price_data_and_run_strategy(token, lookback_minutes, bb_period, bb_std_dev, strategy_name, 
+                                     take_profit_pct, stop_loss_pct, max_hold_time, candle_timeframe,
+                                     apply_time_filter=False, start_hour=None, end_hour=None):
     """
     Fetch price data and run the selected trading strategy
     """
     # Get current time in Singapore timezone
     now_utc = datetime.now(pytz.utc)
     now_sg = now_utc.astimezone(singapore_timezone)
-    start_time_sg = now_sg - timedelta(days=lookback_days)
+    start_time_sg = now_sg - timedelta(minutes=lookback_minutes)
     
     # Convert back to UTC for database query
     start_time_utc = start_time_sg.astimezone(pytz.utc)
@@ -310,29 +600,41 @@ def fetch_price_data_and_run_strategy(token, lookback_days, bb_period, bb_std_de
     WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
     AND pair_name = '{token}';
     """
+    
     try:
         df = pd.read_sql(query, engine)
 
         if df.empty:
-            return None, None
+            return None, None, None
 
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.set_index('timestamp').sort_index()
         
-        # Resample to 1-minute data
-        df = df.resample('1min').last()
-        df = df.fillna(method='ffill')
+        # Apply time of day filter if requested
+        if apply_time_filter and start_hour is not None and end_hour is not None:
+            # Filter by hour of day in Singapore time
+            df = df[(df.index.hour >= start_hour) & (df.index.hour <= end_hour)]
+            
+            if df.empty:
+                st.warning(f"No data available for {token} during the selected hours.")
+                return None, None, None
+        
+        # Store original data for visualization
+        original_df = df.copy()
+        
+        # Resample to desired timeframe
+        df = resample_data(df, candle_timeframe)
         
         # Calculate Bollinger Bands
         df = calculate_bollinger_bands(df, period=bb_period, std_dev=bb_std_dev)
         
         # Run the selected strategy
         if strategy_name == "BB Bounce":
-            df = bb_bounce_strategy(df)
+            df = bb_bounce_strategy(df, take_profit_pct, stop_loss_pct, max_hold_time)
         elif strategy_name == "BB Breakout":
-            df = bb_breakout_strategy(df)
+            df = bb_breakout_strategy(df, take_profit_pct, stop_loss_pct, max_hold_time)
         elif strategy_name == "BB Squeeze":
-            df = bb_squeeze_strategy(df)
+            df = bb_squeeze_strategy(df, take_profit_pct, stop_loss_pct, max_hold_time)
         elif strategy_name == "All Strategies":
             # Run all strategies and keep the best one
             strategies = {
@@ -347,15 +649,17 @@ def fetch_price_data_and_run_strategy(token, lookback_days, bb_period, bb_std_de
             
             for strat_name, strat_func in strategies.items():
                 temp_df = df.copy()
-                temp_df = strat_func(temp_df)
+                temp_df = strat_func(temp_df, take_profit_pct, stop_loss_pct, max_hold_time)
                 temp_df = calculate_returns(temp_df)
                 
-                if not temp_df.empty and 'cum_strategy_return' in temp_df.columns:
-                    final_return = temp_df['cum_strategy_return'].iloc[-1]
-                    if final_return > best_return:
-                        best_return = final_return
-                        best_df = temp_df
-                        best_strat_name = strat_name
+                if not temp_df.empty and 'trade_profit_pct' in temp_df.columns:
+                    winning_trades = temp_df[temp_df['trade_profit_pct'] > 0]
+                    if not winning_trades.empty:
+                        total_profit = winning_trades['trade_profit_pct'].sum()
+                        if total_profit > best_return:
+                            best_return = total_profit
+                            best_df = temp_df
+                            best_strat_name = strat_name
             
             if best_df is not None:
                 df = best_df
@@ -370,189 +674,65 @@ def fetch_price_data_and_run_strategy(token, lookback_days, bb_period, bb_std_de
         metrics = calculate_performance_metrics(df)
         metrics['strategy_name'] = strategy_name
         
-        return df, metrics
+        return df, metrics, original_df
+    
     except Exception as e:
         st.error(f"Error processing {token}: {e}")
-        return None, None
+        return None, None, None
 
-# Show progress bar while processing
-progress_bar = st.progress(0)
-status_text = st.empty()
-
-# Process all selected tokens
-results = {}
-metrics_data = []
-
-for i, token in enumerate(selected_tokens):
-    progress_bar.progress((i) / len(selected_tokens))
-    status_text.text(f"Processing {token} ({i+1}/{len(selected_tokens)})")
-    
-    df, metrics = fetch_price_data_and_run_strategy(
-        token, 
-        lookback_days, 
+# Show spinner while processing
+with st.spinner(f"Analyzing {selected_token} with {selected_strategy} strategy..."):
+    df, metrics, original_df = fetch_price_data_and_run_strategy(
+        selected_token, 
+        lookback_minutes, 
         bb_period, 
         bb_std_dev, 
-        selected_strategy
+        selected_strategy,
+        take_profit_pct,
+        stop_loss_pct,
+        max_hold_time,
+        candle_timeframe,
+        apply_time_filter,
+        start_hour,
+        end_hour
     )
-    
-    if df is not None and metrics is not None:
-        results[token] = {
-            'df': df,
-            'metrics': metrics
-        }
-        
-        metrics_data.append({
-            'Token': token,
-            'Strategy': metrics['strategy_name'],
-            'Total Return (%)': round(metrics['total_return'] * 100, 2),
-            'Annualized Return (%)': round(metrics['annualized_return'] * 100, 2),
-            'Sharpe Ratio': round(metrics['sharpe_ratio'], 2),
-            'Max Drawdown (%)': round(metrics['max_drawdown'] * 100, 2),
-            'Win Rate (%)': round(metrics['win_rate'] * 100, 2),
-            'Profit Factor': round(metrics['profit_factor'], 2),
-            'Total Trades': metrics['total_trades']
-        })
-
-# Final progress update
-progress_bar.progress(1.0)
-status_text.text(f"Processed {len(results)}/{len(selected_tokens)} tokens successfully")
 
 # Display results
-if results:
-    # Create performance metrics table
-    metrics_df = pd.DataFrame(metrics_data)
-    
-    # Sort by total return (descending)
-    metrics_df = metrics_df.sort_values(by='Total Return (%)', ascending=False)
-    
-    # Add rank column
-    metrics_df.insert(0, 'Rank', range(1, len(metrics_df) + 1))
-    
-    # Function to color cells based on performance
-    def color_returns(val):
-        if isinstance(val, (int, float)):
-            if val > 0:
-                return f'background-color: rgba(0, 255, 0, {min(1, abs(val) / 100)}); color: black'
-            elif val < 0:
-                return f'background-color: rgba(255, 0, 0, {min(1, abs(val) / 100)}); color: white'
-        return ''
-    
-    def color_sharpe(val):
-        if isinstance(val, (int, float)):
-            if val > 2:
-                return 'background-color: rgba(0, 200, 0, 0.7); color: black'
-            elif val > 1:
-                return 'background-color: rgba(100, 200, 0, 0.5); color: black'
-            elif val < 0:
-                return 'background-color: rgba(200, 0, 0, 0.5); color: white'
-        return ''
-    
-    def color_win_rate(val):
-        if isinstance(val, (int, float)):
-            if val > 60:
-                return 'background-color: rgba(0, 200, 0, 0.7); color: black'
-            elif val > 50:
-                return 'background-color: rgba(100, 200, 0, 0.5); color: black'
-            elif val < 40:
-                return 'background-color: rgba(200, 0, 0, 0.5); color: white'
-        return ''
-    
-    def color_profit_factor(val):
-        if isinstance(val, (int, float)):
-            if val > 3:
-                return 'background-color: rgba(0, 200, 0, 0.7); color: black'
-            elif val > 1.5:
-                return 'background-color: rgba(100, 200, 0, 0.5); color: black'
-            elif val < 1:
-                return 'background-color: rgba(200, 0, 0, 0.5); color: white'
-        return ''
-    
-    # Apply styling
-    styled_metrics = metrics_df.style\
-        .applymap(color_returns, subset=['Total Return (%)', 'Annualized Return (%)'])\
-        .applymap(color_sharpe, subset=['Sharpe Ratio'])\
-        .applymap(color_win_rate, subset=['Win Rate (%)'])\
-        .applymap(color_profit_factor, subset=['Profit Factor'])\
-        .format({
-            'Total Return (%)': '{:.2f}%',
-            'Annualized Return (%)': '{:.2f}%',
-            'Sharpe Ratio': '{:.2f}',
-            'Max Drawdown (%)': '{:.2f}%',
-            'Win Rate (%)': '{:.2f}%',
-            'Profit Factor': '{:.2f}'
-        })
-    
-    # Display metrics table
-    st.subheader(f"Bollinger Bands Strategy Performance Ranking (Period: {bb_period}, StdDev: {bb_std_dev})")
-    st.dataframe(styled_metrics, height=500, use_container_width=True)
-    
-    # Visualize top performers
-    st.subheader("Top 5 Performers - Cumulative Returns")
-    
-    top5_tokens = metrics_df.sort_values(by='Total Return (%)', ascending=False).head(5)['Token'].tolist()
-    
-    fig = go.Figure()
-    for token in top5_tokens:
-        if token in results:
-            df = results[token]['df']
-            strategy_name = results[token]['metrics']['strategy_name']
-            fig.add_trace(go.Scatter(
-                x=df.index,
-                y=df['cum_strategy_return'] * 100,
-                mode='lines',
-                name=f"{token} ({strategy_name})",
-                hovertemplate="%{y:.2f}%"
-            ))
-    
-    fig.update_layout(
-        title="Cumulative Returns for Top 5 Performers",
-        xaxis_title="Date",
-        yaxis_title="Cumulative Return (%)",
-        height=500,
-        legend_title="Token (Strategy)",
-        hovermode="x unified"
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Strategy Distribution
-    if selected_strategy == "All Strategies":
-        st.subheader("Best Strategy Distribution")
+    if df is not None and metrics is not None:
+        # Main metrics
+        st.header(f"{selected_token} Analysis Results - {metrics['strategy_name']} Strategy")
         
-        strategy_counts = metrics_df['Strategy'].value_counts().reset_index()
-        strategy_counts.columns = ['Strategy', 'Count']
+        # Performance metrics in neat columns
+        col1, col2, col3, col4 = st.columns(4)
         
-        fig = px.pie(
-            strategy_counts,
-            values='Count',
-            names='Strategy',
-            title='Distribution of Best Performing Strategies',
-            color_discrete_sequence=px.colors.qualitative.Set3
-        )
-        fig.update_traces(textposition='inside', textinfo='percent+label')
-        fig.update_layout(height=400)
+        with col1:
+            st.metric("Win Rate", f"{metrics['win_rate']*100:.1f}%", 
+                     delta=f"{(metrics['win_rate']-0.5)*100:.1f}%" if metrics['win_rate'] > 0 else None)
+            st.metric("Total Trades", f"{metrics['total_trades']}")
         
-        st.plotly_chart(fig, use_container_width=True)
-    
-    # Detailed analysis of the best performer
-    st.subheader("Detailed Analysis of Top Performer")
-    
-    best_token = metrics_df.iloc[0]['Token']
-    best_strategy = metrics_df.iloc[0]['Strategy']
-    best_return = metrics_df.iloc[0]['Total Return (%)']
-    
-    st.write(f"**{best_token}** showed the best performance using the **{best_strategy}** strategy with a return of **{best_return:.2f}%** over the {lookback_days}-day period.")
-    
-    if best_token in results:
-        best_df = results[best_token]['df']
+        with col2:
+            st.metric("Avg Trade Return", f"{metrics['avg_trade_return']:.2f}%")
+            st.metric("Avg Trade Duration", f"{metrics['avg_trade_duration']:.1f} bars")
         
-        # Show price chart with Bollinger Bands and position signals
+        with col3:
+            st.metric("Profit Factor", f"{metrics['profit_factor']:.2f}")
+            st.metric("Total Return", f"{metrics['total_return']*100:.2f}%")
+        
+        with col4:
+            st.metric("Max Drawdown", f"{metrics['max_drawdown']*100:.2f}%")
+            if 'exit_reasons' in metrics and metrics['exit_reasons']:
+                top_exit = max(metrics['exit_reasons'].items(), key=lambda x: x[1])[0]
+                st.metric("Top Exit Reason", top_exit)
+        
+        # Price chart with Bollinger Bands and trades
+        st.subheader("Price Chart with Bollinger Bands and Trades")
+        
         fig = go.Figure()
         
         # Add price
         fig.add_trace(go.Scatter(
-            x=best_df.index,
-            y=best_df['price'],
+            x=df.index,
+            y=df['price'],
             mode='lines',
             name='Price',
             line=dict(color='blue', width=1)
@@ -560,57 +740,66 @@ if results:
         
         # Add Bollinger Bands
         fig.add_trace(go.Scatter(
-            x=best_df.index,
-            y=best_df['bb_upper'],
+            x=df.index,
+            y=df['bb_upper'],
             mode='lines',
             line=dict(color='rgba(173, 216, 230, 0.7)', width=1),
-            name='Upper Band',
-            hoverinfo='none'
+            name='Upper Band'
         ))
         
         fig.add_trace(go.Scatter(
-            x=best_df.index,
-            y=best_df['bb_lower'],
+            x=df.index,
+            y=df['bb_lower'],
             mode='lines',
             line=dict(color='rgba(173, 216, 230, 0.7)', width=1),
             fill='tonexty',
             fillcolor='rgba(173, 216, 230, 0.3)',
-            name='Lower Band',
-            hoverinfo='none'
+            name='Lower Band'
         ))
         
         fig.add_trace(go.Scatter(
-            x=best_df.index,
-            y=best_df['bb_middle'],
+            x=df.index,
+            y=df['bb_middle'],
             mode='lines',
             line=dict(color='rgba(173, 216, 230, 0.9)', width=1, dash='dash'),
-            name='Middle Band',
-            hoverinfo='none'
+            name='Middle Band'
         ))
         
-        # Add buy signals
-        buy_signals = best_df[best_df['signal'] == 1]
+        # Add entry points
+        entries = df[df['entry_price'].notna()]
         fig.add_trace(go.Scatter(
-            x=buy_signals.index,
-            y=buy_signals['price'],
+            x=entries.index,
+            y=entries['price'],
             mode='markers',
-            marker=dict(color='green', size=8, symbol='triangle-up'),
-            name='Buy Signal'
+            marker=dict(color='green', size=10, symbol='triangle-up'),
+            name='Entry Points'
         ))
         
-        # Add sell signals
-        sell_signals = best_df[best_df['signal'] == -1]
+        # Add exit points
+        exits = df[df['exit_price'].notna()]
         fig.add_trace(go.Scatter(
-            x=sell_signals.index,
-            y=sell_signals['price'],
+            x=exits.index,
+            y=exits['price'],
             mode='markers',
-            marker=dict(color='red', size=8, symbol='triangle-down'),
-            name='Sell Signal'
+            marker=dict(color='red', size=10, symbol='triangle-down'),
+            name='Exit Points'
         ))
+        
+        # Highlight squeeze periods if using squeeze strategy
+        if selected_strategy == "BB Squeeze" or (selected_strategy == "All Strategies" and metrics['strategy_name'] == "BB Squeeze"):
+            squeeze_periods = df[df['in_squeeze']]
+            if not squeeze_periods.empty:
+                fig.add_trace(go.Scatter(
+                    x=squeeze_periods.index,
+                    y=squeeze_periods['bb_lower'] * 0.99,  # Just below lower band for visibility
+                    mode='markers',
+                    marker=dict(color='purple', size=5, symbol='square'),
+                    name='Squeeze Periods'
+                ))
         
         fig.update_layout(
-            title=f"{best_token} - Price with Bollinger Bands and Trading Signals",
-            xaxis_title="Date",
+            title=f"{selected_token} Price with Bollinger Bands ({candle_timeframe} timeframe)",
+            xaxis_title="Time",
             yaxis_title="Price",
             height=600,
             hovermode="x unified"
@@ -618,328 +807,81 @@ if results:
         
         st.plotly_chart(fig, use_container_width=True)
         
-        # Show cumulative returns
-        fig = go.Figure()
-        
-        fig.add_trace(go.Scatter(
-            x=best_df.index,
-            y=best_df['cum_price_return'] * 100,
-            mode='lines',
-            name='Buy & Hold',
-            line=dict(color='grey', width=1.5)
-        ))
-        
-        fig.add_trace(go.Scatter(
-            x=best_df.index,
-            y=best_df['cum_strategy_return'] * 100,
-            mode='lines',
-            name=f'{best_strategy} Strategy',
-            line=dict(color='blue', width=2)
-        ))
-        
-        fig.update_layout(
-            title=f"{best_token} - Strategy Performance vs Buy & Hold",
-            xaxis_title="Date",
-            yaxis_title="Cumulative Return (%)",
-            height=400,
-            hovermode="x unified"
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Show drawdown
-        fig = go.Figure()
-        
-        fig.add_trace(go.Scatter(
-            x=best_df.index,
-            y=-best_df['drawdown'] * 100,
-            mode='lines',
-            name='Drawdown',
-            line=dict(color='red', width=1.5),
-            fill='tozeroy',
-            fillcolor='rgba(255, 0, 0, 0.2)'
-        ))
-        
-        fig.update_layout(
-            title=f"{best_token} - Strategy Drawdown",
-            xaxis_title="Date",
-            yaxis_title="Drawdown (%)",
-            height=300,
-            hovermode="x unified"
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Additional statistics
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("Total Return", f"{best_return:.2f}%")
-            st.metric("Annualized Return", f"{metrics_df.iloc[0]['Annualized Return (%)']:.2f}%")
-        
-        with col2:
-            st.metric("Sharpe Ratio", f"{metrics_df.iloc[0]['Sharpe Ratio']:.2f}")
-            st.metric("Max Drawdown", f"{metrics_df.iloc[0]['Max Drawdown (%)']:.2f}%")
-        
-        with col3:
-            st.metric("Win Rate", f"{metrics_df.iloc[0]['Win Rate (%)']:.2f}%")
-            st.metric("Profit Factor", f"{metrics_df.iloc[0]['Profit Factor']:.2f}")
-    
-    # Correlation analysis
-    st.subheader("Performance Correlation Analysis")
-    
-    if len(metrics_df) > 1:
-        # Analyze correlation between key metrics
-        corr_metrics = metrics_df[['Total Return (%)', 'Sharpe Ratio', 'Win Rate (%)', 'Profit Factor', 'Max Drawdown (%)']]
-        corr_matrix = corr_metrics.corr()
-        
-        fig = px.imshow(
-            corr_matrix,
-            text_auto='.2f',
-            color_continuous_scale='RdBu_r',
-            title='Correlation Between Performance Metrics',
-            labels=dict(color="Correlation")
-        )
-        fig.update_layout(height=500)
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        st.write("""
-        **Correlation Analysis Insights:**
-        
-        This correlation matrix shows how different performance metrics relate to each other:
-        - A strong positive correlation between Total Return and Sharpe Ratio indicates that higher returns generally come with better risk-adjusted performance.
-        - The relationship between Win Rate and Total Return shows whether fewer, more profitable trades or more frequent smaller wins are driving performance.
-        - Max Drawdown correlation with returns helps understand the risk-return tradeoff in different strategies.
-        """)
-    
-    # Parameter optimization suggestions
-    st.subheader("Parameter Optimization Insights")
-    
-    st.write(f"""
-    **Current Parameters:** Bollinger Period = {bb_period}, Standard Deviations = {bb_std_dev}
-    
-    **Optimization Suggestions:**
-    
-    1. **For higher volatility tokens** (like {', '.join(top5_tokens[:2]) if len(top5_tokens) >= 2 else top5_tokens[0]}):
-       - Consider testing with wider bands (higher standard deviations, 2.5-3.0)
-       - Shorter periods (15-18) may capture more trading opportunities
-    
-    2. **For lower volatility tokens:**
-       - Narrower bands (1.5-1.8 standard deviations) may be more effective
-       - Longer periods (25-30) can help filter out noise
-    
-    3. **For optimal results across all tokens:**
-       - Test multiple parameter combinations and strategy types
-       - Consider different parameters for different market conditions
-    """)
-    
-   # Profitability by market condition
-    st.subheader("Strategy Profitability by Market Condition")
-    
-    market_condition_data = []
-    for token, result in results.items():
-        df = result['df']
-        if not df.empty and 'strategy_return' in df.columns:
-            # Classify market conditions based on price trends
-            df['price_trend_20'] = df['price'].pct_change(periods=20)
+        # Display equity curve
+        if 'cum_strategy_return' in df.columns:
+            st.subheader("Strategy Equity Curve")
             
-            # Define market condition based on volatility (measured by BB bandwidth)
-            df['high_volatility'] = df['bb_bandwidth'] > df['bb_bandwidth'].quantile(0.75)
-            df['low_volatility'] = df['bb_bandwidth'] < df['bb_bandwidth'].quantile(0.25)
-            
-            # Calculate returns during different market conditions
-            uptrend_returns = df[df['price_trend_20'] > 0.01]['strategy_return'].mean() * 100
-            downtrend_returns = df[df['price_trend_20'] < -0.01]['strategy_return'].mean() * 100
-            sideways_returns = df[(df['price_trend_20'] >= -0.01) & (df['price_trend_20'] <= 0.01)]['strategy_return'].mean() * 100
-            
-            high_vol_returns = df[df['high_volatility']]['strategy_return'].mean() * 100
-            low_vol_returns = df[df['low_volatility']]['strategy_return'].mean() * 100
-            
-            market_condition_data.append({
-                'Token': token,
-                'Strategy': result['metrics']['strategy_name'],
-                'Uptrend Returns (%)': round(uptrend_returns, 2) if not pd.isna(uptrend_returns) else 0,
-                'Downtrend Returns (%)': round(downtrend_returns, 2) if not pd.isna(downtrend_returns) else 0,
-                'Sideways Returns (%)': round(sideways_returns, 2) if not pd.isna(sideways_returns) else 0,
-                'High Volatility Returns (%)': round(high_vol_returns, 2) if not pd.isna(high_vol_returns) else 0,
-                'Low Volatility Returns (%)': round(low_vol_returns, 2) if not pd.isna(low_vol_returns) else 0
-            })
-    
-    if market_condition_data:
-        market_condition_df = pd.DataFrame(market_condition_data)
-        
-        # Sort by overall return
-        market_condition_df = market_condition_df.merge(
-            metrics_df[['Token', 'Total Return (%)']],
-            on='Token'
-        ).sort_values(by='Total Return (%)', ascending=False)
-        
-        # Apply color styling
-        def color_market_returns(val):
-            if isinstance(val, (int, float)):
-                if val > 0:
-                    color_intensity = min(1, abs(val) / 50)
-                    return f'background-color: rgba(0, 200, 0, {color_intensity}); color: black'
-                elif val < 0:
-                    color_intensity = min(1, abs(val) / 50)
-                    return f'background-color: rgba(200, 0, 0, {color_intensity}); color: white'
-            return ''
-        
-        styled_market_df = market_condition_df.style.applymap(
-            color_market_returns, 
-            subset=[
-                'Uptrend Returns (%)', 
-                'Downtrend Returns (%)', 
-                'Sideways Returns (%)',
-                'High Volatility Returns (%)',
-                'Low Volatility Returns (%)'
-            ]
-        )
-        
-        st.dataframe(styled_market_df, height=400, use_container_width=True)
-        
-        # Create a bar chart comparing market condition returns
-        condition_summary = market_condition_df[
-            ['Token', 'Uptrend Returns (%)', 'Downtrend Returns (%)', 'Sideways Returns (%)']
-        ].head(5)  # Top 5 tokens
-        
-        # Melt the DataFrame for easier plotting
-        condition_summary_melted = pd.melt(
-            condition_summary, 
-            id_vars=['Token'], 
-            value_vars=['Uptrend Returns (%)', 'Downtrend Returns (%)', 'Sideways Returns (%)'],
-            var_name='Market Condition', 
-            value_name='Returns (%)'
-        )
-        
-        # Create bar chart
-        fig = px.bar(
-            condition_summary_melted,
-            x='Token',
-            y='Returns (%)',
-            color='Market Condition',
-            barmode='group',
-            title='Strategy Returns by Market Condition (Top 5 Tokens)',
-            color_discrete_map={
-                'Uptrend Returns (%)': 'green',
-                'Downtrend Returns (%)': 'red',
-                'Sideways Returns (%)': 'blue'
-            }
-        )
-        
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Create a similar chart for volatility conditions
-        volatility_summary = market_condition_df[
-            ['Token', 'High Volatility Returns (%)', 'Low Volatility Returns (%)']
-        ].head(5)  # Top 5 tokens
-        
-        # Melt the DataFrame for easier plotting
-        volatility_summary_melted = pd.melt(
-            volatility_summary, 
-            id_vars=['Token'], 
-            value_vars=['High Volatility Returns (%)', 'Low Volatility Returns (%)'],
-            var_name='Volatility Condition', 
-            value_name='Returns (%)'
-        )
-        
-        # Create bar chart
-        fig = px.bar(
-            volatility_summary_melted,
-            x='Token',
-            y='Returns (%)',
-            color='Volatility Condition',
-            barmode='group',
-            title='Strategy Returns by Volatility Condition (Top 5 Tokens)',
-            color_discrete_map={
-                'High Volatility Returns (%)': 'purple',
-                'Low Volatility Returns (%)': 'orange'
-            }
-        )
-        
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Insights
-        st.write("""
-        **Market Condition Analysis Insights:**
-        
-        This analysis shows how each strategy performs under different market conditions:
-        
-        1. **Trend Analysis:**
-           - Strategies that perform well in both up and down trends are more versatile
-           - Strategies that excel in sideways markets often struggle in trending markets (and vice versa)
-        
-        2. **Volatility Impact:**
-           - High volatility environments may benefit breakout strategies
-           - Low volatility environments typically favor mean-reversion strategies
-           
-        3. **Strategy Selection:**
-           - Choose strategies based on your market outlook and token characteristics
-           - Consider combining multiple strategies for different market conditions
-        """)
-    
-    # Trade timing analysis
-    st.subheader("Trade Timing Analysis")
-    
-    best_token = metrics_df.iloc[0]['Token']
-    if best_token in results:
-        best_df = results[best_token]['df']
-        
-        # Analyze trade timing
-        if 'signal' in best_df.columns:
-            # Group by hour of day to see when trades occur
-            best_df['hour'] = best_df.index.hour
-            
-            # Count signals by hour
-            signal_counts = best_df[best_df['signal'] != 0].groupby('hour')['signal'].count()
-            
-            # Calculate returns by hour
-            returns_by_hour = best_df.groupby('hour')['strategy_return'].mean() * 100
-            
-            # Combine the data
-            timing_df = pd.DataFrame({
-                'Hour': signal_counts.index,
-                'Signal Count': signal_counts.values,
-                'Avg Return (%)': returns_by_hour.reindex(signal_counts.index).values
-            })
-            
-            # Create a dual-axis chart
             fig = go.Figure()
             
-            # Add signal counts as bars
+            fig.add_trace(go.Scatter(
+                x=df.index,
+                y=df['cum_strategy_return'] * 100,
+                mode='lines',
+                name='Equity Curve',
+                line=dict(color='green', width=2)
+            ))
+            
+            fig.update_layout(
+                title=f"{selected_token} Strategy Performance ({metrics['strategy_name']})",
+                xaxis_title="Time",
+                yaxis_title="Cumulative Return (%)",
+                height=400,
+                hovermode="x unified"
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Trade analysis
+        st.subheader("Trade Analysis")
+        
+        # Filter for completed trades
+        completed_trades = df[(df['entry_price'].notna()) & (df['exit_price'].notna())].copy()
+        
+        if not completed_trades.empty:
+            # Calculate additional metrics for each trade
+            completed_trades['time_of_day'] = completed_trades.index.hour
+            
+            # Display trade distribution by hour
+            hour_counts = completed_trades.groupby('time_of_day').size()
+            hour_returns = completed_trades.groupby('time_of_day')['trade_profit_pct'].mean()
+            
+            # Combine into a single DataFrame
+            hour_analysis = pd.DataFrame({
+                'Trade Count': hour_counts,
+                'Avg Return (%)': hour_returns
+            }).fillna(0)
+            
+            # Plot trade distribution by hour
+            fig = go.Figure()
+            
             fig.add_trace(go.Bar(
-                x=timing_df['Hour'],
-                y=timing_df['Signal Count'],
-                name='Number of Signals',
+                x=hour_analysis.index,
+                y=hour_analysis['Trade Count'],
+                name='Trade Count',
                 marker_color='blue',
                 opacity=0.7,
                 yaxis='y'
             ))
             
-            # Add average returns as line
             fig.add_trace(go.Scatter(
-                x=timing_df['Hour'],
-                y=timing_df['Avg Return (%)'],
+                x=hour_analysis.index,
+                y=hour_analysis['Avg Return (%)'],
                 name='Avg Return (%)',
                 marker_color='green',
                 mode='lines+markers',
                 yaxis='y2'
             ))
             
-            # Update layout for dual y-axes
             fig.update_layout(
-                title=f"Trade Timing Analysis for {best_token} (Hour of Day, Singapore Time)",
+                title=f"Trade Distribution by Hour of Day (Singapore Time)",
                 xaxis=dict(
                     title='Hour of Day',
                     tickmode='linear',
-                    tick0=0,
-                    dtick=1
+                    tickvals=list(range(0, 24)),
+                    ticktext=[f"{h:02d}:00" for h in range(0, 24)]
                 ),
                 yaxis=dict(
-                    title='Number of Signals',
+                    title='Number of Trades',
                     titlefont=dict(color='blue'),
                     tickfont=dict(color='blue')
                 ),
@@ -963,166 +905,445 @@ if results:
             
             st.plotly_chart(fig, use_container_width=True)
             
-            # Provide insights on trade timing
-            best_hour_return = timing_df.loc[timing_df['Avg Return (%)'].idxmax()]
-            worst_hour_return = timing_df.loc[timing_df['Avg Return (%)'].idxmin()]
-            most_active_hour = timing_df.loc[timing_df['Signal Count'].idxmax()]
+            # Trade duration analysis
+            if 'trade_duration' in completed_trades.columns:
+                st.subheader("Trade Duration Analysis")
+                
+                fig = px.histogram(
+                    completed_trades, 
+                    x='trade_duration',
+                    nbins=20,
+                    labels={'trade_duration': 'Trade Duration (bars)'},
+                    title=f"Distribution of Trade Durations for {selected_token}",
+                    color_discrete_sequence=['blue']
+                )
+                
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Analyze if shorter or longer trades are more profitable
+                duration_bins = [0, 1, 2, 3, 5, 10, max(completed_trades['trade_duration']) + 1]
+                completed_trades['duration_category'] = pd.cut(completed_trades['trade_duration'], bins=duration_bins, 
+                                                              labels=[f"{duration_bins[i]}-{duration_bins[i+1]-1}" for i in range(len(duration_bins)-1)])
+                
+                duration_analysis = completed_trades.groupby('duration_category')['trade_profit_pct'].agg(['mean', 'count']).reset_index()
+                duration_analysis.columns = ['Duration (bars)', 'Avg Return (%)', 'Trade Count']
+                
+                fig = px.bar(
+                    duration_analysis,
+                    x='Duration (bars)',
+                    y='Avg Return (%)',
+                    text='Trade Count',
+                    color='Avg Return (%)',
+                    color_continuous_scale='RdYlGn',
+                    title='Returns by Trade Duration'
+                )
+                
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Determine optimal trade duration based on data
+                best_duration = duration_analysis.loc[duration_analysis['Avg Return (%)'].idxmax()]
+                
+                st.info(f"""
+                **Optimal Trade Duration:**
+                
+                The most profitable trade duration is **{best_duration['Duration (bars)']} bars** with an average return of **{best_duration['Avg Return (%)']:.2f}%**.
+                
+                This duration had **{int(best_duration['Trade Count'])}** trades during the analyzed period.
+                """)
             
-            st.write(f"""
-            **Trade Timing Insights for {best_token}:**
+            # Exit reason analysis
+            if 'exit_reason' in completed_trades.columns:
+                st.subheader("Exit Reason Analysis")
+                
+                exit_counts = completed_trades['exit_reason'].value_counts().reset_index()
+                exit_counts.columns = ['Exit Reason', 'Count']
+                
+                exit_returns = completed_trades.groupby('exit_reason')['trade_profit_pct'].mean().reset_index()
+                exit_returns.columns = ['Exit Reason', 'Avg Return (%)']
+                
+                exit_analysis = exit_counts.merge(exit_returns, on='Exit Reason')
+                
+                fig = px.bar(
+                    exit_analysis,
+                    x='Exit Reason',
+                    y='Count',
+                    color='Avg Return (%)',
+                    color_continuous_scale='RdYlGn',
+                    text='Count',
+                    title='Trade Distribution by Exit Reason'
+                )
+                
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Determine best exit reason
+                best_exit = exit_analysis.loc[exit_analysis['Avg Return (%)'].idxmax()]
+                
+                st.info(f"""
+                **Most Profitable Exit Reason:**
+                
+                The most profitable exit reason is **{best_exit['Exit Reason']}** with an average return of **{best_exit['Avg Return (%)']:.2f}%**.
+                
+                This exit reason occurred **{int(best_exit['Count'])}** times during the analyzed period.
+                """)
+        
+        # Trade table
+        st.subheader("Trade Log")
+        trade_log = df[(df['entry_price'].notna()) | (df['exit_price'].notna())].copy()
+        
+        if not trade_log.empty:
+            # Format the trade log for display
+            trade_log['time'] = trade_log.index.strftime('%Y-%m-%d %H:%M:%S')
+            trade_log['price'] = trade_log['price'].round(4)
+            trade_log['entry_price'] = trade_log['entry_price'].round(4)
+            trade_log['exit_price'] = trade_log['exit_price'].round(4)
+            trade_log['trade_profit_pct'] = trade_log['trade_profit_pct'].round(2)
             
-            - **Most profitable hour:** {int(best_hour_return['Hour'])}:00 with average return of {best_hour_return['Avg Return (%)']:.2f}%
-            - **Least profitable hour:** {int(worst_hour_return['Hour'])}:00 with average return of {worst_hour_return['Avg Return (%)']:.2f}%
-            - **Most active trading hour:** {int(most_active_hour['Hour'])}:00 with {most_active_hour['Signal Count']} trading signals
+            # Select columns to display
+            display_columns = ['time', 'price', 'entry_price', 'exit_price', 'trade_profit_pct', 'trade_duration', 'exit_reason']
+            trade_log_display = trade_log[display_columns].fillna('')
             
-            These patterns may relate to market open/close times, liquidity conditions, or specific news release schedules.
-            """)
-    
-    # Trade size optimization
-    st.subheader("Position Sizing Optimization")
-    
-    # Create a hypothetical position sizing strategy
-    st.write("""
-    **Position Sizing Strategy Recommendations:**
-    
-    Based on the performance metrics, we recommend the following position sizing approaches:
-    
-    1. **Fixed Fractional Method:**
-       - Allocate a consistent percentage of capital to each trade
-       - For high win-rate strategies (>60%), consider 2-5% per trade
-       - For lower win-rate strategies, reduce to 1-2% per trade
-    
-    2. **Kelly Criterion-based Sizing:**
-       - For top performers:
-         ```
-         Kelly % = Win Rate - ((1 - Win Rate) / (Profit Factor))
-         ```
-         
-    3. **Volatility-Adjusted Sizing:**
-       - Reduce position size during high volatility periods
-       - Increase position size during stable market conditions
-       
-    4. **Average True Range (ATR) Based Sizing:**
-       - Set stop losses at 1-2x ATR from entry
-       - Size positions to risk a consistent percentage per trade
-    """)
-    
-    # Final summary and recommendations
-    st.subheader("Executive Summary and Recommendations")
-    
-    # Calculate overall metrics across all tokens
-    avg_return = metrics_df['Total Return (%)'].mean()
-    avg_sharpe = metrics_df['Sharpe Ratio'].mean()
-    avg_win_rate = metrics_df['Win Rate (%)'].mean()
-    
-    # Find percentage of profitable tokens
-    profitable_tokens = metrics_df[metrics_df['Total Return (%)'] > 0].shape[0]
-    profitable_pct = (profitable_tokens / metrics_df.shape[0]) * 100
-    
-    # Find best strategy (if All Strategies was selected)
-    if selected_strategy == "All Strategies":
-        best_strategy_overall = metrics_df['Strategy'].value_counts().idxmax()
+            # Rename columns for display
+            trade_log_display.columns = ['Time', 'Price', 'Entry Price', 'Exit Price', 'Profit (%)', 'Duration (bars)', 'Exit Reason']
+            
+            # Display the trade log
+            st.dataframe(trade_log_display, use_container_width=True)
+        
+        # Strategy sensitivity analysis
+        st.subheader("Strategy Parameter Sensitivity")
+        
+        # Create tabs for parameter analysis
+        tab1, tab2 = st.tabs(["Period Sensitivity", "Standard Deviation Sensitivity"])
+        
+        with tab1:
+            # Analyze sensitivity to BB period
+            periods_to_test = [10, 15, 20, 25, 30]
+            period_results = []
+            
+            for period in periods_to_test:
+                with st.spinner(f"Testing period {period}..."):
+                    test_df, test_metrics, _ = fetch_price_data_and_run_strategy(
+                        selected_token, 
+                        lookback_minutes, 
+                        period,  # Vary the period
+                        bb_std_dev, 
+                        selected_strategy,
+                        take_profit_pct,
+                        stop_loss_pct,
+                        max_hold_time,
+                        candle_timeframe,
+                        apply_time_filter,
+                        start_hour,
+                        end_hour
+                    )
+                    
+                    if test_df is not None and test_metrics is not None:
+                        period_results.append({
+                            'Period': period,
+                            'Win Rate': test_metrics['win_rate'] * 100,
+                            'Avg Return (%)': test_metrics['avg_trade_return'],
+                            'Total Trades': test_metrics['total_trades'],
+                            'Profit Factor': test_metrics['profit_factor']
+                        })
+            
+            if period_results:
+                period_df = pd.DataFrame(period_results)
+                
+                # Plot sensitivity to BB period
+                fig = go.Figure()
+                
+                # Add bars for Win Rate
+                fig.add_trace(go.Bar(
+                    x=period_df['Period'],
+                    y=period_df['Win Rate'],
+                    name='Win Rate (%)',
+                    marker_color='blue',
+                    opacity=0.7,
+                    yaxis='y'
+                ))
+                
+                # Add lines for Avg Return
+                fig.add_trace(go.Scatter(
+                    x=period_df['Period'],
+                    y=period_df['Avg Return (%)'],
+                    name='Avg Return (%)',
+                    marker_color='green',
+                    mode='lines+markers',
+                    yaxis='y2'
+                ))
+                
+                # Add total trades as text
+                for i, row in period_df.iterrows():
+                    fig.add_annotation(
+                        x=row['Period'],
+                        y=row['Win Rate'] + 5,
+                        text=f"{int(row['Total Trades'])} trades",
+                        showarrow=False,
+                        font=dict(size=10)
+                    )
+                
+                fig.update_layout(
+                    title="Sensitivity to Bollinger Band Period",
+                    xaxis=dict(
+                        title='Period',
+                        tickmode='array',
+                        tickvals=period_df['Period']
+                    ),
+                    yaxis=dict(
+                        title='Win Rate (%)',
+                        titlefont=dict(color='blue'),
+                        tickfont=dict(color='blue')
+                    ),
+                    yaxis2=dict(
+                        title='Avg Return (%)',
+                        titlefont=dict(color='green'),
+                        tickfont=dict(color='green'),
+                        anchor='x',
+                        overlaying='y',
+                        side='right'
+                    ),
+                    height=400,
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    )
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Determine optimal period
+                period_df['Score'] = period_df['Win Rate'] * period_df['Avg Return (%)'] * period_df['Profit Factor']
+                best_period = period_df.loc[period_df['Score'].idxmax()]
+                
+                st.info(f"""
+                **Optimal Bollinger Band Period:**
+                
+                The most effective period is **{int(best_period['Period'])}** with:
+                - Win Rate: **{best_period['Win Rate']:.1f}%**
+                - Average Return: **{best_period['Avg Return (%)']:.2f}%**
+                - Profit Factor: **{best_period['Profit Factor']:.2f}**
+                - Total Trades: **{int(best_period['Total Trades'])}**
+                """)
+        
+        with tab2:
+            # Analyze sensitivity to BB standard deviation
+            stds_to_test = [1.5, 2.0, 2.5, 3.0]
+            std_results = []
+            
+            for std in stds_to_test:
+                with st.spinner(f"Testing standard deviation {std}..."):
+                    test_df, test_metrics, _ = fetch_price_data_and_run_strategy(
+                        selected_token, 
+                        lookback_minutes, 
+                        bb_period, 
+                        std,  # Vary the standard deviation
+                        selected_strategy,
+                        take_profit_pct,
+                        stop_loss_pct,
+                        max_hold_time,
+                        candle_timeframe,
+                        apply_time_filter,
+                        start_hour,
+                        end_hour
+                    )
+                    
+                    if test_df is not None and test_metrics is not None:
+                        std_results.append({
+                            'Std Dev': std,
+                            'Win Rate': test_metrics['win_rate'] * 100,
+                            'Avg Return (%)': test_metrics['avg_trade_return'],
+                            'Total Trades': test_metrics['total_trades'],
+                            'Profit Factor': test_metrics['profit_factor']
+                        })
+            
+            if std_results:
+                std_df = pd.DataFrame(std_results)
+                
+                # Plot sensitivity to BB standard deviation
+                fig = go.Figure()
+                
+                # Add bars for Win Rate
+                fig.add_trace(go.Bar(
+                    x=std_df['Std Dev'],
+                    y=std_df['Win Rate'],
+                    name='Win Rate (%)',
+                    marker_color='blue',
+                    opacity=0.7,
+                    yaxis='y'
+                ))
+                
+                # Add lines for Avg Return
+                fig.add_trace(go.Scatter(
+                    x=std_df['Std Dev'],
+                    y=std_df['Avg Return (%)'],
+                    name='Avg Return (%)',
+                    marker_color='green',
+                    mode='lines+markers',
+                    yaxis='y2'
+                ))
+                
+                # Add total trades as text
+                for i, row in std_df.iterrows():
+                    fig.add_annotation(
+                        x=row['Std Dev'],
+                        y=row['Win Rate'] + 5,
+                        text=f"{int(row['Total Trades'])} trades",
+                        showarrow=False,
+                        font=dict(size=10)
+                    )
+                
+                fig.update_layout(
+                    title="Sensitivity to Bollinger Band Standard Deviation",
+                    xaxis=dict(
+                        title='Standard Deviation',
+                        tickmode='array',
+                        tickvals=std_df['Std Dev']
+                    ),
+                    yaxis=dict(
+                        title='Win Rate (%)',
+                        titlefont=dict(color='blue'),
+                        tickfont=dict(color='blue')
+                    ),
+                    yaxis2=dict(
+                        title='Avg Return (%)',
+                        titlefont=dict(color='green'),
+                        tickfont=dict(color='green'),
+                        anchor='x',
+                        overlaying='y',
+                        side='right'
+                    ),
+                    height=400,
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    )
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Determine optimal standard deviation
+                std_df['Score'] = std_df['Win Rate'] * std_df['Avg Return (%)'] * std_df['Profit Factor']
+                best_std = std_df.loc[std_df['Score'].idxmax()]
+                
+                st.info(f"""
+                **Optimal Bollinger Band Standard Deviation:**
+                
+                The most effective standard deviation is **{best_std['Std Dev']}** with:
+                - Win Rate: **{best_std['Win Rate']:.1f}%**
+                - Average Return: **{best_std['Avg Return (%)']:.2f}%**
+                - Profit Factor: **{best_std['Profit Factor']:.2f}**
+                - Total Trades: **{int(best_std['Total Trades'])}**
+                """)
+        
+        # Strategy recommendations
+        st.subheader("Strategy Recommendations")
+        
+        # Generate recommendations based on the analysis
+        recommendations = []
+        
+        # Time-based recommendations
+        if 'time_of_day' in locals() and 'hour_analysis' in locals():
+            best_hour = hour_analysis['Avg Return (%)'].idxmax()
+            recommendations.append(f"Focus trading activity around {best_hour:02d}:00 Singapore time, which shows the highest average returns.")
+        
+        # Parameter recommendations
+        if 'best_period' in locals():
+            recommendations.append(f"Use a Bollinger Band period of {int(best_period['Period'])} for optimal results.")
+        
+        if 'best_std' in locals():
+            recommendations.append(f"Set Bollinger Band standard deviation to {best_std['Std Dev']} for best performance.")
+        
+        # Trade duration recommendations
+        if 'best_duration' in locals():
+            recommendations.append(f"Target trade durations of {best_duration['Duration (bars)']} bars for maximum profitability.")
+        
+        # Exit strategy recommendations
+        if 'best_exit' in locals():
+            recommendations.append(f"Prioritize {best_exit['Exit Reason']} as your exit strategy, as it shows the highest average returns.")
+        
+        # Display recommendations
+        for i, rec in enumerate(recommendations):
+            st.markdown(f"{i+1}. {rec}")
+        
+        # Summary of findings
+        st.subheader("Executive Summary")
+        
+        win_rate_desc = "excellent" if metrics['win_rate'] > 0.7 else "good" if metrics['win_rate'] > 0.5 else "poor"
+        profit_factor_desc = "excellent" if metrics['profit_factor'] > 3 else "good" if metrics['profit_factor'] > 1.5 else "poor"
+        
+        # Determine if the strategy seems viable
+        viable = metrics['win_rate'] > 0.5 and metrics['profit_factor'] > 1.5 and metrics['total_trades'] >= 5
+        
+        conclusion = f"""
+        Based on the analysis of {selected_token} using the {metrics['strategy_name']} strategy with Bollinger Bands:
+        
+        - The strategy shows a {win_rate_desc} win rate of {metrics['win_rate']*100:.1f}% across {metrics['total_trades']} trades.
+        - The profit factor is {profit_factor_desc} at {metrics['profit_factor']:.2f}.
+        - Average trade return is {metrics['avg_trade_return']:.2f}% with holding periods of approximately {metrics['avg_trade_duration']:.1f} bars.
+        
+        **Conclusion:** This strategy {"appears viable and could be considered for real trading with appropriate risk management" if viable else "shows potential but needs further optimization or may not be suitable in current market conditions"}.
+        """
+        
+        st.markdown(conclusion)
+        
+        # Download results as CSV
+        if 'completed_trades' in locals() and not completed_trades.empty:
+            csv = completed_trades.to_csv().encode('utf-8')
+            st.download_button(
+                label="Download Trade Log as CSV",
+                data=csv,
+                file_name=f"{selected_token}_{metrics['strategy_name']}_{candle_timeframe}_analysis.csv",
+                mime="text/csv"
+            )
     else:
-        best_strategy_overall = selected_strategy
-    
-    # Display summary metrics
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("Avg Return", f"{avg_return:.2f}%")
-    
-    with col2:
-        st.metric("Avg Sharpe", f"{avg_sharpe:.2f}")
-    
-    with col3:
-        st.metric("Avg Win Rate", f"{avg_win_rate:.2f}%")
-    
-    with col4:
-        st.metric("Profitable Tokens", f"{profitable_pct:.1f}%")
-    
-    # Provide executive summary
-    st.write(f"""
-    ### Key Findings
+        st.warning(f"No results available for {selected_token} with the selected parameters. Try adjusting the time period or strategy settings.")
 
-    1. **Overall Performance:** {profitable_tokens} out of {metrics_df.shape[0]} tokens ({profitable_pct:.1f}%) showed profitable results using Bollinger Bands strategies over the {lookback_days}-day period.
-    
-    2. **Best Performer:** **{metrics_df.iloc[0]['Token']}** achieved the highest return of **{metrics_df.iloc[0]['Total Return (%)']:.2f}%** using the **{metrics_df.iloc[0]['Strategy']}** strategy.
-    
-    3. **Strategy Performance:** The **{best_strategy_overall}** strategy was the most effective overall for the analyzed tokens.
-    
-    4. **Parameter Settings:** Bollinger Bands with period = {bb_period} and standard deviation = {bb_std_dev} delivered the best results for the majority of tokens.
-    
-    ### Recommendations
-    
-    1. **Top Trading Opportunities:**
-       - Focus on the top 3 tokens: {', '.join(metrics_df.head(3)['Token'].tolist())}
-       - These tokens show strong technical patterns compatible with Bollinger Band strategies
-    
-    2. **Optimize Parameters:**
-       - Consider testing {bb_period-5}-{bb_period+5} periods and {bb_std_dev-0.5}-{bb_std_dev+0.5} standard deviations
-       - Different tokens respond best to different parameter settings
-    
-    3. **Implementation Strategy:**
-       - Trade during the most profitable hours identified in the timing analysis
-       - Adjust position sizes based on win rate and profit factor
-       - Monitor market conditions and adjust strategies accordingly
-    
-    4. **Risk Management:**
-       - Set stop losses at key technical levels or based on ATR
-       - Diversify across multiple tokens and possibly multiple strategies
-       - Consider reducing position sizes during high volatility periods
-    """)
-    
-    # Add a download button for the full results
-    csv = metrics_df.to_csv().encode('utf-8')
-    st.download_button(
-        label="Download Full Results as CSV",
-        data=csv,
-        file_name=f"bollinger_bands_analysis_{datetime.now().strftime('%Y%m%d')}.csv",
-        mime="text/csv",
-    )
-
-# Add information about the page
-with st.expander("About This Analysis"):
+# Add helpful information about the analyzer
+with st.expander("About This Analysis Tool"):
     st.markdown("""
-    ### Bollinger Bands Trading Profitability Analysis
+    ### JUP Bollinger Bands Trading Analysis
     
-    This tool analyzes the profitability of trading strategies based on Bollinger Bands indicators using 1-minute data for various cryptocurrency pairs.
+    This tool is designed to analyze the effectiveness of Bollinger Band strategies for short-term trading, with a focus on Jupiter (JUP) and other cryptocurrencies.
     
-    #### Trading Strategies Explained
+    #### Implemented Strategies:
     
     1. **BB Bounce Strategy:**
-       - Buy when price touches the lower band (oversold condition)
-       - Sell when price touches the upper band (overbought condition)
+       - Buys when price touches or goes below the lower Bollinger Band while near support
+       - Sells when price reaches the middle band, hits take profit, stop loss, or max hold time
        - Works best in ranging markets with consistent volatility
     
     2. **BB Breakout Strategy:**
-       - Buy when price breaks above the upper band (strong upward momentum)
-       - Sell when price breaks below the lower band (strong downward momentum)
+       - Buys when price breaks above the upper Bollinger Band with momentum
+       - Sells when momentum reverses, hits take profit, stop loss, or max hold time
        - Works best in trending markets with increasing volatility
     
     3. **BB Squeeze Strategy:**
        - Identifies when Bollinger Bands narrow (low volatility) and then expand
-       - Buy when bands start to expand with price moving upward
-       - Sell when bands start to expand with price moving downward
+       - Buys when bands start to expand with price moving upward
+       - Sells when price reaches the upper band, hits take profit, stop loss, or max hold time
        - Works well for capturing the beginning of new trends
     
-    #### Performance Metrics Explained
+    #### Analysis Features:
     
-    - **Total Return:** Cumulative return over the entire period
-    - **Annualized Return:** Return normalized to an annual rate
-    - **Sharpe Ratio:** Risk-adjusted return (higher is better)
-    - **Max Drawdown:** Largest percentage drop from peak to trough
-    - **Win Rate:** Percentage of trades that were profitable
-    - **Profit Factor:** Ratio of gross profits to gross losses
+    - Intraday analysis with 1-minute to 1-hour timeframes
+    - Time-of-day filtering to focus on specific trading windows
+    - Trade duration tracking and profitability analysis
+    - Strategy parameter optimization
+    - Detailed trade logging with entry/exit reasons
     
-    #### Data Source
-    
-    The analysis uses 1-minute price data from the oracle price database, with timestamps converted to Singapore time.
-    
-    #### Limitations
+    #### Limitations:
     
     - Backtest results are theoretical and don't account for slippage, fees, or liquidity
     - Past performance is not indicative of future results
     - The analysis does not consider fundamental factors or market news
+    
+    This tool is for research purposes only and does not constitute financial advice.
     """)
