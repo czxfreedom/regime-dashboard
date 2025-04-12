@@ -7,7 +7,11 @@ import plotly.graph_objects as go
 import plotly.express as px
 from sqlalchemy import create_engine
 from datetime import datetime, timedelta
-import pkg_resources  # Add this import here
+# With this:
+try:
+    import pkg_resources
+except ImportError:
+    import importlib.metadata as pkg_resources
 import pytz
 
 st.set_page_config(
