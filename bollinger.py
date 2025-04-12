@@ -460,11 +460,12 @@ def bb_squeeze_strategy(df, take_profit_pct=3.0, stop_loss_pct=1.5, max_hold_tim
     return df
 
 # Calculate strategy returns - FIXED VERSION
+ # This is the key function that needs to be replaced in your code
 def calculate_returns(df):
     """
-    Calculate returns and equity curve based on position signals and trade details
+    Calculate returns and equity curve directly from completed trades
     """
-    # Get completed trades where we have both entry and exit prices
+    # Filter for completed trades (those with both entry and exit prices)
     completed_trades = df[(df['entry_price'].notna()) & (df['exit_price'].notna())].copy()
     
     if completed_trades.empty:
@@ -472,35 +473,42 @@ def calculate_returns(df):
         df['cum_strategy_return'] = 0.0
         return df
     
-    # Create a trade return column
+    # Initialize the trade return column for all rows
     df['trade_return'] = 0.0
     
-    # Calculate individual trade returns at exit points
-    for idx in completed_trades.index:
-        profit_pct = completed_trades.loc[idx, 'trade_profit_pct']
-        df.loc[idx, 'trade_return'] = profit_pct / 100.0  # Convert percentage to decimal
+    # Track cumulative returns manually
+    initial_capital = 1.0
+    current_capital = initial_capital
+    returns_by_time = {}
     
-    # Calculate cumulative returns (progressive product of 1+return)
-    # Initialize cumulative return array
-    cum_returns = np.zeros(len(df))
-    cum_value = 1.0
+    # Process each completed trade sequentially
+    for idx, row in completed_trades.iterrows():
+        # Calculate return for this trade (already in percent format)
+        trade_profit_pct = row['trade_profit_pct']
+        
+        # Convert percentage to decimal for calculation
+        trade_return = trade_profit_pct / 100.0
+        
+        # Record this return at the exit point
+        df.loc[idx, 'trade_return'] = trade_return
+        
+        # Update our capital
+        current_capital *= (1 + trade_return)
+        
+        # Store the cumulative return at this timestamp
+        returns_by_time[idx] = current_capital - initial_capital
     
-    # Loop through each row and update cumulative value when a trade completes
-    for i, idx in enumerate(df.index):
-        if df.loc[idx, 'trade_return'] != 0:  # Only on exit points
-            ret = df.loc[idx, 'trade_return']
-            cum_value *= (1 + ret)
-        cum_returns[i] = cum_value - 1
+    # Create a series of cumulative returns
+    cum_returns = pd.Series(returns_by_time)
     
-    # Store cumulative returns in dataframe
+    # Forward fill the cumulative returns to all timestamps
+    full_index = df.index
+    cum_returns = cum_returns.reindex(full_index).ffill().fillna(0)
+    
+    # Store in dataframe
     df['cum_strategy_return'] = cum_returns
     
-    if debug_mode:
-        st.write("Trade returns calculation complete")
-        st.write(f"Total trades found: {len(completed_trades)}")
-        st.write(f"Cumulative return: {df['cum_strategy_return'].iloc[-1]:.4f}")
-    
-    return df
+    return df   
 
 # Calculate performance metrics - FIXED VERSION
 def calculate_performance_metrics(df):
