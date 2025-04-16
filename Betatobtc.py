@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from datetime import datetime, timedelta
 import pytz
 
@@ -43,85 +43,184 @@ now_utc = datetime.now(pytz.utc)
 now_sg = now_utc.astimezone(singapore_timezone)
 st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
-# Fetch all available tokens from DB
-@st.cache_data(ttl=600, show_spinner="Fetching tokens...")
-def fetch_all_tokens():
-    query = "SELECT DISTINCT pair_name FROM public.oracle_price_log ORDER BY pair_name"
-    try:
-        df = pd.read_sql(query, engine)
-        if df.empty:
-            st.error("No tokens found in the database.")
-            return []
-        return df['pair_name'].tolist()
-    except Exception as e:
-        st.error(f"Error fetching tokens: {e}")
-        return ["BTC", "ETH", "SOL", "DOGE", "PEPE", "AI16Z"]  # Default fallback
-
-# Add this function to check which tokens have data in the time period
-@st.cache_data(ttl=600, show_spinner="Finding available tokens...")
-def find_tokens_with_data(all_tokens, start_time_utc, end_time_utc):
+# Function to get partition tables for a date range
+def get_partition_tables(start_date, end_date, engine):
     """
-    Check which tokens have data within the specified time period
+    Get list of order book partition tables that need to be queried based on date range.
+    Returns a list of table names (oracle_order_book_level_price_data_partition_YYYYMMDD)
     """
-    available_tokens = []
+    # Convert to datetime objects if they're strings
+    if isinstance(start_date, str):
+        start_date = pd.to_datetime(start_date)
+    if isinstance(end_date, str) and end_date:
+        end_date = pd.to_datetime(end_date)
+    elif end_date is None:
+        end_date = datetime.now()
+        
+    # Ensure timezone is removed
+    start_date = start_date.replace(tzinfo=None)
+    end_date = end_date.replace(tzinfo=None)
+        
+    # Generate list of dates between start and end
+    current_date = start_date
+    dates = []
     
-    for token in all_tokens:
-        # Quick check query to see if data exists
-        check_query = f"""
-        SELECT COUNT(*) as count
+    while current_date <= end_date:
+        dates.append(current_date.strftime("%Y%m%d"))
+        current_date += timedelta(days=1)
+    
+    # Create table names from dates
+    table_names = [f"oracle_order_book_level_price_data_partition_{date}" for date in dates]
+    
+    # Verify which tables actually exist in the database
+    existing_tables = []
+    
+    with engine.connect() as conn:
+        for table in table_names:
+            # Check if table exists
+            query = text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = :table_name
+                );
+            """)
+            
+            result = conn.execute(query, {"table_name": table}).scalar()
+            
+            if result:
+                existing_tables.append(table)
+    
+    if not existing_tables:
+        print(f"Warning: No order book partition tables found for the date range {start_date.date()} to {end_date.date()}")
+    else:
+        print(f"Found {len(existing_tables)} order book partition tables: {', '.join(existing_tables)}")
+        
+    return existing_tables
+
+# Function to fetch data from partition tables
+def fetch_data_from_partitions(token, start_time_utc, end_time_utc, engine):
+    """
+    Fetch data from multiple partition tables based on date range.
+    """
+    # Get partition tables for the date range
+    partition_tables = get_partition_tables(start_time_utc, end_time_utc, engine)
+    
+    # Query each table and combine results
+    all_data = []
+    
+    with engine.connect() as conn:
+        for table in partition_tables:
+            query = f"""
+            SELECT 
+                created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp, 
+                final_price, 
+                pair_name
+            FROM public.{table}
+            WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+            AND pair_name = '{token}';
+            """
+            
+            try:
+                print(f"Querying {table} for {token}")
+                df = pd.read_sql(query, conn)
+                print(f"Found {len(df)} rows for {token} in {table}")
+                if not df.empty:
+                    all_data.append(df)
+            except Exception as e:
+                print(f"Error querying {table} for {token}: {e}")
+    
+    # Also try the main table if it exists
+    try:
+        query = f"""
+        SELECT 
+            created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp, 
+            final_price, 
+            pair_name
         FROM public.oracle_price_log
         WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
         AND pair_name = '{token}';
         """
         
-        try:
-            result = pd.read_sql(check_query, engine)
-            count = result['count'].iloc[0]
-            
-            if count > 0:
-                available_tokens.append(token)
-                print(f"Token {token} has {count} data points in the specified period.")
-            else:
-                print(f"Token {token} has no data in the specified period.")
-        except Exception as e:
-            print(f"Error checking {token}: {e}")
+        with engine.connect() as conn:
+            main_df = pd.read_sql(query, conn)
+            if not main_df.empty:
+                print(f"Found {len(main_df)} rows for {token} in oracle_price_log")
+                all_data.append(main_df)
+    except Exception as e:
+        print(f"Error querying oracle_price_log: {e}")
     
-    return available_tokens
+    # Combine all data
+    if all_data:
+        combined_df = pd.concat(all_data, ignore_index=True)
+        # Remove duplicates if any
+        combined_df = combined_df.drop_duplicates()
+        return combined_df
+    else:
+        return pd.DataFrame()
 
-# Calculate the time range for analysis
-now_utc = datetime.now(pytz.utc)
-now_sg = now_utc.astimezone(singapore_timezone)
-start_time_sg = now_sg - timedelta(days=lookback_days + 1)
-start_time_utc = start_time_sg.astimezone(pytz.utc)
-end_time_utc = now_sg.astimezone(pytz.utc)
+# Fetch all available tokens from DB
+@st.cache_data(ttl=600, show_spinner="Fetching tokens...")
+def fetch_all_tokens():
+    # Get current time for date range
+    end_time = datetime.now()
+    start_time = end_time - timedelta(days=lookback_days + 1)
+    
+    # Get partition tables
+    partition_tables = get_partition_tables(start_time, end_time, engine)
+    
+    # Query each partition table for distinct pair names
+    all_tokens = set()
+    
+    for table in partition_tables:
+        try:
+            query = f"""
+            SELECT DISTINCT pair_name FROM public.{table}
+            ORDER BY pair_name;
+            """
+            
+            with engine.connect() as conn:
+                df = pd.read_sql(query, conn)
+                all_tokens.update(df['pair_name'].tolist())
+        except Exception as e:
+            print(f"Error fetching tokens from {table}: {e}")
+    
+    # Also check the main table
+    try:
+        query = """
+        SELECT DISTINCT pair_name FROM public.oracle_price_log
+        ORDER BY pair_name;
+        """
+        
+        with engine.connect() as conn:
+            df = pd.read_sql(query, conn)
+            all_tokens.update(df['pair_name'].tolist())
+    except Exception as e:
+        print(f"Error fetching tokens from oracle_price_log: {e}")
+    
+    all_tokens_list = sorted(list(all_tokens))
+    
+    if not all_tokens_list:
+        return ["BTC", "ETH", "SOL", "DOGE", "PEPE", "AI16Z"]  # Default fallback
+    
+    return all_tokens_list
 
-# First fetch all tokens that exist in the database
-all_possible_tokens = fetch_all_tokens()
+all_tokens = fetch_all_tokens()
 
-# Find which tokens actually have data in this time period
-tokens_with_data = find_tokens_with_data(all_possible_tokens, start_time_utc, end_time_utc)
-
-# Update UI to show only tokens with data
-if len(tokens_with_data) == 0:
-    st.error(f"No tokens have data for the past {lookback_days} days. Please check your database.")
-    st.stop()
-
-st.success(f"Found {len(tokens_with_data)} tokens with data in the selected time period.")
-
-# Update the UI controls with only the available tokens
+# UI Controls
 col1, col2 = st.columns([3, 1])
 
 with col1:
     # Let user select tokens to display (or select all)
-    select_all = st.checkbox("Select All Available Tokens", value=True)
+    select_all = st.checkbox("Select All Tokens", value=True)
     
     if select_all:
-        selected_tokens = tokens_with_data
+        selected_tokens = all_tokens
     else:
         selected_tokens = st.multiselect(
             "Select Tokens", 
-            tokens_with_data,
-            default=tokens_with_data[:min(5, len(tokens_with_data))] if tokens_with_data else []
+            all_tokens,
+            default=all_tokens[:5] if len(all_tokens) > 5 else all_tokens
         )
 
 with col2:
@@ -134,15 +233,11 @@ if not selected_tokens:
     st.warning("Please select at least one token")
     st.stop()
 
-# Check if BTC is in the selected tokens, if not add it (only if it has data)
-btc_token = next((t for t in tokens_with_data if "BTC" in t), None)
-if btc_token and btc_token not in selected_tokens:
-    selected_tokens = [btc_token] + selected_tokens
-    st.info(f"Added {btc_token} to selection as it's required for ratio calculations")
-elif not btc_token and len(selected_tokens) > 0:
-    st.warning("BTC data is not available for the selected time period. Some analyses may be limited.")
-    btc_token = selected_tokens[0]  # Use the first token as reference instead
-    st.info(f"Using {btc_token} as the reference token instead of BTC")
+# Identify the BTC token if present
+btc_token = next((t for t in selected_tokens if "BTC" in t), None)
+if not btc_token and len(selected_tokens) > 0:
+    btc_token = selected_tokens[0]  # Use the first token as reference if BTC not available
+    st.info(f"Using {btc_token} as the reference token since BTC was not found")
 
 # Function to generate aligned 30-minute time blocks for the past 24 hours
 def generate_aligned_time_blocks(current_time):
@@ -151,13 +246,16 @@ def generate_aligned_time_blocks(current_time):
     aligned with standard 30-minute intervals (e.g., 4:00-4:30, 4:30-5:00)
     """
     # Round down to the nearest 30-minute mark
-    minute = current_time.minute
-    nearest_30min = (minute // 30) * 30
-    latest_complete_block_end = current_time.replace(minute=nearest_30min, second=0, microsecond=0)
+    if current_time.minute < 30:
+        # Round down to XX:00
+        latest_complete_block_end = current_time.replace(minute=0, second=0, microsecond=0)
+    else:
+        # Round down to XX:30
+        latest_complete_block_end = current_time.replace(minute=30, second=0, microsecond=0)
     
     # Generate block labels for display
     blocks = []
-    for i in range(2 * 24):  # 24 hours of 30-minute blocks (2 per hour)
+    for i in range(48):  # 24 hours of 30-minute blocks
         block_end = latest_complete_block_end - timedelta(minutes=i*30)
         block_start = block_end - timedelta(minutes=30)
         block_label = f"{block_start.strftime('%H:%M')}"
@@ -170,58 +268,62 @@ aligned_time_blocks = generate_aligned_time_blocks(now_sg)
 time_block_labels = [block[2] for block in aligned_time_blocks]
 
 # Calculate ATR for a given DataFrame
-def calculate_atr(df, period=14):
+def calculate_atr(ohlc_df, period=14):
     """
     Calculate the Average True Range (ATR) for a price series
     """
-    df = df.copy()
-    df['previous_close'] = df['price'].shift(1)
-    df['high_low'] = df['high'] - df['low']
-    df['high_close'] = abs(df['high'] - df['previous_close'])
-    df['low_close'] = abs(df['low'] - df['previous_close'])
+    df = ohlc_df.copy()
     
-    df['tr'] = df[['high_low', 'high_close', 'low_close']].max(axis=1)
+    # Calculate High-Low, High-Close(prev), and Low-Close(prev)
+    df['prev_close'] = df['close'].shift(1)
+    df['tr1'] = df['high'] - df['low']
+    df['tr2'] = abs(df['high'] - df['prev_close'])
+    df['tr3'] = abs(df['low'] - df['prev_close'])
+    
+    # Calculate the True Range
+    df['tr'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
+    
+    # Calculate the ATR
     df['atr'] = df['tr'].rolling(window=period).mean()
     
     return df
 
-# Calculate beta using numpy instead of statsmodels
-def calculate_beta_numpy(token_returns, btc_returns):
+# Calculate beta using numpy
+def calculate_beta(token_returns, ref_returns):
     """
-    Calculate the beta coefficient using numpy:
-    beta = cov(token, btc) / var(btc)
+    Calculate the beta coefficient
+    beta = cov(token, reference) / var(reference)
     """
-    # Drop NaN values
-    clean_data = pd.concat([token_returns, btc_returns], axis=1).dropna()
+    # Drop NaN values and align the series
+    clean_data = pd.concat([token_returns, ref_returns], axis=1).dropna()
     
-    if len(clean_data) < 3:  # Need at least 3 data points for calculation
+    if len(clean_data) < 3:  # Need at least 3 data points for meaningful calculation
         return None, None, None
     
-    x = clean_data.iloc[:, 1].values  # BTC returns
-    y = clean_data.iloc[:, 0].values  # Token returns
-    
     try:
-        # Calculate covariance and variance
-        covariance = np.cov(y, x)[0, 1]
-        variance = np.var(x, ddof=1)
+        token_rets = clean_data.iloc[:, 0].values
+        ref_rets = clean_data.iloc[:, 1].values
         
-        if variance == 0:
+        # Calculate covariance and variance
+        covariance = np.cov(token_rets, ref_rets, ddof=1)[0, 1]
+        ref_variance = np.var(ref_rets, ddof=1)
+        
+        if ref_variance == 0:
             return None, None, None
             
         # Calculate beta
-        beta = covariance / variance
+        beta = covariance / ref_variance
         
-        # Calculate correlation coefficient
-        correlation = np.corrcoef(y, x)[0, 1]
+        # Calculate correlation
+        correlation = np.corrcoef(token_rets, ref_rets)[0, 1]
         r_squared = correlation ** 2
         
-        # Calculate alpha (intercept term)
-        mean_y = np.mean(y)
-        mean_x = np.mean(x)
-        alpha = mean_y - beta * mean_x
+        # Calculate alpha (intercept)
+        alpha = np.mean(token_rets) - beta * np.mean(ref_rets)
         
         return beta, alpha, r_squared
-    except:
+    except Exception as e:
+        print(f"Error calculating beta: {e}")
         return None, None, None
 
 # Fetch price data and calculate metrics
@@ -230,83 +332,45 @@ def fetch_and_calculate_metrics(token):
     # Get current time in Singapore timezone
     now_utc = datetime.now(pytz.utc)
     now_sg = now_utc.astimezone(singapore_timezone)
-    start_time_sg = now_sg - timedelta(days=lookback_days + 1)  # Extra day for ATR calculation
+    start_time_sg = now_sg - timedelta(days=lookback_days + 1)  # Extra day for calculations
     
     # Convert back to UTC for database query
     start_time_utc = start_time_sg.astimezone(pytz.utc)
     end_time_utc = now_sg.astimezone(pytz.utc)
 
-    # First check if we have enough data for this token
-    check_query = f"""
-    SELECT COUNT(*) as count
-    FROM public.oracle_price_log
-    WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
-    AND pair_name = '{token}';
-    """
+    # Query data from partitioned tables
+    df = fetch_data_from_partitions(token, start_time_utc, end_time_utc, engine)
     
-    try:
-        result = pd.read_sql(check_query, engine)
-        count = result['count'].iloc[0]
-        
-        if count < 10:  # Require at least 10 data points
-            print(f"[{token}] Insufficient data: only {count} data points")
-            return None
-    except Exception as e:
-        print(f"[{token}] Error checking data count: {e}")
+    if df.empty:
+        print(f"[{token}] No data found.")
         return None
 
-    # Query needs to get OHLC data for proper ATR calculation
-    query = f"""
-    SELECT 
-        created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp, 
-        final_price AS price, 
-        pair_name,
-        -- You may need to adapt these fields based on your actual database schema
-        -- If your DB doesn't store OHLC directly, you'll need to calculate them
-        final_price AS high,
-        final_price AS low,
-        final_price AS close
-    FROM public.oracle_price_log
-    WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
-    AND pair_name = '{token}';
-    """
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df = df.set_index('timestamp').sort_index()
     
-    try:
-        print(f"[{token}] Executing query: {query}")
-        df = pd.read_sql(query, engine)
-        print(f"[{token}] Query executed. DataFrame shape: {df.shape}")
-
-        if df.empty:
-            print(f"[{token}] No data found.")
-            return None
-
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df = df.set_index('timestamp').sort_index()
-        
-        # Resample to get OHLC data at desired timeframe
-        df_resampled = df['price'].resample(timeframe).ohlc()
-        df_resampled['pair_name'] = token
-        
-        # Calculate returns
-        df_resampled['returns'] = df_resampled['close'].pct_change() * 100  # percentage returns
-        
-        # Calculate ATR
-        df_atr = calculate_atr(df_resampled, period=atr_periods)
-        
-        # Create a DataFrame with the results
-        metrics_df = df_atr[['pair_name', 'atr', 'returns']].copy()
-        metrics_df['original_datetime'] = metrics_df.index
-        metrics_df['time_label'] = metrics_df.index.strftime('%Y-%m-%d %H:%M')
-        
-        # Calculate the 24-hour average ATR
-        metrics_df['avg_24h_atr'] = metrics_df['atr'].mean()
-        
-        print(f"[{token}] Successful Metrics Calculation")
-        return metrics_df
-    except Exception as e:
-        st.error(f"Error processing {token}: {e}")
-        print(f"[{token}] Error processing: {e}")
+    # Resample to get OHLC data
+    df_resampled = df['final_price'].resample(timeframe).ohlc().dropna()
+    if df_resampled.empty:
+        print(f"[{token}] No OHLC data after resampling.")
         return None
+    
+    # Calculate returns for beta calculation
+    df_resampled['returns'] = df_resampled['close'].pct_change() * 100  # percentage returns
+    
+    # Calculate ATR
+    df_atr = calculate_atr(df_resampled, period=atr_periods)
+    
+    # Create a DataFrame with the results
+    metrics_df = df_atr[['open', 'high', 'low', 'close', 'atr', 'returns']].copy()
+    metrics_df['token'] = token
+    metrics_df['original_datetime'] = metrics_df.index
+    metrics_df['time_label'] = metrics_df.index.strftime('%H:%M')
+    
+    # Calculate the 24-hour average ATR
+    metrics_df['avg_24h_atr'] = metrics_df['atr'].mean()
+    
+    print(f"[{token}] Successful Metrics Calculation")
+    return metrics_df
 
 # Show the blocks we're analyzing
 with st.expander("View Time Blocks Being Analyzed"):
@@ -346,7 +410,7 @@ def get_volatility_category(ratio):
     elif ratio < 0.9:
         return "Less Volatile"
     elif ratio < 1.1:
-        return "Similar to BTC"
+        return "Similar to Reference"
     elif ratio < 2.0:
         return "More Volatile"
     else:
@@ -368,10 +432,10 @@ def get_beta_category(beta):
 # TAB 1: ATR RATIO ANALYSIS
 with tab1:
     st.header("ATR Ratio Analysis")
-    st.write("Analyzing how volatile each token is compared to Bitcoin")
+    st.write(f"Analyzing how volatile each token is compared to {btc_token}")
     
     if token_results and btc_token in token_results:
-        reference_atr = token_results[btc_token]
+        reference_df = token_results[btc_token]
         
         # Create table data for ATR ratios
         ratio_table_data = {}
@@ -379,8 +443,8 @@ with tab1:
             if token != btc_token:  # Skip reference token as we're comparing others to it
                 # Merge with reference token ATR data on the time index
                 merged_df = pd.merge(
-                    df, 
-                    reference_atr[['atr', 'time_label']], 
+                    df[['time_label', 'atr']], 
+                    reference_df[['time_label', 'atr']], 
                     on='time_label', 
                     suffixes=('', '_ref')
                 )
@@ -403,7 +467,7 @@ with tab1:
         if not ordered_times and available_times:
             ordered_times = sorted(list(available_times), reverse=True)
         
-        # Reindex with the ordered times
+        # Reindex with the ordered times if they exist
         if ordered_times:
             ratio_table = ratio_table.reindex(ordered_times)
         
@@ -434,28 +498,29 @@ with tab1:
         
         ranking_data = []
         for token, ratio_series in ratio_table_data.items():
-            avg_ratio = ratio_series.mean()
-            min_ratio = ratio_series.min()
-            max_ratio = ratio_series.max()
-            range_ratio = max_ratio - min_ratio
-            std_ratio = ratio_series.std()
-            cv_ratio = std_ratio / avg_ratio if avg_ratio > 0 else 0  # Coefficient of variation
-            
-            # Calculate time periods where token outperforms reference
-            outperformance_periods = (ratio_series > 1.5).sum()
-            outperformance_pct = (outperformance_periods / len(ratio_series)) * 100 if len(ratio_series) > 0 else 0
-            
-            ranking_data.append({
-                'Token': token,
-                'Avg ATR Ratio': round(avg_ratio, 2),
-                'Max ATR Ratio': round(max_ratio, 2),
-                'Min ATR Ratio': round(min_ratio, 2),
-                'Range': round(range_ratio, 2),
-                'Std Dev': round(std_ratio, 2),
-                'CoV': round(cv_ratio, 2),
-                'Outperform %': round(outperformance_pct, 1),
-                'Volatility Category': get_volatility_category(avg_ratio)
-            })
+            if not ratio_series.empty:
+                avg_ratio = ratio_series.mean()
+                min_ratio = ratio_series.min()
+                max_ratio = ratio_series.max()
+                range_ratio = max_ratio - min_ratio
+                std_ratio = ratio_series.std()
+                cv_ratio = std_ratio / avg_ratio if avg_ratio > 0 else 0  # Coefficient of variation
+                
+                # Calculate time periods where token outperforms reference
+                outperformance_periods = (ratio_series > 1.5).sum()
+                outperformance_pct = (outperformance_periods / len(ratio_series)) * 100 if len(ratio_series) > 0 else 0
+                
+                ranking_data.append({
+                    'Token': token,
+                    'Avg ATR Ratio': round(avg_ratio, 2),
+                    'Max ATR Ratio': round(max_ratio, 2),
+                    'Min ATR Ratio': round(min_ratio, 2),
+                    'Range': round(range_ratio, 2),
+                    'Std Dev': round(std_ratio, 2),
+                    'CoV': round(cv_ratio, 2),
+                    'Outperform %': round(outperformance_pct, 1),
+                    'Volatility Category': get_volatility_category(avg_ratio)
+                })
         
         if ranking_data:
             ranking_df = pd.DataFrame(ranking_data)
@@ -556,57 +621,33 @@ with tab2:
             if token != btc_token:  # Skip reference token as we're comparing others to it
                 token_returns = df['returns']
                 
-                # Calculate rolling betas over a window of data points
-                beta_windows = {}
-                corr_windows = {}
-                window_size = min(12, len(aligned_time_blocks))  # 6 hours of data (12 half-hour periods) or less if not enough data
+                # Calculate overall beta for the entire period
+                overall_beta, overall_alpha, overall_r_squared = calculate_beta(token_returns, reference_returns)
                 
-                for i in range(len(aligned_time_blocks) - window_size + 1):
-                    end_idx = i
-                    start_idx = i + window_size - 1
+                # Calculate correlation
+                clean_data = pd.concat([token_returns, reference_returns], axis=1).dropna()
+                overall_corr = clean_data.iloc[:, 0].corr(clean_data.iloc[:, 1]) if len(clean_data) > 1 else np.nan
+                
+                # Calculate rolling betas for each time period
+                beta_by_time = {}
+                
+                # Group data by time label (hour:minute)
+                time_groups = df.groupby('time_label')
+                
+                for time_label, group in time_groups:
+                    # Get reference data for the same time period
+                    ref_group = token_results[btc_token][token_results[btc_token]['time_label'] == time_label]
                     
-                    if start_idx >= len(aligned_time_blocks):
-                        continue
-                        
-                    window_start = aligned_time_blocks[start_idx][0]
-                    window_end = aligned_time_blocks[end_idx][1]
-                    
-                    # Filter returns for the window
-                    ref_window = reference_returns[(reference_returns.index >= window_start) & (reference_returns.index <= window_end)]
-                    token_window = token_returns[(token_returns.index >= window_start) & (token_returns.index <= window_end)]
-                    
-                    # Calculate beta for the window using numpy
-                    beta, alpha, r_squared = calculate_beta_numpy(token_window, ref_window)
-                    
-                    # Calculate correlation
-                    if not token_window.empty and not ref_window.empty:
-                        clean_data = pd.concat([token_window, ref_window], axis=1).dropna()
-                        if len(clean_data) > 1:
-                            corr = clean_data.iloc[:, 0].corr(clean_data.iloc[:, 1])
-                        else:
-                            corr = np.nan
-                    else:
-                        corr = np.nan
-                    
-                    # Store the beta for this time block
-                    time_label = aligned_time_blocks[end_idx][2]
-                    beta_windows[time_label] = beta if beta is not None else np.nan
-                    corr_windows[time_label] = corr
+                    if not group.empty and not ref_group.empty:
+                        # Calculate beta for this time period
+                        period_beta, _, _ = calculate_beta(group['returns'], ref_group['returns'])
+                        beta_by_time[time_label] = period_beta
                 
                 # Convert to series
-                beta_series = pd.Series(beta_windows)
+                beta_series = pd.Series(beta_by_time)
                 beta_table_data[token] = beta_series
                 
-                # Calculate overall beta for the entire period
-                overall_beta, overall_alpha, overall_r_squared = calculate_beta_numpy(token_returns, reference_returns)
-                
-                # Calculate overall correlation
-                clean_data = pd.concat([token_returns, reference_returns], axis=1).dropna()
-                if len(clean_data) > 1:
-                    overall_corr = clean_data.iloc[:, 0].corr(clean_data.iloc[:, 1])
-                else:
-                    overall_corr = np.nan
-                
+                # Store overall metrics
                 beta_values[token] = {
                     'beta': overall_beta,
                     'alpha': overall_alpha,
@@ -643,7 +684,7 @@ with tab2:
                 return 'background-color: rgba(255, 0, 0, 0.7); color: white'  # Red
         
         styled_beta_table = beta_table.style.applymap(color_beta_cells).format("{:.2f}")
-        st.markdown(f"## Beta Coefficient Table (6-hour rolling window, Last 24 hours, Singapore Time)")
+        st.markdown(f"## Beta Coefficient Table (30-minute intervals, Last 24 hours, Singapore Time)")
         st.markdown(f"### Reference Token: {btc_token}")
         st.markdown("### Color Legend: <span style='color:purple'>Negative Beta</span>, <span style='color:blue'>Low Beta</span>, <span style='color:lightblue'>Moderate Beta</span>, <span style='color:black'>Similar to Reference</span>, <span style='color:orange'>High Beta</span>, <span style='color:red'>Very High Beta</span>", unsafe_allow_html=True)
         st.markdown(f"Values shown as Beta coefficient (how much token moves per 1% move in {btc_token})")
@@ -663,7 +704,7 @@ with tab2:
             if beta is None:
                 continue
                 
-            # Get rolling betas for this token if available
+            # Get statistics for this token if available
             if token in beta_table_data:
                 rolling_betas = beta_table_data[token].dropna()
                 max_beta = rolling_betas.max() if not rolling_betas.empty else np.nan
