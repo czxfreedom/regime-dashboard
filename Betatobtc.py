@@ -130,26 +130,6 @@ def fetch_data_from_partitions(token, start_time_utc, end_time_utc, engine):
             except Exception as e:
                 print(f"Error querying {table} for {token}: {e}")
     
-    # Also try the main table if it exists
-    try:
-        query = f"""
-        SELECT 
-            created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp, 
-            final_price, 
-            pair_name
-        FROM public.oracle_price_log
-        WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
-        AND pair_name = '{token}';
-        """
-        
-        with engine.connect() as conn:
-            main_df = pd.read_sql(query, conn)
-            if not main_df.empty:
-                print(f"Found {len(main_df)} rows for {token} in oracle_price_log")
-                all_data.append(main_df)
-    except Exception as e:
-        print(f"Error querying oracle_price_log: {e}")
-    
     # Combine all data
     if all_data:
         combined_df = pd.concat(all_data, ignore_index=True)
@@ -164,7 +144,7 @@ def fetch_data_from_partitions(token, start_time_utc, end_time_utc, engine):
 def fetch_all_tokens():
     # Get current time for date range
     end_time = datetime.now()
-    start_time = end_time - timedelta(days=lookback_days + 1)
+    start_time = end_time - timedelta(days=lookback_days)
     
     # Get partition tables
     partition_tables = get_partition_tables(start_time, end_time, engine)
@@ -185,19 +165,6 @@ def fetch_all_tokens():
         except Exception as e:
             print(f"Error fetching tokens from {table}: {e}")
     
-    # Also check the main table
-    try:
-        query = """
-        SELECT DISTINCT pair_name FROM public.oracle_price_log
-        ORDER BY pair_name;
-        """
-        
-        with engine.connect() as conn:
-            df = pd.read_sql(query, conn)
-            all_tokens.update(df['pair_name'].tolist())
-    except Exception as e:
-        print(f"Error fetching tokens from oracle_price_log: {e}")
-    
     all_tokens_list = sorted(list(all_tokens))
     
     if not all_tokens_list:
@@ -205,6 +172,29 @@ def fetch_all_tokens():
     
     return all_tokens_list
 
+# Check if BTC exists and fetch it specifically
+@st.cache_data(ttl=600)
+def check_btc_exists():
+    today = datetime.now().strftime("%Y%m%d")
+    table_name = f"oracle_order_book_level_price_data_partition_{today}"
+    
+    query = f"""
+    SELECT EXISTS (
+        SELECT 1 FROM public.{table_name}
+        WHERE pair_name = 'BTC'
+        LIMIT 1
+    );
+    """
+    
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text(query)).scalar()
+            return result
+    except Exception as e:
+        print(f"Error checking BTC existence: {e}")
+        return False
+
+# Fetch all tokens from the database
 all_tokens = fetch_all_tokens()
 
 # UI Controls
@@ -233,11 +223,16 @@ if not selected_tokens:
     st.warning("Please select at least one token")
     st.stop()
 
-# Identify the BTC token if present
-btc_token = next((t for t in selected_tokens if "BTC" in t), None)
-if not btc_token and len(selected_tokens) > 0:
-    btc_token = selected_tokens[0]  # Use the first token as reference if BTC not available
-    st.info(f"Using {btc_token} as the reference token since BTC was not found")
+# Ensure BTC is selected if it exists
+btc_exists = check_btc_exists()
+if btc_exists and "BTC" not in selected_tokens:
+    selected_tokens = ["BTC"] + selected_tokens
+    st.info("Added BTC to selection as it's required for ratio calculations")
+
+# Set reference token - prefer BTC but fall back to first token if necessary
+btc_token = "BTC" if "BTC" in selected_tokens else selected_tokens[0]
+if btc_token != "BTC":
+    st.warning(f"BTC data not available. Using {btc_token} as reference token instead.")
 
 # Function to generate aligned 30-minute time blocks for the past 24 hours
 def generate_aligned_time_blocks(current_time):
@@ -348,8 +343,13 @@ def fetch_and_calculate_metrics(token):
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df = df.set_index('timestamp').sort_index()
     
-    # Resample to get OHLC data
-    df_resampled = df['final_price'].resample(timeframe).ohlc().dropna()
+    # Create OHLC data required for ATR calculation
+    # First, get 1-minute bars for more granular data
+    df_1min = df['final_price'].resample('1min').ohlc().dropna()
+    
+    # Then resample to 30-minute bars
+    df_resampled = df_1min['close'].resample(timeframe).ohlc().dropna()
+    
     if df_resampled.empty:
         print(f"[{token}] No OHLC data after resampling.")
         return None
