@@ -29,13 +29,12 @@ except Exception as e:
 
 # --- UI Setup ---
 st.title("Market Response Analysis")
-st.subheader("Analyzing how altcoins respond to Bitcoin movements")
+st.subheader("Analyzing how altcoins respond to BTC movements")
 
 # Global parameters
 atr_periods = 14  # Standard ATR uses 14 periods
 timeframe = "30min"  # Using 30-minute intervals as requested
 lookback_days = 1  # 24 hours
-expected_points = 48  # Expected data points per pair over 24 hours (2 per hour × 24 hours)
 singapore_timezone = pytz.timezone('Asia/Singapore')
 
 # Get current time in Singapore timezone
@@ -43,174 +42,74 @@ now_utc = datetime.now(pytz.utc)
 now_sg = now_utc.astimezone(singapore_timezone)
 st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
-# Function to get partition tables for a date range
-def get_partition_tables(start_date, end_date, engine):
-    """
-    Get list of order book partition tables that need to be queried based on date range.
-    Returns a list of table names (oracle_order_book_level_price_data_partition_YYYYMMDD)
-    """
-    # Convert to datetime objects if they're strings
-    if isinstance(start_date, str):
-        start_date = pd.to_datetime(start_date)
-    if isinstance(end_date, str) and end_date:
-        end_date = pd.to_datetime(end_date)
-    elif end_date is None:
-        end_date = datetime.now()
-        
-    # Ensure timezone is removed
-    start_date = start_date.replace(tzinfo=None)
-    end_date = end_date.replace(tzinfo=None)
-        
-    # Generate list of dates between start and end
-    current_date = start_date
-    dates = []
-    
-    while current_date <= end_date:
-        dates.append(current_date.strftime("%Y%m%d"))
-        current_date += timedelta(days=1)
-    
-    # Create table names from dates
-    table_names = [f"oracle_order_book_level_price_data_partition_{date}" for date in dates]
-    
-    # Verify which tables actually exist in the database
-    existing_tables = []
-    
-    with engine.connect() as conn:
-        for table in table_names:
-            # Check if table exists
-            query = text("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_schema = 'public' 
-                    AND table_name = :table_name
-                );
-            """)
-            
-            result = conn.execute(query, {"table_name": table}).scalar()
-            
-            if result:
-                existing_tables.append(table)
-    
-    if not existing_tables:
-        print(f"Warning: No order book partition tables found for the date range {start_date.date()} to {end_date.date()}")
-    else:
-        print(f"Found {len(existing_tables)} order book partition tables: {', '.join(existing_tables)}")
-        
-    return existing_tables
+# Debug flag
+enable_debug = False
 
-# Function to fetch data from partition tables
-def fetch_data_from_partitions(token, start_time_utc, end_time_utc, engine):
-    """
-    Fetch data from multiple partition tables based on date range.
-    """
-    # Get partition tables for the date range
-    partition_tables = get_partition_tables(start_time_utc, end_time_utc, engine)
-    
-    # Query each table and combine results
-    all_data = []
-    
-    with engine.connect() as conn:
-        for table in partition_tables:
-            query = f"""
-            SELECT 
-                created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp, 
-                final_price, 
-                pair_name
-            FROM public.{table}
-            WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
-            AND pair_name = '{token}';
-            """
-            
-            try:
-                print(f"Querying {table} for {token}")
-                df = pd.read_sql(query, conn)
-                print(f"Found {len(df)} rows for {token} in {table}")
-                if not df.empty:
-                    all_data.append(df)
-            except Exception as e:
-                print(f"Error querying {table} for {token}: {e}")
-    
-    # Combine all data
-    if all_data:
-        combined_df = pd.concat(all_data, ignore_index=True)
-        # Remove duplicates if any
-        combined_df = combined_df.drop_duplicates()
-        return combined_df
-    else:
-        return pd.DataFrame()
+def debug_print(message):
+    if enable_debug:
+        st.write(f"DEBUG: {message}")
 
-# Fetch all available tokens from DB
-@st.cache_data(ttl=600, show_spinner="Fetching tokens...")
-def fetch_all_tokens():
-    # Get current time for date range
-    end_time = datetime.now()
-    start_time = end_time - timedelta(days=lookback_days)
-    
-    # Get partition tables
-    partition_tables = get_partition_tables(start_time, end_time, engine)
-    
-    # Query each partition table for distinct pair names
-    all_tokens = set()
-    
-    for table in partition_tables:
-        try:
-            query = f"""
-            SELECT DISTINCT pair_name FROM public.{table}
-            ORDER BY pair_name;
-            """
-            
-            with engine.connect() as conn:
-                df = pd.read_sql(query, conn)
-                all_tokens.update(df['pair_name'].tolist())
-        except Exception as e:
-            print(f"Error fetching tokens from {table}: {e}")
-    
-    all_tokens_list = sorted(list(all_tokens))
-    
-    if not all_tokens_list:
-        return ["BTC", "ETH", "SOL", "DOGE", "PEPE", "AI16Z"]  # Default fallback
-    
-    return all_tokens_list
-
-# Check if BTC exists and fetch it specifically
-@st.cache_data(ttl=600)
-def check_btc_exists():
+# Function to get current partition table name
+def get_current_partition_table():
     today = datetime.now().strftime("%Y%m%d")
-    table_name = f"oracle_order_book_level_price_data_partition_{today}"
+    return f"oracle_price_log_partition_{today}"
+
+# Function to fetch available tokens
+@st.cache_data(ttl=600, show_spinner="Fetching tokens...")
+def fetch_available_tokens():
+    table_name = get_current_partition_table()
     
     query = f"""
-    SELECT EXISTS (
-        SELECT 1 FROM public.{table_name}
-        WHERE pair_name = 'BTC'
-        LIMIT 1
-    );
+    SELECT pair_name, COUNT(*) as row_count
+    FROM public.{table_name}
+    GROUP BY pair_name
+    HAVING COUNT(*) > 100
+    ORDER BY row_count DESC
     """
     
     try:
         with engine.connect() as conn:
-            result = conn.execute(text(query)).scalar()
-            return result
+            df = pd.read_sql(query, conn)
+            return df['pair_name'].tolist()
     except Exception as e:
-        print(f"Error checking BTC existence: {e}")
-        return False
+        st.error(f"Error fetching tokens: {e}")
+        return ["BTCPROD/USDT", "ETHPROD/USDT", "SOLPROD/USDT"]  # Default fallback
 
-# Fetch all tokens from the database
-all_tokens = fetch_all_tokens()
+all_tokens = fetch_available_tokens()
+
+# Make sure reference token is available
+reference_token = "BTCPROD/USDT"
+if reference_token not in all_tokens:
+    st.warning(f"{reference_token} data not found. Analysis may be limited.")
+    # Try to find an alternative BTC token
+    btc_alternatives = [t for t in all_tokens if "BTC" in t]
+    if btc_alternatives:
+        reference_token = btc_alternatives[0]
+        st.info(f"Using {reference_token} as reference instead.")
+    elif all_tokens:
+        reference_token = all_tokens[0]
+        st.warning(f"No BTC token found. Using {reference_token} as reference instead.")
+    else:
+        st.error("No tokens with data found. Cannot perform analysis.")
+        st.stop()
 
 # UI Controls
 col1, col2 = st.columns([3, 1])
 
 with col1:
     # Let user select tokens to display (or select all)
-    select_all = st.checkbox("Select All Tokens", value=True)
+    select_all = st.checkbox("Select All Tokens", value=False)
     
     if select_all:
         selected_tokens = all_tokens
     else:
+        default_tokens = [t for t in all_tokens[:5] if t != reference_token][:4]
+        default_tokens = [reference_token] + default_tokens
+        
         selected_tokens = st.multiselect(
             "Select Tokens", 
             all_tokens,
-            default=all_tokens[:5] if len(all_tokens) > 5 else all_tokens
+            default=default_tokens
         )
 
 with col2:
@@ -223,16 +122,10 @@ if not selected_tokens:
     st.warning("Please select at least one token")
     st.stop()
 
-# Ensure BTC is selected if it exists
-btc_exists = check_btc_exists()
-if btc_exists and "BTC" not in selected_tokens:
-    selected_tokens = ["BTC"] + selected_tokens
-    st.info("Added BTC to selection as it's required for ratio calculations")
-
-# Set reference token - prefer BTC but fall back to first token if necessary
-btc_token = "BTC" if "BTC" in selected_tokens else selected_tokens[0]
-if btc_token != "BTC":
-    st.warning(f"BTC data not available. Using {btc_token} as reference token instead.")
+# Ensure reference token is selected
+if reference_token not in selected_tokens:
+    selected_tokens = [reference_token] + selected_tokens
+    st.info(f"Added {reference_token} to selection as it's required for ratio calculations")
 
 # Function to generate aligned 30-minute time blocks for the past 24 hours
 def generate_aligned_time_blocks(current_time):
@@ -318,13 +211,36 @@ def calculate_beta(token_returns, ref_returns):
         
         return beta, alpha, r_squared
     except Exception as e:
-        print(f"Error calculating beta: {e}")
+        debug_print(f"Error calculating beta: {e}")
         return None, None, None
 
-# Fetch price data and calculate metrics
+# Fetch price data from the partition table
+@st.cache_data(ttl=600, show_spinner="Fetching data...")
+def fetch_price_data(token, start_time_utc, end_time_utc):
+    table_name = get_current_partition_table()
+    
+    query = f"""
+    SELECT 
+        created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp, 
+        final_price
+    FROM public.{table_name}
+    WHERE pair_name = '{token}'
+    AND created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+    ORDER BY created_at
+    """
+    
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql(query, conn)
+            return df
+    except Exception as e:
+        st.error(f"Error fetching {token} data: {e}")
+        return pd.DataFrame()
+
+# Fetch and calculate metrics
 @st.cache_data(ttl=600, show_spinner="Calculating metrics...")
 def fetch_and_calculate_metrics(token):
-    # Get current time in Singapore timezone
+    # Get time range for data fetch
     now_utc = datetime.now(pytz.utc)
     now_sg = now_utc.astimezone(singapore_timezone)
     start_time_sg = now_sg - timedelta(days=lookback_days + 1)  # Extra day for calculations
@@ -333,25 +249,20 @@ def fetch_and_calculate_metrics(token):
     start_time_utc = start_time_sg.astimezone(pytz.utc)
     end_time_utc = now_sg.astimezone(pytz.utc)
 
-    # Query data from partitioned tables
-    df = fetch_data_from_partitions(token, start_time_utc, end_time_utc, engine)
+    # Fetch price data
+    df = fetch_price_data(token, start_time_utc, end_time_utc)
     
     if df.empty:
-        print(f"[{token}] No data found.")
         return None
 
+    # Prepare data for analysis
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df = df.set_index('timestamp').sort_index()
     
     # Create OHLC data required for ATR calculation
-    # First, get 1-minute bars for more granular data
-    df_1min = df['final_price'].resample('1min').ohlc().dropna()
-    
-    # Then resample to 30-minute bars
-    df_resampled = df_1min['close'].resample(timeframe).ohlc().dropna()
+    df_resampled = df['final_price'].resample(timeframe).ohlc().dropna()
     
     if df_resampled.empty:
-        print(f"[{token}] No OHLC data after resampling.")
         return None
     
     # Calculate returns for beta calculation
@@ -369,7 +280,6 @@ def fetch_and_calculate_metrics(token):
     # Calculate the 24-hour average ATR
     metrics_df['avg_24h_atr'] = metrics_df['atr'].mean()
     
-    print(f"[{token}] Successful Metrics Calculation")
     return metrics_df
 
 # Show the blocks we're analyzing
@@ -394,7 +304,6 @@ for i, token in enumerate(selected_tokens):
             token_results[token] = result
     except Exception as e:
         st.error(f"Error processing token {token}: {e}")
-        print(f"Error processing token {token} in main loop: {e}")
 
 # Final progress update
 progress_bar.progress(1.0)
@@ -432,15 +341,15 @@ def get_beta_category(beta):
 # TAB 1: ATR RATIO ANALYSIS
 with tab1:
     st.header("ATR Ratio Analysis")
-    st.write(f"Analyzing how volatile each token is compared to {btc_token}")
+    st.write(f"Analyzing how volatile each token is compared to {reference_token}")
     
-    if token_results and btc_token in token_results:
-        reference_df = token_results[btc_token]
+    if token_results and reference_token in token_results:
+        reference_df = token_results[reference_token]
         
         # Create table data for ATR ratios
         ratio_table_data = {}
         for token, df in token_results.items():
-            if token != btc_token:  # Skip reference token as we're comparing others to it
+            if token != reference_token:  # Skip reference token as we're comparing others to it
                 # Merge with reference token ATR data on the time index
                 merged_df = pd.merge(
                     df[['time_label', 'atr']], 
@@ -488,9 +397,9 @@ with tab1:
         
         styled_table = ratio_table.style.applymap(color_ratio_cells).format("{:.2f}")
         st.markdown(f"## ATR Ratio Table (30min timeframe, Last 24 hours, Singapore Time)")
-        st.markdown(f"### Reference Token: {btc_token}")
+        st.markdown(f"### Reference Token: {reference_token}")
         st.markdown("### Color Legend: <span style='color:blue'>Much Less Volatile</span>, <span style='color:lightblue'>Less Volatile</span>, <span style='color:black'>Similar to Reference</span>, <span style='color:orange'>More Volatile</span>, <span style='color:red'>Much More Volatile</span>", unsafe_allow_html=True)
-        st.markdown(f"Values shown as ratio of token's ATR to {btc_token}'s ATR within each 30-minute interval")
+        st.markdown(f"Values shown as ratio of token's ATR to {reference_token}'s ATR within each 30-minute interval")
         st.dataframe(styled_table, height=700, use_container_width=True)
         
         # Create ranking table based on average ATR ratio
@@ -545,8 +454,8 @@ with tab1:
                 tokens_by_ratio, 
                 x='Token', 
                 y='Avg ATR Ratio', 
-                title=f'Top 15 Tokens by Average ATR Ratio to {btc_token}',
-                labels={'Avg ATR Ratio': f'Average ATR Ratio (Token/{btc_token})', 'Token': 'Token'},
+                title=f'Top 15 Tokens by Average ATR Ratio to {reference_token}',
+                labels={'Avg ATR Ratio': f'Average ATR Ratio (Token/{reference_token})', 'Token': 'Token'},
                 color='Avg ATR Ratio',
                 color_continuous_scale='Reds'
             )
@@ -572,53 +481,53 @@ with tab1:
             with st.expander("Understanding ATR Ratio Analysis"):
                 st.markdown(f"""
                 ### How to Read the ATR Ratio Matrix
-                This matrix shows the ATR (Average True Range) of each cryptocurrency pair compared to {btc_token}'s ATR over the last 24 hours using 30-minute intervals.
+                This matrix shows the ATR (Average True Range) of each cryptocurrency pair compared to {reference_token}'s ATR over the last 24 hours using 30-minute intervals.
                 
                 **The ATR Ratio is calculated as:**
                 ```
-                ATR Ratio = Token's ATR / {btc_token}'s ATR
+                ATR Ratio = Token's ATR / {reference_token}'s ATR
                 ```
                 
                 **What the ratios mean:**
-                - **Ratio = 1.0**: The token has the same volatility as {btc_token}
-                - **Ratio > 1.0**: The token is more volatile than {btc_token}
-                - **Ratio < 1.0**: The token is less volatile than {btc_token}
+                - **Ratio = 1.0**: The token has the same volatility as {reference_token}
+                - **Ratio > 1.0**: The token is more volatile than {reference_token}
+                - **Ratio < 1.0**: The token is less volatile than {reference_token}
                 
                 **Color coding:**
-                - **Blue** (< 0.5): Much less volatile than {btc_token}
-                - **Light Blue** (0.5 - 0.9): Less volatile than {btc_token}
-                - **White** (0.9 - 1.1): Similar volatility to {btc_token}
-                - **Orange** (1.1 - 2.0): More volatile than {btc_token}
-                - **Red** (> 2.0): Much more volatile than {btc_token}
+                - **Blue** (< 0.5): Much less volatile than {reference_token}
+                - **Light Blue** (0.5 - 0.9): Less volatile than {reference_token}
+                - **White** (0.9 - 1.1): Similar volatility to {reference_token}
+                - **Orange** (1.1 - 2.0): More volatile than {reference_token}
+                - **Red** (> 2.0): Much more volatile than {reference_token}
                 
                 ### Trading Applications
                 
                 **Breakout Identification:**
-                When {btc_token} shows a significant price movement or breakout:
+                When {reference_token} shows a significant price movement or breakout:
                 
                 1. Tokens with consistently high ATR ratios (greater than 1.5) are likely to show even larger moves
-                2. Tokens with high "Outperform %" values consistently amplify {btc_token}'s movements
+                2. Tokens with high "Outperform %" values consistently amplify {reference_token}'s movements
                 3. The "Range" value shows how much the token's behavior varies
                 """)
         else:
             st.warning("No ranking data available.")
     else:
-        st.error(f"Reference token data ({btc_token}) is required for ATR ratio calculations. Please ensure it is selected and data is available.")
+        st.error(f"Reference token data ({reference_token}) is required for ATR ratio calculations. Please ensure it is selected and data is available.")
 
 # TAB 2: BETA ANALYSIS
 with tab2:
     st.header("Beta Analysis")
-    st.write(f"Analyzing how much each token moves per 1% move in {btc_token} (accounting for correlation)")
+    st.write(f"Analyzing how much each token moves per 1% move in {reference_token} (accounting for correlation)")
     
-    if token_results and btc_token in token_results:
-        reference_returns = token_results[btc_token]['returns']
+    if token_results and reference_token in token_results:
+        reference_returns = token_results[reference_token]['returns']
         
         # Create table data for betas
         beta_table_data = {}
         beta_values = {}
         
         for token, df in token_results.items():
-            if token != btc_token:  # Skip reference token as we're comparing others to it
+            if token != reference_token:  # Skip reference token as we're comparing others to it
                 token_returns = df['returns']
                 
                 # Calculate overall beta for the entire period
@@ -636,7 +545,7 @@ with tab2:
                 
                 for time_label, group in time_groups:
                     # Get reference data for the same time period
-                    ref_group = token_results[btc_token][token_results[btc_token]['time_label'] == time_label]
+                    ref_group = token_results[reference_token][token_results[reference_token]['time_label'] == time_label]
                     
                     if not group.empty and not ref_group.empty:
                         # Calculate beta for this time period
@@ -685,9 +594,9 @@ with tab2:
         
         styled_beta_table = beta_table.style.applymap(color_beta_cells).format("{:.2f}")
         st.markdown(f"## Beta Coefficient Table (30-minute intervals, Last 24 hours, Singapore Time)")
-        st.markdown(f"### Reference Token: {btc_token}")
+        st.markdown(f"### Reference Token: {reference_token}")
         st.markdown("### Color Legend: <span style='color:purple'>Negative Beta</span>, <span style='color:blue'>Low Beta</span>, <span style='color:lightblue'>Moderate Beta</span>, <span style='color:black'>Similar to Reference</span>, <span style='color:orange'>High Beta</span>, <span style='color:red'>Very High Beta</span>", unsafe_allow_html=True)
-        st.markdown(f"Values shown as Beta coefficient (how much token moves per 1% move in {btc_token})")
+        st.markdown(f"Values shown as Beta coefficient (how much token moves per 1% move in {reference_token})")
         st.dataframe(styled_beta_table, height=700, use_container_width=True)
         
         # Create ranking table based on overall beta
@@ -748,10 +657,10 @@ with tab2:
                 beta_ranking_df,
                 x='Beta',
                 y='Correlation',
-                title=f'Beta vs. Correlation with {btc_token}',
+                title=f'Beta vs. Correlation with {reference_token}',
                 labels={
                     'Beta': 'Beta Coefficient',
-                    'Correlation': f'Correlation with {btc_token}'
+                    'Correlation': f'Correlation with {reference_token}'
                 },
                 color='R²',
                 size='Beta Range',
@@ -791,7 +700,7 @@ with tab2:
                 alpha_df.head(15),
                 x='Token',
                 y='Alpha (%)',
-                title=f'Top 15 Tokens by Alpha (Outperformance vs {btc_token})',
+                title=f'Top 15 Tokens by Alpha (Outperformance vs {reference_token})',
                 color='Alpha (%)',
                 color_continuous_scale='Greens'
             )
@@ -803,36 +712,36 @@ with tab2:
                 st.markdown(f"""
                 ### How to Read the Beta Coefficient Matrix
                 
-                This matrix shows how much each token moves relative to a 1% move in {btc_token}, taking into account the correlation between the token and {btc_token}.
+                This matrix shows how much each token moves relative to a 1% move in {reference_token}, taking into account the correlation between the token and {reference_token}.
                 
                 **The Beta Coefficient is calculated using covariance and variance:**
                 ```
-                Beta = Covariance(Token, {btc_token}) / Variance({btc_token})
+                Beta = Covariance(Token, {reference_token}) / Variance({reference_token})
                 ```
                 
                 **What the beta values mean:**
-                - **Beta = 1.0**: The token moves exactly the same as {btc_token} (1% when it moves 1%)
-                - **Beta = 2.0**: The token moves twice as much as {btc_token} (2% when it moves 1%)
-                - **Beta = 0.5**: The token moves half as much as {btc_token} (0.5% when it moves 1%)
-                - **Beta < 0**: The token moves in the opposite direction to {btc_token}
+                - **Beta = 1.0**: The token moves exactly the same as {reference_token} (1% when it moves 1%)
+                - **Beta = 2.0**: The token moves twice as much as {reference_token} (2% when it moves 1%)
+                - **Beta = 0.5**: The token moves half as much as {reference_token} (0.5% when it moves 1%)
+                - **Beta < 0**: The token moves in the opposite direction to {reference_token}
                 
                 **Other important metrics:**
-                - **Alpha**: The token's excess return over what would be predicted by {btc_token}'s movements alone
-                - **R²**: How well {btc_token}'s movements explain the token's movements (higher means stronger relationship)
-                - **Correlation**: Linear correlation between token and {btc_token} returns
+                - **Alpha**: The token's excess return over what would be predicted by {reference_token}'s movements alone
+                - **R²**: How well {reference_token}'s movements explain the token's movements (higher means stronger relationship)
+                - **Correlation**: Linear correlation between token and {reference_token} returns
                 
                 ### Trading Applications
                 
                 **For Breakout Trading:**
                 1. Look for tokens with high Beta (>1.5) AND high Correlation (>0.7) for amplified moves in the same direction
                 2. Tokens with high Beta but lower Correlation may move strongly but less predictably
-                3. Tokens with high positive Alpha tend to outperform {btc_token} over time
+                3. Tokens with high positive Alpha tend to outperform {reference_token} over time
                 
                 **Risk Management:**
-                - Higher Beta tokens will experience larger drawdowns when {btc_token} falls
+                - Higher Beta tokens will experience larger drawdowns when {reference_token} falls
                 - Beta Range shows how consistent the relationship is (lower means more consistent)
                 """)
         else:
             st.warning("No beta data available.")
     else:
-        st.error(f"Reference token data ({btc_token}) is required for beta calculations. Please ensure it is selected and data is available.")
+        st.error(f"Reference token data ({reference_token}) is required for beta calculations. Please ensure it is selected and data is available.")
