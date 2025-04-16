@@ -42,8 +42,8 @@ now_utc = datetime.now(pytz.utc)
 now_sg = now_utc.astimezone(singapore_timezone)
 st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
-# Debug flag
-enable_debug = False
+# Debug controls
+enable_debug = st.checkbox("Enable Debug Mode", value=True)
 
 def debug_print(message):
     if enable_debug:
@@ -103,7 +103,7 @@ with col1:
     if select_all:
         selected_tokens = all_tokens
     else:
-        default_tokens = [t for t in all_tokens[:5] if t != reference_token][:4]
+        default_tokens = [t for t in all_tokens[:10] if t != reference_token][:9]
         default_tokens = [reference_token] + default_tokens
         
         selected_tokens = st.multiselect(
@@ -155,24 +155,34 @@ def generate_aligned_time_blocks(current_time):
 aligned_time_blocks = generate_aligned_time_blocks(now_sg)
 time_block_labels = [block[2] for block in aligned_time_blocks]
 
-# Calculate ATR for a given DataFrame
+# Calculate ATR for a given DataFrame - Updated to be more sensitive
 def calculate_atr(ohlc_df, period=14):
     """
     Calculate the Average True Range (ATR) for a price series
     """
     df = ohlc_df.copy()
     
+    # Make sure the input data has enough rows
+    if len(df) < period + 1:
+        debug_print(f"Warning: Not enough data for ATR calculation. Only {len(df)} rows.")
+        
     # Calculate High-Low, High-Close(prev), and Low-Close(prev)
-    df['prev_close'] = df['close'].shift(1)
+    df['previous_close'] = df['close'].shift(1)
+    
+    # Use absolute values for True Range calculation
     df['tr1'] = df['high'] - df['low']
-    df['tr2'] = abs(df['high'] - df['prev_close'])
-    df['tr3'] = abs(df['low'] - df['prev_close'])
+    df['tr2'] = abs(df['high'] - df['previous_close'])
+    df['tr3'] = abs(df['low'] - df['previous_close'])
     
     # Calculate the True Range
     df['tr'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
     
     # Calculate the ATR
     df['atr'] = df['tr'].rolling(window=period).mean()
+    
+    # For percentage-based ATR (optional)
+    if 'close' in df.columns and df['close'].mean() > 0:
+        df['atr_pct'] = df['atr'] / df['close'] * 100
     
     return df
 
@@ -229,9 +239,12 @@ def fetch_price_data(token, start_time_utc, end_time_utc):
     ORDER BY created_at
     """
     
+    debug_print(f"Executing query for {token}: {query}")
+    
     try:
         with engine.connect() as conn:
             df = pd.read_sql(query, conn)
+            debug_print(f"Found {len(df)} rows for {token}")
             return df
     except Exception as e:
         st.error(f"Error fetching {token} data: {e}")
@@ -253,23 +266,46 @@ def fetch_and_calculate_metrics(token):
     df = fetch_price_data(token, start_time_utc, end_time_utc)
     
     if df.empty:
+        debug_print(f"No data found for {token}")
         return None
 
     # Prepare data for analysis
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df = df.set_index('timestamp').sort_index()
     
+    # Show sample of raw data
+    if enable_debug:
+        debug_print(f"Sample of raw data for {token}:")
+        st.dataframe(df.head())
+    
     # Create OHLC data required for ATR calculation
     df_resampled = df['final_price'].resample(timeframe).ohlc().dropna()
     
     if df_resampled.empty:
+        debug_print(f"No OHLC data after resampling for {token}")
         return None
+    
+    # Show sample of OHLC data
+    if enable_debug:
+        debug_print(f"Sample of OHLC data for {token}:")
+        st.dataframe(df_resampled.head())
     
     # Calculate returns for beta calculation
     df_resampled['returns'] = df_resampled['close'].pct_change() * 100  # percentage returns
     
     # Calculate ATR
     df_atr = calculate_atr(df_resampled, period=atr_periods)
+    
+    # Show ATR statistics
+    if enable_debug:
+        debug_print(f"ATR statistics for {token}:")
+        st.write({
+            'min_atr': df_atr['atr'].min(),
+            'max_atr': df_atr['atr'].max(),
+            'mean_atr': df_atr['atr'].mean(),
+            'median_atr': df_atr['atr'].median(),
+            'std_atr': df_atr['atr'].std()
+        })
     
     # Create a DataFrame with the results
     metrics_df = df_atr[['open', 'high', 'low', 'close', 'atr', 'returns']].copy()
@@ -304,10 +340,24 @@ for i, token in enumerate(selected_tokens):
             token_results[token] = result
     except Exception as e:
         st.error(f"Error processing token {token}: {e}")
+        debug_print(f"Full error: {str(e)}")
 
 # Final progress update
 progress_bar.progress(1.0)
 status_text.text(f"Processed {len(token_results)}/{len(selected_tokens)} tokens successfully")
+
+# Debug - Show ATR values for all tokens for comparison
+if enable_debug and token_results:
+    st.subheader("Debug - ATR Values Comparison")
+    atr_stats = {}
+    for token, df in token_results.items():
+        atr_stats[token] = {
+            'min': df['atr'].min(),
+            'max': df['atr'].max(),
+            'mean': df['atr'].mean(),
+            'median': df['atr'].median()
+        }
+    st.dataframe(pd.DataFrame(atr_stats).T)
 
 # Create tabs for ATR Ratio and Beta analysis
 tab1, tab2 = st.tabs(["ATR Ratio Analysis", "Beta Analysis"])
@@ -346,6 +396,15 @@ with tab1:
     if token_results and reference_token in token_results:
         reference_df = token_results[reference_token]
         
+        # Debug - Show reference token ATR
+        if enable_debug:
+            st.write(f"Reference token ({reference_token}) ATR stats:")
+            st.write({
+                'min': reference_df['atr'].min(),
+                'max': reference_df['atr'].max(),
+                'mean': reference_df['atr'].mean()
+            })
+        
         # Create table data for ATR ratios
         ratio_table_data = {}
         for token, df in token_results.items():
@@ -358,8 +417,20 @@ with tab1:
                     suffixes=('', '_ref')
                 )
                 
+                # Debug - Show merged dataframe for first token
+                if enable_debug and token == next(iter([t for t in token_results if t != reference_token]), None):
+                    st.write(f"Sample of merged data for {token}:")
+                    st.dataframe(merged_df.head())
+                
                 # Calculate the ratio
                 merged_df['atr_ratio'] = merged_df['atr'] / merged_df['atr_ref']
+                
+                # Debug - Check for division by zero or very small numbers
+                if enable_debug:
+                    zero_refs = (merged_df['atr_ref'] == 0).sum()
+                    small_refs = (merged_df['atr_ref'] < 0.0001).sum()
+                    if zero_refs > 0 or small_refs > 0:
+                        st.write(f"Warning for {token}: {zero_refs} zero reference ATRs, {small_refs} very small reference ATRs")
                 
                 # Series with time_label as index and atr_ratio as values
                 ratio_series = merged_df.set_index('time_label')['atr_ratio']
@@ -380,6 +451,11 @@ with tab1:
         if ordered_times:
             ratio_table = ratio_table.reindex(ordered_times)
         
+        # Debug - Show raw ratio table
+        if enable_debug:
+            st.write("Raw ATR ratio table:")
+            st.dataframe(ratio_table)
+        
         # Function to color cells based on ATR ratio
         def color_ratio_cells(val):
             if pd.isna(val):
@@ -395,7 +471,8 @@ with tab1:
             else:  # Much more volatile than reference
                 return 'background-color: rgba(255, 0, 0, 0.7); color: white'  # Red
         
-        styled_table = ratio_table.style.applymap(color_ratio_cells).format("{:.2f}")
+        # Show with increased decimal precision
+        styled_table = ratio_table.style.applymap(color_ratio_cells).format("{:.4f}")
         st.markdown(f"## ATR Ratio Table (30min timeframe, Last 24 hours, Singapore Time)")
         st.markdown(f"### Reference Token: {reference_token}")
         st.markdown("### Color Legend: <span style='color:blue'>Much Less Volatile</span>, <span style='color:lightblue'>Less Volatile</span>, <span style='color:black'>Similar to Reference</span>, <span style='color:orange'>More Volatile</span>, <span style='color:red'>Much More Volatile</span>", unsafe_allow_html=True)
@@ -421,12 +498,12 @@ with tab1:
                 
                 ranking_data.append({
                     'Token': token,
-                    'Avg ATR Ratio': round(avg_ratio, 2),
-                    'Max ATR Ratio': round(max_ratio, 2),
-                    'Min ATR Ratio': round(min_ratio, 2),
-                    'Range': round(range_ratio, 2),
-                    'Std Dev': round(std_ratio, 2),
-                    'CoV': round(cv_ratio, 2),
+                    'Avg ATR Ratio': round(avg_ratio, 4),
+                    'Max ATR Ratio': round(max_ratio, 4),
+                    'Min ATR Ratio': round(min_ratio, 4),
+                    'Range': round(range_ratio, 4),
+                    'Std Dev': round(std_ratio, 4),
+                    'CoV': round(cv_ratio, 4),
                     'Outperform %': round(outperformance_pct, 1),
                     'Volatility Category': get_volatility_category(avg_ratio)
                 })
@@ -522,6 +599,16 @@ with tab2:
     if token_results and reference_token in token_results:
         reference_returns = token_results[reference_token]['returns']
         
+        # Debug - Show reference token returns
+        if enable_debug:
+            st.write(f"Reference token ({reference_token}) returns stats:")
+            st.write({
+                'min': reference_returns.min(),
+                'max': reference_returns.max(),
+                'mean': reference_returns.mean(),
+                'std': reference_returns.std()
+            })
+        
         # Create table data for betas
         beta_table_data = {}
         beta_values = {}
@@ -529,6 +616,16 @@ with tab2:
         for token, df in token_results.items():
             if token != reference_token:  # Skip reference token as we're comparing others to it
                 token_returns = df['returns']
+                
+                # Debug - Show token returns
+                if enable_debug and token == next(iter([t for t in token_results if t != reference_token]), None):
+                    st.write(f"Sample returns for {token}:")
+                    st.write({
+                        'min': token_returns.min(),
+                        'max': token_returns.max(),
+                        'mean': token_returns.mean(),
+                        'std': token_returns.std()
+                    })
                 
                 # Calculate overall beta for the entire period
                 overall_beta, overall_alpha, overall_r_squared = calculate_beta(token_returns, reference_returns)
@@ -567,6 +664,11 @@ with tab2:
         # Create DataFrame with all token betas
         beta_table = pd.DataFrame(beta_table_data)
         
+        # Debug - Show raw beta table
+        if enable_debug:
+            st.write("Raw beta table:")
+            st.dataframe(beta_table)
+        
         # Apply the time blocks in the proper order (most recent first)
         available_times = set(beta_table.index)
         ordered_times = [t for t in time_block_labels if t in available_times]
@@ -592,7 +694,7 @@ with tab2:
             else:  # Very high beta
                 return 'background-color: rgba(255, 0, 0, 0.7); color: white'  # Red
         
-        styled_beta_table = beta_table.style.applymap(color_beta_cells).format("{:.2f}")
+        styled_beta_table = beta_table.style.applymap(color_beta_cells).format("{:.4f}")
         st.markdown(f"## Beta Coefficient Table (30-minute intervals, Last 24 hours, Singapore Time)")
         st.markdown(f"### Reference Token: {reference_token}")
         st.markdown("### Color Legend: <span style='color:purple'>Negative Beta</span>, <span style='color:blue'>Low Beta</span>, <span style='color:lightblue'>Moderate Beta</span>, <span style='color:black'>Similar to Reference</span>, <span style='color:orange'>High Beta</span>, <span style='color:red'>Very High Beta</span>", unsafe_allow_html=True)
@@ -625,14 +727,14 @@ with tab2:
             
             beta_ranking_data.append({
                 'Token': token,
-                'Beta': round(beta, 2),
-                'Alpha (%)': round(alpha, 2) if alpha is not None else np.nan,
-                'R²': round(r_squared, 2) if r_squared is not None else np.nan,
-                'Correlation': round(correlation, 2),
-                'Max Beta': round(max_beta, 2),
-                'Min Beta': round(min_beta, 2),
-                'Beta Range': round(beta_range, 2),
-                'Beta Std Dev': round(beta_std, 2),
+                'Beta': round(beta, 4),
+                'Alpha (%)': round(alpha, 4) if alpha is not None else np.nan,
+                'R²': round(r_squared, 4) if r_squared is not None else np.nan,
+                'Correlation': round(correlation, 4),
+                'Max Beta': round(max_beta, 4),
+                'Min Beta': round(min_beta, 4),
+                'Beta Range': round(beta_range, 4),
+                'Beta Std Dev': round(beta_std, 4),
                 'Response Category': get_beta_category(beta)
             })
         
