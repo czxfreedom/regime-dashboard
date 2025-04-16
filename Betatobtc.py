@@ -36,6 +36,7 @@ atr_periods = 14  # Standard ATR uses 14 periods
 timeframe = "30min"  # Using 30-minute intervals as requested
 lookback_days = 1  # 24 hours
 singapore_timezone = pytz.timezone('Asia/Singapore')
+epsilon = 1e-10  # Small constant to avoid division by zero
 
 # Get current time in Singapore timezone
 now_utc = datetime.now(pytz.utc)
@@ -94,7 +95,7 @@ if reference_token not in all_tokens:
         st.stop()
 
 # UI Controls
-col1, col2 = st.columns([3, 1])
+col1, col2, col3 = st.columns([2, 1, 1])
 
 with col1:
     # Let user select tokens to display (or select all)
@@ -113,10 +114,22 @@ with col1:
         )
 
 with col2:
+    # Add more configuration options
+    atr_periods = st.number_input("ATR Periods", min_value=5, max_value=30, value=14)
+    lookback_days = st.number_input("Lookback Days", min_value=1, max_value=7, value=1)
+
+with col3:
     # Add a refresh button
-    if st.button("Refresh Data"):
+    if st.button("Refresh Data", use_container_width=True):
         st.cache_data.clear()
         st.experimental_rerun()
+    
+    # Add timeframe selector
+    timeframe = st.selectbox(
+        "Timeframe",
+        options=["15min", "30min", "1H", "2H", "4H"],
+        index=1  # Default to 30min
+    )
 
 if not selected_tokens:
     st.warning("Please select at least one token")
@@ -127,38 +140,51 @@ if reference_token not in selected_tokens:
     selected_tokens = [reference_token] + selected_tokens
     st.info(f"Added {reference_token} to selection as it's required for ratio calculations")
 
-# Function to generate aligned 30-minute time blocks for the past 24 hours
-def generate_aligned_time_blocks(current_time):
+# Function to generate aligned time blocks for the past 24 hours
+def generate_aligned_time_blocks(current_time, interval=30):
     """
-    Generate fixed 30-minute time blocks for past 24 hours,
-    aligned with standard 30-minute intervals (e.g., 4:00-4:30, 4:30-5:00)
+    Generate fixed time blocks for past 24 hours,
+    aligned with standard intervals
+    
+    Args:
+        current_time: Current time in Singapore timezone
+        interval: Interval in minutes (default: 30)
     """
-    # Round down to the nearest 30-minute mark
-    if current_time.minute < 30:
-        # Round down to XX:00
-        latest_complete_block_end = current_time.replace(minute=0, second=0, microsecond=0)
-    else:
-        # Round down to XX:30
-        latest_complete_block_end = current_time.replace(minute=30, second=0, microsecond=0)
+    # Determine the number of blocks based on interval
+    blocks_per_day = 24 * 60 // interval
+    
+    # Round down to the nearest interval mark
+    minutes_past_hour = current_time.minute
+    closest_block = (minutes_past_hour // interval) * interval
+    latest_complete_block_end = current_time.replace(
+        minute=closest_block, 
+        second=0, 
+        microsecond=0
+    )
     
     # Generate block labels for display
     blocks = []
-    for i in range(48):  # 24 hours of 30-minute blocks
-        block_end = latest_complete_block_end - timedelta(minutes=i*30)
-        block_start = block_end - timedelta(minutes=30)
+    for i in range(blocks_per_day):  # 24 hours of blocks
+        block_end = latest_complete_block_end - timedelta(minutes=i*interval)
+        block_start = block_end - timedelta(minutes=interval)
         block_label = f"{block_start.strftime('%H:%M')}"
         blocks.append((block_start, block_end, block_label))
     
     return blocks
 
+# Convert timeframe to minutes for aligned blocks
+interval_map = {"15min": 15, "30min": 30, "1H": 60, "2H": 120, "4H": 240}
+interval_minutes = interval_map.get(timeframe, 30)
+
 # Generate aligned time blocks
-aligned_time_blocks = generate_aligned_time_blocks(now_sg)
+aligned_time_blocks = generate_aligned_time_blocks(now_sg, interval=interval_minutes)
 time_block_labels = [block[2] for block in aligned_time_blocks]
 
-# Calculate ATR for a given DataFrame - Updated to be more sensitive
-def calculate_atr(ohlc_df, period=14):
+# Calculate ATR for a given DataFrame - Improved for small values
+def calculate_atr(ohlc_df, period=14, min_threshold=0.0001):
     """
     Calculate the Average True Range (ATR) for a price series
+    - Enhanced to handle small values better
     """
     df = ohlc_df.copy()
     
@@ -166,6 +192,11 @@ def calculate_atr(ohlc_df, period=14):
     if len(df) < period + 1:
         debug_print(f"Warning: Not enough data for ATR calculation. Only {len(df)} rows.")
         
+    # Ensure minimum values to prevent division by very small numbers
+    df['high'] = df['high'].clip(lower=min_threshold)
+    df['low'] = df['low'].clip(lower=min_threshold)
+    df['close'] = df['close'].clip(lower=min_threshold)
+    
     # Calculate High-Low, High-Close(prev), and Low-Close(prev)
     df['previous_close'] = df['close'].shift(1)
     
@@ -177,17 +208,17 @@ def calculate_atr(ohlc_df, period=14):
     # Calculate the True Range
     df['tr'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
     
-    # Calculate the ATR
-    df['atr'] = df['tr'].rolling(window=period).mean()
+    # Calculate the ATR using exponential weighted average for more responsiveness
+    df['atr'] = df['tr'].ewm(span=period, adjust=False).mean()
     
-    # For percentage-based ATR (optional)
-    if 'close' in df.columns and df['close'].mean() > 0:
+    # For percentage-based ATR - this helps with comparing tokens of different prices
+    if 'close' in df.columns:
         df['atr_pct'] = df['atr'] / df['close'] * 100
     
     return df
 
-# Calculate beta using numpy
-def calculate_beta(token_returns, ref_returns):
+# Calculate beta using numpy - Improved for stability and handling NaN values
+def calculate_beta(token_returns, ref_returns, min_data_points=3):
     """
     Calculate the beta coefficient
     beta = cov(token, reference) / var(reference)
@@ -195,18 +226,22 @@ def calculate_beta(token_returns, ref_returns):
     # Drop NaN values and align the series
     clean_data = pd.concat([token_returns, ref_returns], axis=1).dropna()
     
-    if len(clean_data) < 3:  # Need at least 3 data points for meaningful calculation
+    if len(clean_data) < min_data_points:  # Need at least X data points for meaningful calculation
         return None, None, None
     
     try:
         token_rets = clean_data.iloc[:, 0].values
         ref_rets = clean_data.iloc[:, 1].values
         
-        # Calculate covariance and variance
+        # Check for all zero values
+        if np.all(np.abs(ref_rets) < epsilon) or np.all(np.abs(token_rets) < epsilon):
+            return None, None, None
+        
+        # Calculate covariance and variance with safeguards
         covariance = np.cov(token_rets, ref_rets, ddof=1)[0, 1]
         ref_variance = np.var(ref_rets, ddof=1)
         
-        if ref_variance == 0:
+        if ref_variance < epsilon:
             return None, None, None
             
         # Calculate beta
@@ -218,6 +253,12 @@ def calculate_beta(token_returns, ref_returns):
         
         # Calculate alpha (intercept)
         alpha = np.mean(token_rets) - beta * np.mean(ref_rets)
+        
+        # Check for extreme values that might indicate calculation problems
+        if abs(beta) > 10 or abs(alpha) > 20:
+            debug_print(f"Warning: Calculated extreme beta ({beta}) or alpha ({alpha})")
+            if abs(beta) > 20:  # Cap extremely high betas
+                beta = np.sign(beta) * 20
         
         return beta, alpha, r_squared
     except Exception as e:
@@ -250,7 +291,7 @@ def fetch_price_data(token, start_time_utc, end_time_utc):
         st.error(f"Error fetching {token} data: {e}")
         return pd.DataFrame()
 
-# Fetch and calculate metrics
+# Fetch and calculate metrics - With improved handling of small values and data quality checks
 @st.cache_data(ttl=600, show_spinner="Calculating metrics...")
 def fetch_and_calculate_metrics(token):
     # Get time range for data fetch
@@ -273,10 +314,44 @@ def fetch_and_calculate_metrics(token):
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df = df.set_index('timestamp').sort_index()
     
+    # Basic data quality checks
+    if df['final_price'].isna().sum() > 0:
+        debug_print(f"Warning: {df['final_price'].isna().sum()} NaN values found for {token}")
+        df['final_price'] = df['final_price'].fillna(method='ffill')
+    
+    # Check for price jumps that might indicate bad data
+    df['price_change_pct'] = df['final_price'].pct_change().abs() * 100
+    suspicious_jumps = df[df['price_change_pct'] > 20]  # Flag >20% moves as suspicious
+    if not suspicious_jumps.empty and enable_debug:
+        debug_print(f"Potential data quality issues detected for {token}: {len(suspicious_jumps)} suspicious price jumps")
+    
+    # Check for very small price values
+    avg_price = df['final_price'].mean()
+    is_very_small_price = avg_price < 0.001
+    
+    # Apply scaling for very small prices if needed
+    scaling_factor = 1
+    if is_very_small_price:
+        scaling_factor = 1000
+        df['final_price'] = df['final_price'] * scaling_factor
+        debug_print(f"Applied scaling factor of {scaling_factor} to {token} due to very small price (avg: {avg_price})")
+    
     # Show sample of raw data
     if enable_debug:
         debug_print(f"Sample of raw data for {token}:")
         st.dataframe(df.head())
+        
+        # Show more detailed statistics
+        price_stats = {
+            'min': df['final_price'].min(),
+            'max': df['final_price'].max(),
+            'mean': df['final_price'].mean(),
+            'median': df['final_price'].median(),
+            'std': df['final_price'].std(),
+            'is_very_small': is_very_small_price,
+            'scaling_factor': scaling_factor
+        }
+        debug_print(f"Price statistics for {token}: {price_stats}")
     
     # Create OHLC data required for ATR calculation
     df_resampled = df['final_price'].resample(timeframe).ohlc().dropna()
@@ -293,8 +368,8 @@ def fetch_and_calculate_metrics(token):
     # Calculate returns for beta calculation
     df_resampled['returns'] = df_resampled['close'].pct_change() * 100  # percentage returns
     
-    # Calculate ATR
-    df_atr = calculate_atr(df_resampled, period=atr_periods)
+    # Calculate ATR with improved handling of small values
+    df_atr = calculate_atr(df_resampled, period=atr_periods, min_threshold=0.0001*scaling_factor)
     
     # Show ATR statistics
     if enable_debug:
@@ -304,17 +379,20 @@ def fetch_and_calculate_metrics(token):
             'max_atr': df_atr['atr'].max(),
             'mean_atr': df_atr['atr'].mean(),
             'median_atr': df_atr['atr'].median(),
-            'std_atr': df_atr['atr'].std()
+            'std_atr': df_atr['atr'].std(),
+            'atr_as_pct_of_price': (df_atr['atr'].mean() / df_atr['close'].mean()) * 100 if df_atr['close'].mean() > 0 else 0
         })
     
     # Create a DataFrame with the results
-    metrics_df = df_atr[['open', 'high', 'low', 'close', 'atr', 'returns']].copy()
+    metrics_df = df_atr[['open', 'high', 'low', 'close', 'atr', 'atr_pct', 'returns']].copy()
     metrics_df['token'] = token
     metrics_df['original_datetime'] = metrics_df.index
     metrics_df['time_label'] = metrics_df.index.strftime('%H:%M')
+    metrics_df['scaling_factor'] = scaling_factor  # Store scaling factor for reference
     
     # Calculate the 24-hour average ATR
     metrics_df['avg_24h_atr'] = metrics_df['atr'].mean()
+    metrics_df['avg_24h_atr_pct'] = metrics_df['atr_pct'].mean()
     
     return metrics_df
 
@@ -333,7 +411,7 @@ status_text = st.empty()
 token_results = {}
 for i, token in enumerate(selected_tokens):
     try:
-        progress_bar.progress((i) / len(selected_tokens))
+        progress_bar.progress(i / len(selected_tokens))
         status_text.text(f"Processing {token} ({i+1}/{len(selected_tokens)})")
         result = fetch_and_calculate_metrics(token)
         if result is not None:
@@ -355,7 +433,9 @@ if enable_debug and token_results:
             'min': df['atr'].min(),
             'max': df['atr'].max(),
             'mean': df['atr'].mean(),
-            'median': df['atr'].median()
+            'median': df['atr'].median(),
+            'atr_pct_mean': df['atr_pct'].mean(),  # Show as percentage of price
+            'scaling_factor': df['scaling_factor'].iloc[0]  # Show scaling factor
         }
     st.dataframe(pd.DataFrame(atr_stats).T)
 
@@ -377,7 +457,11 @@ def get_volatility_category(ratio):
 
 # Helper function to categorize beta
 def get_beta_category(beta):
-    if beta < 0.3:
+    if beta is None:
+        return "Insufficient Data"
+    elif beta < 0:
+        return "Inverse Response"
+    elif beta < 0.3:
         return "Very Low Response"
     elif beta < 0.7:
         return "Low Response"
@@ -402,7 +486,8 @@ with tab1:
             st.write({
                 'min': reference_df['atr'].min(),
                 'max': reference_df['atr'].max(),
-                'mean': reference_df['atr'].mean()
+                'mean': reference_df['atr'].mean(),
+                'scaling_factor': reference_df['scaling_factor'].iloc[0]
             })
         
         # Create table data for ATR ratios
@@ -411,8 +496,8 @@ with tab1:
             if token != reference_token:  # Skip reference token as we're comparing others to it
                 # Merge with reference token ATR data on the time index
                 merged_df = pd.merge(
-                    df[['time_label', 'atr']], 
-                    reference_df[['time_label', 'atr']], 
+                    df[['time_label', 'atr', 'atr_pct', 'close']], 
+                    reference_df[['time_label', 'atr', 'atr_pct', 'close']], 
                     on='time_label', 
                     suffixes=('', '_ref')
                 )
@@ -422,18 +507,30 @@ with tab1:
                     st.write(f"Sample of merged data for {token}:")
                     st.dataframe(merged_df.head())
                 
-                # Calculate the ratio
-                merged_df['atr_ratio'] = merged_df['atr'] / merged_df['atr_ref']
+                # Calculate the ratio using both raw ATR and percentage-based ATR
+                # Using percentage-based ATR helps normalize for price differences
+                merged_df['atr_ratio'] = merged_df['atr'] / (merged_df['atr_ref'] + epsilon)
+                merged_df['atr_pct_ratio'] = merged_df['atr_pct'] / (merged_df['atr_pct_ref'] + epsilon)
+                
+                # If using raw ATR ratios, apply scaling factor correction
+                # This is important if tokens have very different scales
+                token_scale = df['scaling_factor'].iloc[0]
+                ref_scale = reference_df['scaling_factor'].iloc[0]
+                if token_scale != ref_scale:
+                    scale_correction = ref_scale / token_scale
+                    merged_df['atr_ratio'] = merged_df['atr_ratio'] * scale_correction
+                    debug_print(f"Applied scaling correction of {scale_correction} to ATR ratio for {token}")
                 
                 # Debug - Check for division by zero or very small numbers
                 if enable_debug:
-                    zero_refs = (merged_df['atr_ref'] == 0).sum()
+                    zero_refs = (merged_df['atr_ref'] < epsilon).sum()
                     small_refs = (merged_df['atr_ref'] < 0.0001).sum()
                     if zero_refs > 0 or small_refs > 0:
-                        st.write(f"Warning for {token}: {zero_refs} zero reference ATRs, {small_refs} very small reference ATRs")
+                        st.warning(f"Warning for {token}: {zero_refs} zero reference ATRs, {small_refs} very small reference ATRs")
                 
-                # Series with time_label as index and atr_ratio as values
-                ratio_series = merged_df.set_index('time_label')['atr_ratio']
+                # Use percentage-based ATR ratio to create the final series
+                # This is generally more accurate for comparing tokens with different price ranges
+                ratio_series = merged_df.set_index('time_label')['atr_pct_ratio']
                 ratio_table_data[token] = ratio_series
         
         # Create DataFrame with all token ratios
@@ -473,23 +570,26 @@ with tab1:
         
         # Show with increased decimal precision
         styled_table = ratio_table.style.applymap(color_ratio_cells).format("{:.4f}")
-        st.markdown(f"## ATR Ratio Table (30min timeframe, Last 24 hours, Singapore Time)")
+        st.markdown(f"## ATR Ratio Table ({timeframe} timeframe, Last {lookback_days} day(s), Singapore Time)")
         st.markdown(f"### Reference Token: {reference_token}")
         st.markdown("### Color Legend: <span style='color:blue'>Much Less Volatile</span>, <span style='color:lightblue'>Less Volatile</span>, <span style='color:black'>Similar to Reference</span>, <span style='color:orange'>More Volatile</span>, <span style='color:red'>Much More Volatile</span>", unsafe_allow_html=True)
-        st.markdown(f"Values shown as ratio of token's ATR to {reference_token}'s ATR within each 30-minute interval")
+        st.markdown(f"Values shown as ratio of token's ATR to {reference_token}'s ATR within each time interval")
         st.dataframe(styled_table, height=700, use_container_width=True)
         
         # Create ranking table based on average ATR ratio
-        st.subheader("ATR Ratio Ranking (24-Hour Average, Descending Order)")
+        st.subheader(f"ATR Ratio Ranking ({lookback_days}-Day Average, Descending Order)")
         
         ranking_data = []
         for token, ratio_series in ratio_table_data.items():
             if not ratio_series.empty:
-                avg_ratio = ratio_series.mean()
-                min_ratio = ratio_series.min()
-                max_ratio = ratio_series.max()
+                # Filter out outliers for more stable statistics
+                filtered_series = ratio_series.clip(lower=0.1, upper=10)
+                
+                avg_ratio = filtered_series.mean()
+                min_ratio = filtered_series.min()
+                max_ratio = filtered_series.max()
                 range_ratio = max_ratio - min_ratio
-                std_ratio = ratio_series.std()
+                std_ratio = filtered_series.std()
                 cv_ratio = std_ratio / avg_ratio if avg_ratio > 0 else 0  # Coefficient of variation
                 
                 # Calculate time periods where token outperforms reference
@@ -558,11 +658,16 @@ with tab1:
             with st.expander("Understanding ATR Ratio Analysis"):
                 st.markdown(f"""
                 ### How to Read the ATR Ratio Matrix
-                This matrix shows the ATR (Average True Range) of each cryptocurrency pair compared to {reference_token}'s ATR over the last 24 hours using 30-minute intervals.
+                This matrix shows the ATR (Average True Range) of each cryptocurrency pair compared to {reference_token}'s ATR over the last {lookback_days} day(s) using {timeframe} intervals.
                 
                 **The ATR Ratio is calculated as:**
                 ```
                 ATR Ratio = Token's ATR / {reference_token}'s ATR
+                ```
+                
+                **For better comparability between tokens of different price ranges, we use:**
+                ```
+                ATR Percentage Ratio = (Token's ATR / Token's Price) / ({reference_token}'s ATR / {reference_token}'s Price)
                 ```
                 
                 **What the ratios mean:**
@@ -585,6 +690,10 @@ with tab1:
                 1. Tokens with consistently high ATR ratios (greater than 1.5) are likely to show even larger moves
                 2. Tokens with high "Outperform %" values consistently amplify {reference_token}'s movements
                 3. The "Range" value shows how much the token's behavior varies
+                
+                **Coefficient of Variation (CoV):**
+                - Lower CoV means the token's volatility relative to {reference_token} is more consistent
+                - Higher CoV means the relationship is more variable and less predictable
                 """)
         else:
             st.warning("No ranking data available.")
@@ -606,7 +715,8 @@ with tab2:
                 'min': reference_returns.min(),
                 'max': reference_returns.max(),
                 'mean': reference_returns.mean(),
-                'std': reference_returns.std()
+                'std': reference_returns.std(),
+                'zero_returns_pct': (abs(reference_returns) < epsilon).mean() * 100
             })
         
         # Create table data for betas
@@ -624,14 +734,22 @@ with tab2:
                         'min': token_returns.min(),
                         'max': token_returns.max(),
                         'mean': token_returns.mean(),
-                        'std': token_returns.std()
+                        'std': token_returns.std(),
+                        'zero_returns_pct': (abs(token_returns) < epsilon).mean() * 100
                     })
                 
+                # Filter out extreme return values for more stable calculations
+                max_return = 50  # Cap at 50% for single period return
+                filtered_token_returns = token_returns.clip(lower=-max_return, upper=max_return)
+                filtered_ref_returns = reference_returns.clip(lower=-max_return, upper=max_return)
+                
                 # Calculate overall beta for the entire period
-                overall_beta, overall_alpha, overall_r_squared = calculate_beta(token_returns, reference_returns)
+                overall_beta, overall_alpha, overall_r_squared = calculate_beta(
+                    filtered_token_returns, filtered_ref_returns, min_data_points=5
+                )
                 
                 # Calculate correlation
-                clean_data = pd.concat([token_returns, reference_returns], axis=1).dropna()
+                clean_data = pd.concat([filtered_token_returns, filtered_ref_returns], axis=1).dropna()
                 overall_corr = clean_data.iloc[:, 0].corr(clean_data.iloc[:, 1]) if len(clean_data) > 1 else np.nan
                 
                 # Calculate rolling betas for each time period
@@ -645,8 +763,14 @@ with tab2:
                     ref_group = token_results[reference_token][token_results[reference_token]['time_label'] == time_label]
                     
                     if not group.empty and not ref_group.empty:
+                        # Get returns and filter extremes
+                        period_token_returns = group['returns'].clip(lower=-max_return, upper=max_return)
+                        period_ref_returns = ref_group['returns'].clip(lower=-max_return, upper=max_return)
+                        
                         # Calculate beta for this time period
-                        period_beta, _, _ = calculate_beta(group['returns'], ref_group['returns'])
+                        period_beta, _, _ = calculate_beta(
+                            period_token_returns, period_ref_returns, min_data_points=3
+                        )
                         beta_by_time[time_label] = period_beta
                 
                 # Convert to series
@@ -695,14 +819,14 @@ with tab2:
                 return 'background-color: rgba(255, 0, 0, 0.7); color: white'  # Red
         
         styled_beta_table = beta_table.style.applymap(color_beta_cells).format("{:.4f}")
-        st.markdown(f"## Beta Coefficient Table (30-minute intervals, Last 24 hours, Singapore Time)")
+        st.markdown(f"## Beta Coefficient Table ({timeframe} intervals, Last {lookback_days} day(s), Singapore Time)")
         st.markdown(f"### Reference Token: {reference_token}")
         st.markdown("### Color Legend: <span style='color:purple'>Negative Beta</span>, <span style='color:blue'>Low Beta</span>, <span style='color:lightblue'>Moderate Beta</span>, <span style='color:black'>Similar to Reference</span>, <span style='color:orange'>High Beta</span>, <span style='color:red'>Very High Beta</span>", unsafe_allow_html=True)
         st.markdown(f"Values shown as Beta coefficient (how much token moves per 1% move in {reference_token})")
         st.dataframe(styled_beta_table, height=700, use_container_width=True)
         
         # Create ranking table based on overall beta
-        st.subheader("Beta Coefficient Ranking (24-Hour, Descending Order)")
+        st.subheader(f"Beta Coefficient Ranking ({lookback_days}-Day, Descending Order)")
         
         beta_ranking_data = []
         for token, values in beta_values.items():
@@ -718,12 +842,22 @@ with tab2:
             # Get statistics for this token if available
             if token in beta_table_data:
                 rolling_betas = beta_table_data[token].dropna()
-                max_beta = rolling_betas.max() if not rolling_betas.empty else np.nan
-                min_beta = rolling_betas.min() if not rolling_betas.empty else np.nan
+                
+                # Filter out extreme values for more reliable statistics
+                filtered_betas = rolling_betas.clip(lower=-5, upper=5) if not rolling_betas.empty else pd.Series()
+                
+                max_beta = filtered_betas.max() if not filtered_betas.empty else np.nan
+                min_beta = filtered_betas.min() if not filtered_betas.empty else np.nan
                 beta_range = max_beta - min_beta if not np.isnan(max_beta) and not np.isnan(min_beta) else np.nan
-                beta_std = rolling_betas.std() if not rolling_betas.empty else np.nan
+                beta_std = filtered_betas.std() if not filtered_betas.empty else np.nan
+                
+                # Calculate how often beta is within reasonable range
+                if not filtered_betas.empty:
+                    reliable_betas = ((filtered_betas >= 0.5) & (filtered_betas <= 2.0)).mean() * 100
+                else:
+                    reliable_betas = np.nan
             else:
-                max_beta = min_beta = beta_range = beta_std = np.nan
+                max_beta = min_beta = beta_range = beta_std = reliable_betas = np.nan
             
             beta_ranking_data.append({
                 'Token': token,
@@ -735,6 +869,7 @@ with tab2:
                 'Min Beta': round(min_beta, 4),
                 'Beta Range': round(beta_range, 4),
                 'Beta Std Dev': round(beta_std, 4),
+                'Stable Beta %': round(reliable_betas, 1) if not np.isnan(reliable_betas) else np.nan,
                 'Response Category': get_beta_category(beta)
             })
         
@@ -765,7 +900,7 @@ with tab2:
                     'Correlation': f'Correlation with {reference_token}'
                 },
                 color='R²',
-                size='Beta Range',
+                size='Stable Beta %',
                 hover_name='Token',
                 color_continuous_scale='Viridis'
             )
@@ -809,6 +944,73 @@ with tab2:
             fig3.update_layout(height=400)
             st.plotly_chart(fig3, use_container_width=True)
             
+            # Add a combined analysis with both beta and ATR ratio
+            if 'ratio_table' in locals() and 'ranking_df' in locals():
+                st.subheader("Combined ATR Ratio and Beta Analysis")
+                
+                # Merge the data
+                combined_df = pd.merge(
+                    ranking_df[['Token', 'Avg ATR Ratio', 'Volatility Category']], 
+                    beta_ranking_df[['Token', 'Beta', 'Correlation', 'Response Category']], 
+                    on='Token',
+                    how='inner'
+                )
+                
+                if not combined_df.empty:
+                    # Create a scatter plot
+                    fig4 = px.scatter(
+                        combined_df,
+                        x='Beta',
+                        y='Avg ATR Ratio',
+                        title=f'Beta vs ATR Ratio Analysis (Relative to {reference_token})',
+                        color='Correlation',
+                        size='Avg ATR Ratio',
+                        hover_name='Token',
+                        text='Token',
+                        color_continuous_scale='Viridis'
+                    )
+                    
+                    # Add reference lines
+                    fig4.add_vline(x=1, line_dash="dash", line_color="gray")
+                    fig4.add_hline(y=1, line_dash="dash", line_color="gray")
+                    
+                    # Add annotations for quadrants
+                    fig4.add_annotation(x=0.5, y=1.5, text="High Volatility, Low Beta",
+                                       showarrow=False, font=dict(size=12))
+                    fig4.add_annotation(x=1.5, y=1.5, text="High Volatility, High Beta",
+                                       showarrow=False, font=dict(size=12))
+                    fig4.add_annotation(x=0.5, y=0.5, text="Low Volatility, Low Beta",
+                                       showarrow=False, font=dict(size=12))
+                    fig4.add_annotation(x=1.5, y=0.5, text="Low Volatility, High Beta",
+                                       showarrow=False, font=dict(size=12))
+                    
+                    fig4.update_traces(textposition='top center')
+                    fig4.update_layout(height=700)
+                    st.plotly_chart(fig4, use_container_width=True)
+                    
+                    with st.expander("Understanding the Combined Analysis"):
+                        st.markdown(f"""
+                        ### Beta vs ATR Ratio Quadrant Analysis
+                        
+                        This scatter plot combines both beta and ATR ratio metrics to create a more complete picture of how tokens respond to {reference_token}.
+                        
+                        **The four quadrants represent:**
+                        
+                        1. **Top Right (High Beta, High ATR Ratio)**: Tokens that are both highly volatile and strongly correlated with {reference_token}. These tokens tend to amplify {reference_token}'s moves in both directions.
+                        
+                        2. **Top Left (Low Beta, High ATR Ratio)**: Tokens that are highly volatile but don't necessarily move in tandem with {reference_token}. They may have high volatility for token-specific reasons.
+                        
+                        3. **Bottom Right (High Beta, Low ATR Ratio)**: Tokens that closely follow {reference_token}'s moves but with less overall volatility. These may be more established tokens with strong BTC correlation.
+                        
+                        4. **Bottom Left (Low Beta, Low ATR Ratio)**: Tokens with both low volatility and weak correlation to {reference_token}. These tend to be more independent from market-wide moves.
+                        
+                        **Trading applications:**
+                        
+                        - For leveraged breakout trading after a {reference_token} move, focus on tokens in the **Top Right** quadrant
+                        - For more conservative plays with good correlation, look at the **Bottom Right** quadrant
+                        - Tokens in the **Top Left** may present opportunities for token-specific catalysts regardless of {reference_token}'s movement
+                        """)
+            
             # Beta explainer
             with st.expander("Understanding Beta Analysis"):
                 st.markdown(f"""
@@ -831,6 +1033,7 @@ with tab2:
                 - **Alpha**: The token's excess return over what would be predicted by {reference_token}'s movements alone
                 - **R²**: How well {reference_token}'s movements explain the token's movements (higher means stronger relationship)
                 - **Correlation**: Linear correlation between token and {reference_token} returns
+                - **Stable Beta %**: Percentage of time the token's beta is within a reasonable range (0.5 to 2.0)
                 
                 ### Trading Applications
                 
@@ -842,8 +1045,13 @@ with tab2:
                 **Risk Management:**
                 - Higher Beta tokens will experience larger drawdowns when {reference_token} falls
                 - Beta Range shows how consistent the relationship is (lower means more consistent)
+                - A high Stable Beta % indicates a more reliable relationship with {reference_token}
                 """)
         else:
             st.warning("No beta data available.")
     else:
         st.error(f"Reference token data ({reference_token}) is required for beta calculations. Please ensure it is selected and data is available.")
+
+# Add disclaimer
+st.markdown("---")
+st.caption("Disclaimer: This analysis is for informational purposes only and should not be considered as financial advice.")
