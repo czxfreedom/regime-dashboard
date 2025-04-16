@@ -5,6 +5,7 @@ sqlalchemy
 psycopg2-binary
 plotly==5.18.0
 statsmodels>=0.13.5
+rich<14.0.0
 jb_insync
 hyperliquid==0.4.66
 websocket-client==1.5.1
