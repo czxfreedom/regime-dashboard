@@ -8,7 +8,6 @@ import plotly.express as px
 from sqlalchemy import create_engine
 from datetime import datetime, timedelta
 import pytz
-import statsmodels.api as sm
 
 st.set_page_config(
     page_title="Market Response Analysis",
@@ -132,30 +131,40 @@ def calculate_atr(df, period=14):
     
     return df
 
-# Calculate beta for a given token against BTC
-def calculate_beta(token_returns, btc_returns):
+# Calculate beta using numpy instead of statsmodels
+def calculate_beta_numpy(token_returns, btc_returns):
     """
-    Calculate the beta coefficient using regression:
-    token_returns = alpha + beta * btc_returns + error
+    Calculate the beta coefficient using numpy:
+    beta = cov(token, btc) / var(btc)
     """
     # Drop NaN values
     clean_data = pd.concat([token_returns, btc_returns], axis=1).dropna()
     
-    if len(clean_data) < 3:  # Need at least 3 data points for regression
+    if len(clean_data) < 3:  # Need at least 3 data points for calculation
         return None, None, None
     
-    # Add constant for regression
-    X = sm.add_constant(clean_data.iloc[:, 1])  # BTC returns with constant
-    y = clean_data.iloc[:, 0]  # Token returns
+    x = clean_data.iloc[:, 1].values  # BTC returns
+    y = clean_data.iloc[:, 0].values  # Token returns
     
     try:
-        # Fit regression model
-        model = sm.OLS(y, X).fit()
+        # Calculate covariance and variance
+        covariance = np.cov(y, x)[0, 1]
+        variance = np.var(x, ddof=1)
         
-        # Extract beta, alpha and r-squared
-        beta = model.params[1]
-        alpha = model.params[0]
-        r_squared = model.rsquared
+        if variance == 0:
+            return None, None, None
+            
+        # Calculate beta
+        beta = covariance / variance
+        
+        # Calculate correlation coefficient
+        correlation = np.corrcoef(y, x)[0, 1]
+        r_squared = correlation ** 2
+        
+        # Calculate alpha (intercept term)
+        mean_y = np.mean(y)
+        mean_x = np.mean(x)
+        alpha = mean_y - beta * mean_x
         
         return beta, alpha, r_squared
     except:
@@ -490,11 +499,18 @@ with tab2:
                     btc_window = btc_returns[(btc_returns.index >= window_start) & (btc_returns.index <= window_end)]
                     token_window = token_returns[(token_returns.index >= window_start) & (token_returns.index <= window_end)]
                     
-                    # Calculate beta for the window
-                    beta, alpha, r_squared = calculate_beta(token_window, btc_window)
+                    # Calculate beta for the window using numpy
+                    beta, alpha, r_squared = calculate_beta_numpy(token_window, btc_window)
                     
                     # Calculate correlation
-                    corr = token_window.corr(btc_window)
+                    if not token_window.empty and not btc_window.empty:
+                        clean_data = pd.concat([token_window, btc_window], axis=1).dropna()
+                        if len(clean_data) > 1:
+                            corr = clean_data.iloc[:, 0].corr(clean_data.iloc[:, 1])
+                        else:
+                            corr = np.nan
+                    else:
+                        corr = np.nan
                     
                     # Store the beta for this time block
                     time_label = aligned_time_blocks[end_idx][2]
@@ -506,8 +522,14 @@ with tab2:
                 beta_table_data[token] = beta_series
                 
                 # Calculate overall beta for the entire period
-                overall_beta, overall_alpha, overall_r_squared = calculate_beta(token_returns, btc_returns)
-                overall_corr = token_returns.corr(btc_returns)
+                overall_beta, overall_alpha, overall_r_squared = calculate_beta_numpy(token_returns, btc_returns)
+                
+                # Calculate overall correlation
+                clean_data = pd.concat([token_returns, btc_returns], axis=1).dropna()
+                if len(clean_data) > 1:
+                    overall_corr = clean_data.iloc[:, 0].corr(clean_data.iloc[:, 1])
+                else:
+                    overall_corr = np.nan
                 
                 beta_values[token] = {
                     'beta': overall_beta,
@@ -665,9 +687,9 @@ with tab2:
                 
                 This matrix shows how much each token moves relative to a 1% move in Bitcoin, taking into account the correlation between the token and Bitcoin.
                 
-                **The Beta Coefficient is calculated using regression:**
+                **The Beta Coefficient is calculated using covariance and variance:**
                 ```
-                Token Return = Alpha + (Beta × Bitcoin Return) + Error
+                Beta = Covariance(Token, Bitcoin) / Variance(Bitcoin)
                 ```
                 
                 **What the beta values mean:**
