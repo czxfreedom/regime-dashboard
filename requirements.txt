@@ -4,3 +4,10 @@ numpy
 sqlalchemy
 psycopg2-binary
 plotly==5.18.0
+statsmodels>=0.13.5
+jb_insync
+hyperliquid==0.4.66
+websocket-client==1.5.1
+matplotlib==3.7.2
+pytz
+setuptools>=44.0.0
