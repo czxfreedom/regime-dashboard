@@ -11,4 +11,4 @@ hyperliquid==0.4.66
 websocket-client==1.5.1
 matplotlib==3.7.2
 pytz
-setuptools>=44.0.0
+setuptools==44.0.0
