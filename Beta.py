@@ -57,22 +57,71 @@ def fetch_all_tokens():
         st.error(f"Error fetching tokens: {e}")
         return ["BTC", "ETH", "SOL", "DOGE", "PEPE", "AI16Z"]  # Default fallback
 
-all_tokens = fetch_all_tokens()
+# Add this function to check which tokens have data in the time period
+@st.cache_data(ttl=600, show_spinner="Finding available tokens...")
+def find_tokens_with_data(all_tokens, start_time_utc, end_time_utc):
+    """
+    Check which tokens have data within the specified time period
+    """
+    available_tokens = []
+    
+    for token in all_tokens:
+        # Quick check query to see if data exists
+        check_query = f"""
+        SELECT COUNT(*) as count
+        FROM public.oracle_price_log
+        WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+        AND pair_name = '{token}';
+        """
+        
+        try:
+            result = pd.read_sql(check_query, engine)
+            count = result['count'].iloc[0]
+            
+            if count > 0:
+                available_tokens.append(token)
+                print(f"Token {token} has {count} data points in the specified period.")
+            else:
+                print(f"Token {token} has no data in the specified period.")
+        except Exception as e:
+            print(f"Error checking {token}: {e}")
+    
+    return available_tokens
 
-# UI Controls
+# Calculate the time range for analysis
+now_utc = datetime.now(pytz.utc)
+now_sg = now_utc.astimezone(singapore_timezone)
+start_time_sg = now_sg - timedelta(days=lookback_days + 1)
+start_time_utc = start_time_sg.astimezone(pytz.utc)
+end_time_utc = now_sg.astimezone(pytz.utc)
+
+# First fetch all tokens that exist in the database
+all_possible_tokens = fetch_all_tokens()
+
+# Find which tokens actually have data in this time period
+tokens_with_data = find_tokens_with_data(all_possible_tokens, start_time_utc, end_time_utc)
+
+# Update UI to show only tokens with data
+if len(tokens_with_data) == 0:
+    st.error(f"No tokens have data for the past {lookback_days} days. Please check your database.")
+    st.stop()
+
+st.success(f"Found {len(tokens_with_data)} tokens with data in the selected time period.")
+
+# Update the UI controls with only the available tokens
 col1, col2 = st.columns([3, 1])
 
 with col1:
     # Let user select tokens to display (or select all)
-    select_all = st.checkbox("Select All Tokens", value=True)
+    select_all = st.checkbox("Select All Available Tokens", value=True)
     
     if select_all:
-        selected_tokens = all_tokens
+        selected_tokens = tokens_with_data
     else:
         selected_tokens = st.multiselect(
             "Select Tokens", 
-            all_tokens,
-            default=all_tokens[:5] if len(all_tokens) > 5 else all_tokens
+            tokens_with_data,
+            default=tokens_with_data[:min(5, len(tokens_with_data))] if tokens_with_data else []
         )
 
 with col2:
@@ -85,10 +134,15 @@ if not selected_tokens:
     st.warning("Please select at least one token")
     st.stop()
 
-# Check if BTC is in the selected tokens, if not add it
-if "BTC" not in selected_tokens:
-    selected_tokens = ["BTC"] + selected_tokens
-    st.info("Added BTC to selection as it's required for ratio calculations")
+# Check if BTC is in the selected tokens, if not add it (only if it has data)
+btc_token = next((t for t in tokens_with_data if "BTC" in t), None)
+if btc_token and btc_token not in selected_tokens:
+    selected_tokens = [btc_token] + selected_tokens
+    st.info(f"Added {btc_token} to selection as it's required for ratio calculations")
+elif not btc_token and len(selected_tokens) > 0:
+    st.warning("BTC data is not available for the selected time period. Some analyses may be limited.")
+    btc_token = selected_tokens[0]  # Use the first token as reference instead
+    st.info(f"Using {btc_token} as the reference token instead of BTC")
 
 # Function to generate aligned 30-minute time blocks for the past 24 hours
 def generate_aligned_time_blocks(current_time):
@@ -182,6 +236,25 @@ def fetch_and_calculate_metrics(token):
     start_time_utc = start_time_sg.astimezone(pytz.utc)
     end_time_utc = now_sg.astimezone(pytz.utc)
 
+    # First check if we have enough data for this token
+    check_query = f"""
+    SELECT COUNT(*) as count
+    FROM public.oracle_price_log
+    WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+    AND pair_name = '{token}';
+    """
+    
+    try:
+        result = pd.read_sql(check_query, engine)
+        count = result['count'].iloc[0]
+        
+        if count < 10:  # Require at least 10 data points
+            print(f"[{token}] Insufficient data: only {count} data points")
+            return None
+    except Exception as e:
+        print(f"[{token}] Error checking data count: {e}")
+        return None
+
     # Query needs to get OHLC data for proper ATR calculation
     query = f"""
     SELECT 
@@ -197,6 +270,7 @@ def fetch_and_calculate_metrics(token):
     WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
     AND pair_name = '{token}';
     """
+    
     try:
         print(f"[{token}] Executing query: {query}")
         df = pd.read_sql(query, engine)
@@ -296,23 +370,23 @@ with tab1:
     st.header("ATR Ratio Analysis")
     st.write("Analyzing how volatile each token is compared to Bitcoin")
     
-    if token_results and "BTC" in token_results:
-        btc_atr = token_results["BTC"]
+    if token_results and btc_token in token_results:
+        reference_atr = token_results[btc_token]
         
         # Create table data for ATR ratios
         ratio_table_data = {}
         for token, df in token_results.items():
-            if token != "BTC":  # Skip BTC as we're comparing others to it
-                # Merge with BTC ATR data on the time index
+            if token != btc_token:  # Skip reference token as we're comparing others to it
+                # Merge with reference token ATR data on the time index
                 merged_df = pd.merge(
                     df, 
-                    btc_atr[['atr', 'time_label']], 
+                    reference_atr[['atr', 'time_label']], 
                     on='time_label', 
-                    suffixes=('', '_btc')
+                    suffixes=('', '_ref')
                 )
                 
                 # Calculate the ratio
-                merged_df['atr_ratio'] = merged_df['atr'] / merged_df['atr_btc']
+                merged_df['atr_ratio'] = merged_df['atr'] / merged_df['atr_ref']
                 
                 # Series with time_label as index and atr_ratio as values
                 ratio_series = merged_df.set_index('time_label')['atr_ratio']
@@ -330,27 +404,29 @@ with tab1:
             ordered_times = sorted(list(available_times), reverse=True)
         
         # Reindex with the ordered times
-        ratio_table = ratio_table.reindex(ordered_times)
+        if ordered_times:
+            ratio_table = ratio_table.reindex(ordered_times)
         
         # Function to color cells based on ATR ratio
         def color_ratio_cells(val):
             if pd.isna(val):
                 return 'background-color: #f5f5f5; color: #666666;'  # Grey for missing
-            elif val < 0.5:  # Much less volatile than BTC
+            elif val < 0.5:  # Much less volatile than reference
                 return 'background-color: rgba(0, 0, 255, 0.7); color: white'  # Blue
-            elif val < 0.9:  # Less volatile than BTC
+            elif val < 0.9:  # Less volatile than reference
                 return 'background-color: rgba(173, 216, 230, 0.7); color: black'  # Light blue
-            elif val < 1.1:  # Similar to BTC
+            elif val < 1.1:  # Similar to reference
                 return 'background-color: rgba(255, 255, 255, 0.7); color: black'  # White/transparent
-            elif val < 2.0:  # More volatile than BTC
+            elif val < 2.0:  # More volatile than reference
                 return 'background-color: rgba(255, 165, 0, 0.7); color: black'  # Orange
-            else:  # Much more volatile than BTC
+            else:  # Much more volatile than reference
                 return 'background-color: rgba(255, 0, 0, 0.7); color: white'  # Red
         
         styled_table = ratio_table.style.applymap(color_ratio_cells).format("{:.2f}")
-        st.markdown("## ATR Ratio Table (30min timeframe, Last 24 hours, Singapore Time)")
-        st.markdown("### Color Legend: <span style='color:blue'>Much Less Volatile</span>, <span style='color:lightblue'>Less Volatile</span>, <span style='color:black'>Similar to BTC</span>, <span style='color:orange'>More Volatile</span>, <span style='color:red'>Much More Volatile</span>", unsafe_allow_html=True)
-        st.markdown("Values shown as ratio of token's ATR to BTC's ATR within each 30-minute interval")
+        st.markdown(f"## ATR Ratio Table (30min timeframe, Last 24 hours, Singapore Time)")
+        st.markdown(f"### Reference Token: {btc_token}")
+        st.markdown("### Color Legend: <span style='color:blue'>Much Less Volatile</span>, <span style='color:lightblue'>Less Volatile</span>, <span style='color:black'>Similar to Reference</span>, <span style='color:orange'>More Volatile</span>, <span style='color:red'>Much More Volatile</span>", unsafe_allow_html=True)
+        st.markdown(f"Values shown as ratio of token's ATR to {btc_token}'s ATR within each 30-minute interval")
         st.dataframe(styled_table, height=700, use_container_width=True)
         
         # Create ranking table based on average ATR ratio
@@ -365,7 +441,7 @@ with tab1:
             std_ratio = ratio_series.std()
             cv_ratio = std_ratio / avg_ratio if avg_ratio > 0 else 0  # Coefficient of variation
             
-            # Calculate time periods where token outperforms BTC the most
+            # Calculate time periods where token outperforms reference
             outperformance_periods = (ratio_series > 1.5).sum()
             outperformance_pct = (outperformance_periods / len(ratio_series)) * 100 if len(ratio_series) > 0 else 0
             
@@ -404,8 +480,8 @@ with tab1:
                 tokens_by_ratio, 
                 x='Token', 
                 y='Avg ATR Ratio', 
-                title='Top 15 Tokens by Average ATR Ratio to BTC',
-                labels={'Avg ATR Ratio': 'Average ATR Ratio (Token/BTC)', 'Token': 'Token'},
+                title=f'Top 15 Tokens by Average ATR Ratio to {btc_token}',
+                labels={'Avg ATR Ratio': f'Average ATR Ratio (Token/{btc_token})', 'Token': 'Token'},
                 color='Avg ATR Ratio',
                 color_continuous_scale='Reds'
             )
@@ -429,61 +505,61 @@ with tab1:
             
             # ATR Ratio explainer
             with st.expander("Understanding ATR Ratio Analysis"):
-                st.markdown("""
+                st.markdown(f"""
                 ### How to Read the ATR Ratio Matrix
-                This matrix shows the ATR (Average True Range) of each cryptocurrency pair compared to Bitcoin's ATR over the last 24 hours using 30-minute intervals.
+                This matrix shows the ATR (Average True Range) of each cryptocurrency pair compared to {btc_token}'s ATR over the last 24 hours using 30-minute intervals.
                 
                 **The ATR Ratio is calculated as:**
                 ```
-                ATR Ratio = Token's ATR / Bitcoin's ATR
+                ATR Ratio = Token's ATR / {btc_token}'s ATR
                 ```
                 
                 **What the ratios mean:**
-                - **Ratio = 1.0**: The token has the same volatility as Bitcoin
-                - **Ratio > 1.0**: The token is more volatile than Bitcoin
-                - **Ratio < 1.0**: The token is less volatile than Bitcoin
+                - **Ratio = 1.0**: The token has the same volatility as {btc_token}
+                - **Ratio > 1.0**: The token is more volatile than {btc_token}
+                - **Ratio < 1.0**: The token is less volatile than {btc_token}
                 
                 **Color coding:**
-                - **Blue** (< 0.5): Much less volatile than Bitcoin
-                - **Light Blue** (0.5 - 0.9): Less volatile than Bitcoin
-                - **White** (0.9 - 1.1): Similar volatility to Bitcoin
-                - **Orange** (1.1 - 2.0): More volatile than Bitcoin
-                - **Red** (> 2.0): Much more volatile than Bitcoin
+                - **Blue** (< 0.5): Much less volatile than {btc_token}
+                - **Light Blue** (0.5 - 0.9): Less volatile than {btc_token}
+                - **White** (0.9 - 1.1): Similar volatility to {btc_token}
+                - **Orange** (1.1 - 2.0): More volatile than {btc_token}
+                - **Red** (> 2.0): Much more volatile than {btc_token}
                 
                 ### Trading Applications
                 
                 **Breakout Identification:**
-                When Bitcoin shows a significant price movement or breakout:
+                When {btc_token} shows a significant price movement or breakout:
                 
                 1. Tokens with consistently high ATR ratios (greater than 1.5) are likely to show even larger moves
-                2. Tokens with high "Outperform %" values consistently amplify Bitcoin's movements
+                2. Tokens with high "Outperform %" values consistently amplify {btc_token}'s movements
                 3. The "Range" value shows how much the token's behavior varies
                 """)
         else:
             st.warning("No ranking data available.")
     else:
-        st.error("BTC data is required for ATR ratio calculations. Please ensure BTC is selected and data is available.")
+        st.error(f"Reference token data ({btc_token}) is required for ATR ratio calculations. Please ensure it is selected and data is available.")
 
 # TAB 2: BETA ANALYSIS
 with tab2:
     st.header("Beta Analysis")
-    st.write("Analyzing how much each token moves per 1% move in Bitcoin (accounting for correlation)")
+    st.write(f"Analyzing how much each token moves per 1% move in {btc_token} (accounting for correlation)")
     
-    if token_results and "BTC" in token_results:
-        btc_returns = token_results["BTC"]['returns']
+    if token_results and btc_token in token_results:
+        reference_returns = token_results[btc_token]['returns']
         
         # Create table data for betas
         beta_table_data = {}
         beta_values = {}
         
         for token, df in token_results.items():
-            if token != "BTC":  # Skip BTC as we're comparing others to it
+            if token != btc_token:  # Skip reference token as we're comparing others to it
                 token_returns = df['returns']
                 
                 # Calculate rolling betas over a window of data points
                 beta_windows = {}
                 corr_windows = {}
-                window_size = 12  # 6 hours of data (12 half-hour periods)
+                window_size = min(12, len(aligned_time_blocks))  # 6 hours of data (12 half-hour periods) or less if not enough data
                 
                 for i in range(len(aligned_time_blocks) - window_size + 1):
                     end_idx = i
@@ -496,15 +572,15 @@ with tab2:
                     window_end = aligned_time_blocks[end_idx][1]
                     
                     # Filter returns for the window
-                    btc_window = btc_returns[(btc_returns.index >= window_start) & (btc_returns.index <= window_end)]
+                    ref_window = reference_returns[(reference_returns.index >= window_start) & (reference_returns.index <= window_end)]
                     token_window = token_returns[(token_returns.index >= window_start) & (token_returns.index <= window_end)]
                     
                     # Calculate beta for the window using numpy
-                    beta, alpha, r_squared = calculate_beta_numpy(token_window, btc_window)
+                    beta, alpha, r_squared = calculate_beta_numpy(token_window, ref_window)
                     
                     # Calculate correlation
-                    if not token_window.empty and not btc_window.empty:
-                        clean_data = pd.concat([token_window, btc_window], axis=1).dropna()
+                    if not token_window.empty and not ref_window.empty:
+                        clean_data = pd.concat([token_window, ref_window], axis=1).dropna()
                         if len(clean_data) > 1:
                             corr = clean_data.iloc[:, 0].corr(clean_data.iloc[:, 1])
                         else:
@@ -522,10 +598,10 @@ with tab2:
                 beta_table_data[token] = beta_series
                 
                 # Calculate overall beta for the entire period
-                overall_beta, overall_alpha, overall_r_squared = calculate_beta_numpy(token_returns, btc_returns)
+                overall_beta, overall_alpha, overall_r_squared = calculate_beta_numpy(token_returns, reference_returns)
                 
                 # Calculate overall correlation
-                clean_data = pd.concat([token_returns, btc_returns], axis=1).dropna()
+                clean_data = pd.concat([token_returns, reference_returns], axis=1).dropna()
                 if len(clean_data) > 1:
                     overall_corr = clean_data.iloc[:, 0].corr(clean_data.iloc[:, 1])
                 else:
@@ -553,13 +629,13 @@ with tab2:
         def color_beta_cells(val):
             if pd.isna(val):
                 return 'background-color: #f5f5f5; color: #666666;'  # Grey for missing
-            elif val < 0:  # Negative beta (moves opposite to BTC)
+            elif val < 0:  # Negative beta (moves opposite to reference)
                 return 'background-color: rgba(255, 0, 255, 0.7); color: white'  # Purple
             elif val < 0.5:  # Low beta
                 return 'background-color: rgba(0, 0, 255, 0.7); color: white'  # Blue
             elif val < 0.9:  # Moderate beta
                 return 'background-color: rgba(173, 216, 230, 0.7); color: black'  # Light blue
-            elif val < 1.1:  # Similar to BTC
+            elif val < 1.1:  # Similar to reference
                 return 'background-color: rgba(255, 255, 255, 0.7); color: black'  # White/transparent
             elif val < 2.0:  # High beta
                 return 'background-color: rgba(255, 165, 0, 0.7); color: black'  # Orange
@@ -567,9 +643,10 @@ with tab2:
                 return 'background-color: rgba(255, 0, 0, 0.7); color: white'  # Red
         
         styled_beta_table = beta_table.style.applymap(color_beta_cells).format("{:.2f}")
-        st.markdown("## Beta Coefficient Table (6-hour rolling window, Last 24 hours, Singapore Time)")
-        st.markdown("### Color Legend: <span style='color:purple'>Negative Beta</span>, <span style='color:blue'>Low Beta</span>, <span style='color:lightblue'>Moderate Beta</span>, <span style='color:black'>Similar to BTC</span>, <span style='color:orange'>High Beta</span>, <span style='color:red'>Very High Beta</span>", unsafe_allow_html=True)
-        st.markdown("Values shown as Beta coefficient (how much token moves per 1% move in BTC)")
+        st.markdown(f"## Beta Coefficient Table (6-hour rolling window, Last 24 hours, Singapore Time)")
+        st.markdown(f"### Reference Token: {btc_token}")
+        st.markdown("### Color Legend: <span style='color:purple'>Negative Beta</span>, <span style='color:blue'>Low Beta</span>, <span style='color:lightblue'>Moderate Beta</span>, <span style='color:black'>Similar to Reference</span>, <span style='color:orange'>High Beta</span>, <span style='color:red'>Very High Beta</span>", unsafe_allow_html=True)
+        st.markdown(f"Values shown as Beta coefficient (how much token moves per 1% move in {btc_token})")
         st.dataframe(styled_beta_table, height=700, use_container_width=True)
         
         # Create ranking table based on overall beta
@@ -630,10 +707,10 @@ with tab2:
                 beta_ranking_df,
                 x='Beta',
                 y='Correlation',
-                title='Beta vs. Correlation with BTC',
+                title=f'Beta vs. Correlation with {btc_token}',
                 labels={
                     'Beta': 'Beta Coefficient',
-                    'Correlation': 'Correlation with BTC'
+                    'Correlation': f'Correlation with {btc_token}'
                 },
                 color='R²',
                 size='Beta Range',
@@ -641,8 +718,8 @@ with tab2:
                 color_continuous_scale='Viridis'
             )
             
-            # Add a vertical line at x=1 (same as BTC)
-            fig.add_vline(x=1, line_dash="dash", line_color="gray", annotation_text="Same as BTC")
+            # Add a vertical line at x=1 (same as reference)
+            fig.add_vline(x=1, line_dash="dash", line_color="gray", annotation_text="Same as Reference")
             
             # Add a horizontal line at y=0 (no correlation)
             fig.add_hline(y=0, line_dash="dash", line_color="gray", annotation_text="No Correlation")
@@ -663,7 +740,7 @@ with tab2:
             st.plotly_chart(fig2, use_container_width=True)
             
             # Alpha Analysis
-            st.subheader("Alpha Analysis - Tokens that Outperform BTC")
+            st.subheader("Alpha Analysis - Tokens that Outperform Reference")
             
             # Sort by Alpha
             alpha_df = beta_ranking_df.sort_values(by='Alpha (%)', ascending=False)
@@ -673,7 +750,7 @@ with tab2:
                 alpha_df.head(15),
                 x='Token',
                 y='Alpha (%)',
-                title='Top 15 Tokens by Alpha (Outperformance vs BTC)',
+                title=f'Top 15 Tokens by Alpha (Outperformance vs {btc_token})',
                 color='Alpha (%)',
                 color_continuous_scale='Greens'
             )
@@ -682,39 +759,39 @@ with tab2:
             
             # Beta explainer
             with st.expander("Understanding Beta Analysis"):
-                st.markdown("""
+                st.markdown(f"""
                 ### How to Read the Beta Coefficient Matrix
                 
-                This matrix shows how much each token moves relative to a 1% move in Bitcoin, taking into account the correlation between the token and Bitcoin.
+                This matrix shows how much each token moves relative to a 1% move in {btc_token}, taking into account the correlation between the token and {btc_token}.
                 
                 **The Beta Coefficient is calculated using covariance and variance:**
                 ```
-                Beta = Covariance(Token, Bitcoin) / Variance(Bitcoin)
+                Beta = Covariance(Token, {btc_token}) / Variance({btc_token})
                 ```
                 
                 **What the beta values mean:**
-                - **Beta = 1.0**: The token moves exactly the same as Bitcoin (1% when BTC moves 1%)
-                - **Beta = 2.0**: The token moves twice as much as Bitcoin (2% when BTC moves 1%)
-                - **Beta = 0.5**: The token moves half as much as Bitcoin (0.5% when BTC moves 1%)
-                - **Beta < 0**: The token moves in the opposite direction to Bitcoin
+                - **Beta = 1.0**: The token moves exactly the same as {btc_token} (1% when it moves 1%)
+                - **Beta = 2.0**: The token moves twice as much as {btc_token} (2% when it moves 1%)
+                - **Beta = 0.5**: The token moves half as much as {btc_token} (0.5% when it moves 1%)
+                - **Beta < 0**: The token moves in the opposite direction to {btc_token}
                 
                 **Other important metrics:**
-                - **Alpha**: The token's excess return over what would be predicted by Bitcoin's movements alone
-                - **R²**: How well Bitcoin's movements explain the token's movements (higher means stronger relationship)
-                - **Correlation**: Linear correlation between token and Bitcoin returns
+                - **Alpha**: The token's excess return over what would be predicted by {btc_token}'s movements alone
+                - **R²**: How well {btc_token}'s movements explain the token's movements (higher means stronger relationship)
+                - **Correlation**: Linear correlation between token and {btc_token} returns
                 
                 ### Trading Applications
                 
                 **For Breakout Trading:**
                 1. Look for tokens with high Beta (>1.5) AND high Correlation (>0.7) for amplified moves in the same direction
                 2. Tokens with high Beta but lower Correlation may move strongly but less predictably
-                3. Tokens with high positive Alpha tend to outperform Bitcoin over time
+                3. Tokens with high positive Alpha tend to outperform {btc_token} over time
                 
                 **Risk Management:**
-                - Higher Beta tokens will experience larger drawdowns when Bitcoin falls
+                - Higher Beta tokens will experience larger drawdowns when {btc_token} falls
                 - Beta Range shows how consistent the relationship is (lower means more consistent)
                 """)
         else:
             st.warning("No beta data available.")
     else:
-        st.error("BTC data is required for beta calculations. Please ensure BTC is selected and data is available.")
+        st.error(f"Reference token data ({btc_token}) is required for beta calculations. Please ensure it is selected and data is available.")
