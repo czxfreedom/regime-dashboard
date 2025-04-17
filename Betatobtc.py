@@ -74,12 +74,12 @@ def fetch_available_tokens():
             return df['pair_name'].tolist()
     except Exception as e:
         st.error(f"Error fetching tokens: {e}")
-        return ["BTCPROD/USDT", "ETHPROD/USDT", "SOLPROD/USDT"]  # Default fallback
+        return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]  # Default fallback
 
 all_tokens = fetch_available_tokens()
 
 # Make sure reference token is available
-reference_token = "BTCPROD/USDT"
+reference_token = "BTC/USDT"
 if reference_token not in all_tokens:
     st.warning(f"{reference_token} data not found. Analysis may be limited.")
     # Try to find an alternative BTC token
