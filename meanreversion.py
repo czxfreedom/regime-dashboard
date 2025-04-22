@@ -810,7 +810,8 @@ if submit_button:
             # Tab 2: Historical Trends
             with tab2:
                 st.header("Historical Mean Reversion Trends")
-                
+                if 'historical_data_processed' not in st.session_state:
+                    st.session_state.historical_data_processed = False
                 # Select a pair for detailed analysis
                 if results:
                     unique_pairs = sorted(list(set([r['pair'] for r in results])))
@@ -824,6 +825,8 @@ if submit_button:
                             exchanges_with_data,
                             horizontal=True
                         )
+                        # Mark the data as processed to avoid reloading
+                        st.session_state.historical_data_processed = True
                         
                         # Create time series charts
                         st.subheader(f"30-Minute Interval Metrics for {selected_pair} on {selected_exchange.upper()}")
