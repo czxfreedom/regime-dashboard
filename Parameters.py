@@ -179,7 +179,7 @@ class ExchangeAnalyzer:
                 WHERE 
                     created_at >= '{start_time}'::timestamp - INTERVAL '8 hour'
                     AND created_at <= '{end_time}'::timestamp - INTERVAL '8 hour'
-                    AND source_type = 2
+                    AND source_type = 0
                     AND pair_name = '{pair_name}'
                 """
             else:
