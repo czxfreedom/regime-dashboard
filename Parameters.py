@@ -568,9 +568,35 @@ class ExchangeAnalyzer:
 
 
 # Setup sidebar with simplified options
+# Replace the quick selection buttons with form-compatible elements
+# Here's what you need to change in the form section:
+
 with st.sidebar:
     st.header("Analysis Parameters")
     
+    # Initialize session state for selections if not present
+    if 'selected_pairs' not in st.session_state:
+        st.session_state.selected_pairs = ["ETH/USDT", "BTC/USDT"]  # Default selection
+    
+    # Create buttons OUTSIDE the form
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("Select Major Coins"):
+            st.session_state.selected_pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
+            st.rerun()
+            
+    with col2:
+        if st.button("Select All"):
+            st.session_state.selected_pairs = all_pairs
+            st.rerun()
+            
+    with col3:
+        if st.button("Clear Selection"):
+            st.session_state.selected_pairs = []
+            st.rerun()
+    
+    # Then create the form without the buttons inside
     with st.form("exchange_comparison_form"):
         # Data retrieval window
         hours = st.number_input(
@@ -595,25 +621,6 @@ with st.sidebar:
             "TON/USDT", "MELANIA/USDT", "SOL/USDT", "PNUT/USDT", "CAKE/USDT",
             "TST/USDT", "ETH/USDT"
         ]
-
-        # Add quick selection buttons
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            if st.button("Select Major Coins"):
-                st.session_state.selected_pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
-                
-        with col2:
-            if st.button("Select All"):
-                st.session_state.selected_pairs = all_pairs
-                
-        with col3:
-            if st.button("Clear Selection"):
-                st.session_state.selected_pairs = []
-        
-        # Initialize session state for selections if not present
-        if 'selected_pairs' not in st.session_state:
-            st.session_state.selected_pairs = ["ETH/USDT", "BTC/USDT"]  # Default selection
         
         # Create multiselect for pairs
         selected_pairs = st.multiselect(
