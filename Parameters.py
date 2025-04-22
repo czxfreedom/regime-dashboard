@@ -1175,13 +1175,13 @@ with tab2:
                     results.append({
                         'window_start': window_start,
                         'window_end': window_end,
-                        'direction_changes': direction_change_pct,
-                        'price_range_pct': price_range_pct,
-                        'a_b_ratio': a_b_ratio,
-                        'hurst': hurst,
-                        'start_price': window_data['price'].iloc[0],
-                        'end_price': window_data['price'].iloc[-1],
-                        'mean_price': window_data['price'].mean()
+                        'direction_changes':float(direction_change_pct),
+                        'price_range_pct': float(price_range_pct),
+                        'a_b_ratio': float(a_b_ratio),
+                        'hurst': float(hurst),
+                        'start_price': float(window_data['price'].iloc[0]),
+                        'end_price': float(window_data['price'].iloc[-1]),
+                        'mean_price': float(window_data['price'].mean())
                     })
                 
                 if not results:
@@ -1190,6 +1190,11 @@ with tab2:
                 
                 # Convert to DataFrame
                 results_df = pd.DataFrame(results)
+                # Ensure all columns except timestamps are numeric
+                for col in results_df.columns:
+                  if col not in ['window_start', 'window_end']:
+                    results_df[col] = pd.to_numeric(results_df[col], errors='coerce')
+
                 results_df.set_index('window_start', inplace=True)
                 
                 return results_df
@@ -1340,14 +1345,14 @@ with tab2:
                             'Latest Hurst Exponent'
                         ],
                         'Value': [
-                            f"{metrics_df['direction_changes'].mean():.2f}%",
-                            f"{metrics_df['price_range_pct'].mean():.4f}%",
-                            f"{metrics_df['a_b_ratio'].mean():.4f}",
-                            f"{metrics_df['hurst'].mean():.4f}",
-                            f"{metrics_df['direction_changes'].iloc[-1]:.2f}%",
-                            f"{metrics_df['price_range_pct'].iloc[-1]:.4f}%",
-                            f"{metrics_df['a_b_ratio'].iloc[-1]:.4f}",
-                            f"{metrics_df['hurst'].iloc[-1]:.4f}"
+                            f"{float(metrics_df['direction_changes'].mean()):.2f}%",
+                            f"{float(metrics_df['price_range_pct'].mean()):.4f}%",
+                            f"{float(metrics_df['a_b_ratio'].mean()):.4f}",
+                            f"{float(metrics_df['hurst'].mean()):.4f}",
+                            f"{float(metrics_df['direction_changes'].iloc[-1]):.2f}%",
+                            f"{float(metrics_df['price_range_pct'].iloc[-1]):.4f}%",
+                            f"{float(metrics_df['a_b_ratio'].iloc[-1]):.4f}",
+                            f"{float(metrics_df['hurst'].iloc[-1]):.4f}"
                         ],
                         'Interpretation': [
                             'Higher = More direction changes',
