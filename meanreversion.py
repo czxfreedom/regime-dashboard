@@ -1299,15 +1299,18 @@ if st.session_state.data_processed and st.session_state.analysis_results:
                         
                         # Display raw data indicator
                         st.write(f"Raw platform_total_pnl range: ${pnl_data['platform_total_pnl'].min():.2f} to ${pnl_data['platform_total_pnl'].max():.2f}")
-                                                
-                        # Reset PNL to start from 0 at the beginning of the timeframe
-                        # Calculate true 24-hour cumulative PNL
-                        pnl_data['cumulative_pnl'] = pnl_data['platform_total_pnl'].cumsum()
                         
-                        # Normalize to start at 0
-                        initial_pnl = pnl_data['cumulative_pnl'].iloc[0]
-                        pnl_data['cumulative_pnl'] = pnl_data['cumulative_pnl'] - initial_pnl
+                        # Calculate proper cumulative PNL
+                        running_sum = 0
+                        cumulative_values = []
                         
+                        for pnl_value in pnl_data['platform_total_pnl']:
+                            running_sum += pnl_value
+                            cumulative_values.append(running_sum)
+                        
+                        pnl_data['cumulative_pnl'] = cumulative_values
+                        
+                        # Merge PNL data with metrics data based on closest timestamp
                         # First, create a column to join on by rounding timestamp to nearest 30 min
                         metrics_df['rounded_timestamp'] = metrics_df['timestamp'].dt.floor('30min')
                         pnl_data['rounded_timestamp'] = pnl_data['timestamp'].dt.floor('30min')
@@ -1359,7 +1362,8 @@ if st.session_state.data_processed and st.session_state.analysis_results:
                                     return 'background-color: #f1f1aa; color: black'  # Weak correlation
                                 else:
                                     return 'background-color: #ffc299; color: black'  # No significant correlation
-                                # Display styled correlation table
+                            
+                            # Display styled correlation table
                             st.dataframe(
                                 corr_df.style.format({
                                     'Correlation with PNL': '{:.3f}'
