@@ -779,7 +779,21 @@ if submit_button:
                             exchanges_with_data,
                             horizontal=True
                         )
-                        
+                    # Add this debugging block after selecting the exchange
+                        st.write("Debug information:")
+                        st.write(f"Selected pair: {selected_pair}")
+                        st.write(f"Selected exchange: {selected_exchange}")
+
+                        # Check if we have time series data
+                        if selected_pair in analyzer.time_series_data:
+                          st.write(f"Exchanges with data for {selected_pair}: {list(analyzer.time_series_data[selected_pair].keys())}")
+    
+                          if selected_exchange in analyzer.time_series_data[selected_pair]:
+                            st.write(f"Number of data points for {selected_exchange}: {len(analyzer.time_series_data[selected_pair][selected_exchange])}")
+                          else:
+                            st.write(f"No data for {selected_exchange}")
+                        else:
+                            st.write(f"No data for {selected_pair}")    
                         # Check if we actually have time series data for this pair/exchange
                         has_data = (selected_pair in analyzer.time_series_data and 
                                   selected_exchange in analyzer.time_series_data[selected_pair] and 
