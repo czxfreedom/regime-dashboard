@@ -663,32 +663,23 @@ with st.sidebar:
         )
         
         # Time window selection
-        time_option = st.radio(
-            "Time Window",
-            ["Last N Hours", "Custom Range"]
-        )
-        
-        if time_option == "Last N Hours":
-            hours = st.number_input("Hours", min_value=1, max_value=168, value=24)
-            start_time = None
-            end_time = None
-        else:
-            hours = None
-            start_time = st.date_input("Start Date", value=datetime.now() - timedelta(days=1))
-            end_time = st.date_input("End Date", value=datetime.now())
-            
-            # Convert to datetime
-            start_time = datetime.combine(start_time, datetime.min.time())
-            end_time = datetime.combine(end_time, datetime.max.time())
-            
-            # Format as strings
-            start_time = start_time.strftime("%Y-%m-%d %H:%M:%S")
-            end_time = end_time.strftime("%Y-%m-%d %H:%M:%S")
+        hours = st.number_input(
+        "Hours to Look Back (for data retrieval)",
+        min_value=1,
+        max_value=168,
+        value=24,
+        help="How many hours of historical data to retrieve. This ensures enough data for point-based analysis."
+)
+
+        start_time = None
+        end_time = None
+
+        st.info("Analysis will be performed on the most recent data points: 500, 2000, 5000, 10000, and 50000 points regardless of time span.")
         
         # Default list of pairs
         default_pairs = """PEPE/USDT
-PAXG/USDT
-DOGE/USDT
+            PAXG/USDT
+             DOGE/USDT
 BTC/USDT
 EOS/USDT
 BNB/USDT
