@@ -90,7 +90,7 @@ class ExchangeAnalyzer:
         }
         
         # Point counts to analyze
-        self.point_counts = [500, 2000, 5000, 10000, 50000]
+        self.point_counts = [500,5000,50000]
         
         # The desired direction for each metric (whether higher or lower is better)
         self.metric_desired_direction = {
@@ -577,7 +577,7 @@ with st.sidebar:
             "Hours to Look Back (for data retrieval)",
             min_value=1,
             max_value=168,
-            value=24,
+            value=8,
             help="How many hours of historical data to retrieve. This ensures enough data for point-based analysis."
         )
         
