@@ -90,7 +90,7 @@ class ExchangeAnalyzer:
         }
         
         # Point counts to analyze
-        self.point_counts = [500,5000,50000]
+        self.point_counts = [500, 5000, 50000]
         
         # The desired direction for each metric (whether higher or lower is better)
         self.metric_desired_direction = {
@@ -581,63 +581,60 @@ with st.sidebar:
             help="How many hours of historical data to retrieve. This ensures enough data for point-based analysis."
         )
         
-        st.info("Analysis will be performed on the most recent data points: 500, 5000 and  50000 regardless of time span.")
+        st.info("Analysis will be performed on the most recent data points: 500, 5000, and 50000 points regardless of time span.")
         
-        # Default list of pairs
         # List of all available pairs
         all_pairs = [
-    "PEPE/USDT", "PAXG/USDT", "DOGE/USDT", "BTC/USDT", "EOS/USDT",
-    "BNB/USDT", "MERL/USDT", "FHE/USDT", "IP/USDT", "ORCA/USDT",
-    "TRUMP/USDT", "LIBRA/USDT", "AI16Z/USDT", "OM/USDT", "TRX/USDT",
-    "S/USDT", "PI/USDT", "JUP/USDT", "BABY/USDT", "PARTI/USDT",
-    "ADA/USDT", "HYPE/USDT", "VIRTUAL/USDT", "SUI/USDT", "SATS/USDT",
-    "XRP/USDT", "ORDI/USDT", "WIF/USDT", "VANA/USDT", "PENGU/USDT",
-    "VINE/USDT", "GRIFFAIN/USDT", "MEW/USDT", "POPCAT/USDT", "FARTCOIN/USDT",
-    "TON/USDT", "MELANIA/USDT", "SOL/USDT", "PNUT/USDT", "CAKE/USDT",
-    "TST/USDT", "ETH/USDT"
-]
+            "PEPE/USDT", "PAXG/USDT", "DOGE/USDT", "BTC/USDT", "EOS/USDT",
+            "BNB/USDT", "MERL/USDT", "FHE/USDT", "IP/USDT", "ORCA/USDT",
+            "TRUMP/USDT", "LIBRA/USDT", "AI16Z/USDT", "OM/USDT", "TRX/USDT",
+            "S/USDT", "PI/USDT", "JUP/USDT", "BABY/USDT", "PARTI/USDT",
+            "ADA/USDT", "HYPE/USDT", "VIRTUAL/USDT", "SUI/USDT", "SATS/USDT",
+            "XRP/USDT", "ORDI/USDT", "WIF/USDT", "VANA/USDT", "PENGU/USDT",
+            "VINE/USDT", "GRIFFAIN/USDT", "MEW/USDT", "POPCAT/USDT", "FARTCOIN/USDT",
+            "TON/USDT", "MELANIA/USDT", "SOL/USDT", "PNUT/USDT", "CAKE/USDT",
+            "TST/USDT", "ETH/USDT"
+        ]
 
-# Add quick selection buttons
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    if st.button("Select Major Coins"):
-        st.session_state.selected_pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
+        # Add quick selection buttons
+        col1, col2, col3 = st.columns(3)
         
-with col2:
-    if st.button("Select All"):
-        st.session_state.selected_pairs = all_pairs
+        with col1:
+            if st.button("Select Major Coins"):
+                st.session_state.selected_pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
+                
+        with col2:
+            if st.button("Select All"):
+                st.session_state.selected_pairs = all_pairs
+                
+        with col3:
+            if st.button("Clear Selection"):
+                st.session_state.selected_pairs = []
         
-with col3:
-    if st.button("Clear Selection"):
-        st.session_state.selected_pairs = []
-
-# Initialize session state for selections if not present
-if 'selected_pairs' not in st.session_state:
-    st.session_state.selected_pairs = ["ETH/USDT", "BTC/USDT"]  # Default selection
-
-# Create multiselect for pairs
-selected_pairs = st.multiselect(
-    "Select Pairs to Analyze",
-    options=all_pairs,
-    default=st.session_state.selected_pairs,
-    help="Select one or more cryptocurrency pairs to analyze"
-)
-
-# Update session state
-st.session_state.selected_pairs = selected_pairs
-
-# Set the pairs variable for the analyzer
-pairs = selected_pairs
-
-# Show a warning if no pairs are selected
-if not pairs:
-    st.warning("Please select at least one pair to analyze.")
-    
-    
+        # Initialize session state for selections if not present
+        if 'selected_pairs' not in st.session_state:
+            st.session_state.selected_pairs = ["ETH/USDT", "BTC/USDT"]  # Default selection
         
-        # Submit button
-submit_button = st.form_submit_button("Analyze Exchanges")
+        # Create multiselect for pairs
+        selected_pairs = st.multiselect(
+            "Select Pairs to Analyze",
+            options=all_pairs,
+            default=st.session_state.selected_pairs,
+            help="Select one or more cryptocurrency pairs to analyze"
+        )
+        
+        # Update session state
+        st.session_state.selected_pairs = selected_pairs
+        
+        # Set the pairs variable for the analyzer
+        pairs = selected_pairs
+        
+        # Show a warning if no pairs are selected
+        if not pairs:
+            st.warning("Please select at least one pair to analyze.")
+        
+        # Submit button - this should be indented at the same level as other elements in the form
+        submit_button = st.form_submit_button("Analyze Exchanges")
 
 # When form is submitted
 if submit_button:
@@ -860,7 +857,7 @@ This dashboard analyzes cryptocurrency prices between Rollbit and Surf exchanges
 - **Tick ATR %**: Average True Range as percentage of mean price
 - **Trend Strength**: Measures directional price strength
 
-The dashboard compares these metrics and provides rankings and visualizations for various point counts (500, 2000, 5000, 10000, and 50000).
+The dashboard compares these metrics and provides rankings and visualizations for various point counts (500, 5000, and 50000).
 """)
 
 # Add footer
