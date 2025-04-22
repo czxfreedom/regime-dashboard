@@ -1278,6 +1278,7 @@ if st.session_state.data_processed and st.session_state.analysis_results:
                         
                         # Ensure timestamps are datetime objects
                         metrics_df['timestamp'] = pd.to_datetime(metrics_df['timestamp'])
+                        pnl_data['timestamp'] = pd.to_datetime(pnl_data['timestamp'])
                         
                         # Sort by timestamp
                         metrics_df = metrics_df.sort_values('timestamp')
