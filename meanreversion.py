@@ -101,6 +101,7 @@ class MeanReversionAnalyzer:
         elif end_date is None:
             end_date = datetime.now()
             
+        # Ensure no timezone info for the database query
         start_date = start_date.replace(tzinfo=None)
         end_date = end_date.replace(tzinfo=None)
             
@@ -148,7 +149,8 @@ class MeanReversionAnalyzer:
                 query = f"""
                 SELECT 
                     pair_name,
-                    created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp,
+                    created_at AT TIME ZONE 'UTC' AS timestamp_utc,
+                    created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp_sg,
                     final_price AS price
                 FROM 
                     public.{table}
@@ -163,7 +165,8 @@ class MeanReversionAnalyzer:
                 query = f"""
                 SELECT 
                     pair_name,
-                    created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp,
+                    created_at AT TIME ZONE 'UTC' AS timestamp_utc,
+                    created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp_sg,
                     final_price AS price
                 FROM 
                     public.{table}
@@ -176,7 +179,7 @@ class MeanReversionAnalyzer:
             
             union_parts.append(query)
         
-        complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp"
+        complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp_utc"
         return complete_query
 
     def calculate_hurst_exponent(self, prices, min_k=5, max_k=None):
@@ -262,11 +265,13 @@ class MeanReversionAnalyzer:
     def process_30min_data(self, df, pair_name, exchange):
         """Process 30min data for mean reversion metrics"""
         try:
-            df = df.sort_values('timestamp')
+            # Both timestamp_utc and timestamp_sg should be in the dataframe
+            # Sort by UTC timestamp for consistent processing
+            df = df.sort_values('timestamp_utc')
             
-            end_time = df['timestamp'].max()
+            end_time = df['timestamp_utc'].max()
             start_time = end_time - pd.Timedelta(minutes=30)
-            df_30min = df[df['timestamp'] >= start_time]
+            df_30min = df[df['timestamp_utc'] >= start_time]
             
             if len(df_30min) < 10:
                 return None
@@ -291,7 +296,9 @@ class MeanReversionAnalyzer:
             self.data[pair_name][exchange]['dc_range_ratio'] = dc_range_ratio
             self.data[pair_name][exchange]['hurst_exponent'] = hurst
             
-            timestamp = end_time
+            # Store both UTC and SG timestamps for the end time
+            timestamp_utc = df_30min['timestamp_utc'].max()
+            timestamp_sg = df_30min['timestamp_sg'].max()
             
             if pair_name not in self.time_series_data:
                 self.time_series_data[pair_name] = {}
@@ -299,7 +306,8 @@ class MeanReversionAnalyzer:
                 self.time_series_data[pair_name][exchange] = []
                 
             self.time_series_data[pair_name][exchange].append({
-                'timestamp': timestamp,
+                'timestamp_utc': timestamp_utc,
+                'timestamp_sg': timestamp_sg,
                 'direction_changes_30min': direction_changes,
                 'absolute_range_pct': range_pct,
                 'dc_range_ratio': dc_range_ratio,
@@ -309,6 +317,8 @@ class MeanReversionAnalyzer:
             return {
                 'pair': pair_name,
                 'exchange': exchange,
+                'timestamp_utc': timestamp_utc,
+                'timestamp_sg': timestamp_sg,
                 'direction_changes_30min': direction_changes,
                 'absolute_range_pct': range_pct,
                 'dc_range_ratio': dc_range_ratio,
@@ -321,30 +331,33 @@ class MeanReversionAnalyzer:
     def process_historical_data(self, df, pair_name, exchange):
         """Process historical data to generate 30-minute interval metrics"""
         try:
-            df = df.sort_values('timestamp')
+            # Sort by UTC timestamp
+            df = df.sort_values('timestamp_utc')
             
-            end_time = df['timestamp'].max()
-            start_time = end_time - pd.Timedelta(hours=24)  # Always use 24 hours for analysis
+            end_time_utc = df['timestamp_utc'].max()
+            start_time_utc = end_time_utc - pd.Timedelta(hours=24)  # Always use 24 hours for analysis
             
-            df_lookback = df[df['timestamp'] >= start_time]
+            df_lookback = df[df['timestamp_utc'] >= start_time_utc]
             
             if len(df_lookback) < 50:
                 st.warning(f"Not enough historical data for {pair_name} on {exchange}: {len(df_lookback)} points")
                 return
                 
-            intervals = pd.date_range(start=start_time, end=end_time, freq='30min')
+            # Generate 30-minute intervals in UTC
+            intervals_utc = pd.date_range(start=start_time_utc, end=end_time_utc, freq='30min')
             
             if pair_name not in self.time_series_data:
                 self.time_series_data[pair_name] = {}
             if exchange not in self.time_series_data[pair_name]:
                 self.time_series_data[pair_name][exchange] = []
                 
-            for i in range(len(intervals) - 1):
-                interval_start = intervals[i]
-                interval_end = intervals[i+1]
+            for i in range(len(intervals_utc) - 1):
+                interval_start_utc = intervals_utc[i]
+                interval_end_utc = intervals_utc[i+1]
                 
-                df_interval = df_lookback[(df_lookback['timestamp'] >= interval_start) & 
-                                         (df_lookback['timestamp'] < interval_end)]
+                # Filter data for this interval using UTC timestamps
+                df_interval = df_lookback[(df_lookback['timestamp_utc'] >= interval_start_utc) & 
+                                         (df_lookback['timestamp_utc'] < interval_end_utc)]
                 
                 if len(df_interval) < 5:
                     continue
@@ -359,8 +372,16 @@ class MeanReversionAnalyzer:
                 dc_range_ratio = direction_changes / (range_pct + 1e-10)
                 hurst = self.calculate_hurst_exponent(prices, min_k=3, max_k=min(len(prices)//3, 20))
                 
+                # Get corresponding SG timestamp
+                if not df_interval.empty:
+                    timestamp_sg = df_interval['timestamp_sg'].max()
+                else:
+                    # Convert UTC to SG if no data available
+                    timestamp_sg = interval_end_utc.replace(tzinfo=pytz.utc).astimezone(singapore_timezone)
+                
                 self.time_series_data[pair_name][exchange].append({
-                    'timestamp': interval_end,
+                    'timestamp_utc': interval_end_utc,
+                    'timestamp_sg': timestamp_sg,
                     'direction_changes_30min': direction_changes,
                     'absolute_range_pct': range_pct,
                     'dc_range_ratio': dc_range_ratio,
@@ -455,14 +476,14 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
           INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 30),
           '{end_time_utc}'::timestamp,
           INTERVAL '30 minutes'
-        ) AS "UTC+8"
+        ) AS interval_time_utc
     ),
     
     order_pnl AS (
       -- Calculate platform order PNL
       SELECT
-        date_trunc('hour', "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
-        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 30) AS "timestamp",
+        date_trunc('hour', "created_at") + 
+        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at") / 30) AS "timestamp_utc",
         COALESCE(SUM(-1 * "taker_pnl" * "collateral_price"), 0) AS "platform_order_pnl"
       FROM
         "public"."trade_fill_fresh"
@@ -471,15 +492,15 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
         AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
         AND "taker_way" IN (0, 1, 2, 3, 4)
       GROUP BY
-        date_trunc('hour', "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
-        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 30)
+        date_trunc('hour', "created_at") + 
+        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at") / 30)
     ),
     
     fee_data AS (
       -- Calculate user fee payments
       SELECT
-        date_trunc('hour', "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
-        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 30) AS "timestamp",
+        date_trunc('hour', "created_at") + 
+        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at") / 30) AS "timestamp_utc",
         COALESCE(SUM("taker_fee" * "collateral_price"), 0) AS "user_fee_payments"
       FROM
         "public"."trade_fill_fresh"
@@ -489,15 +510,15 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
         AND "taker_fee_mode" = 1
         AND "taker_way" IN (1, 3)
       GROUP BY
-        date_trunc('hour', "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
-        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 30)
+        date_trunc('hour', "created_at") + 
+        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at") / 30)
     ),
     
     funding_pnl AS (
       -- Calculate platform funding fee PNL
       SELECT
-        date_trunc('hour', "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
-        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 30) AS "timestamp",
+        date_trunc('hour', "created_at") + 
+        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at") / 30) AS "timestamp_utc",
         COALESCE(SUM(-1 * "funding_fee" * "collateral_price"), 0) AS "platform_funding_pnl"
       FROM
         "public"."trade_fill_fresh"
@@ -506,15 +527,15 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
         AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
         AND "taker_way" = 0
       GROUP BY
-        date_trunc('hour', "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
-        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 30)
+        date_trunc('hour', "created_at") + 
+        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at") / 30)
     ),
     
     rebate_data AS (
       -- Calculate platform rebate payments
       SELECT
-        date_trunc('hour', "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
-        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 30) AS "timestamp",
+        date_trunc('hour', "created_at") + 
+        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at") / 30) AS "timestamp_utc",
         COALESCE(SUM(-1 * "amount" * "coin_price"), 0) AS "platform_rebate_payments"
       FROM
         "public"."user_cashbooks"
@@ -523,13 +544,14 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
         AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
         AND "remark" = '给邀请人返佣'
       GROUP BY
-        date_trunc('hour', "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
-        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 30)
+        date_trunc('hour', "created_at") + 
+        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at") / 30)
     )
     
     -- Final query: combine all data sources
     SELECT
-      t."UTC+8" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS "timestamp",
+      t.interval_time_utc AS "timestamp_utc",
+      t.interval_time_utc AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS "timestamp_sg",
       COALESCE(o."platform_order_pnl", 0) +
       COALESCE(f."user_fee_payments", 0) +
       COALESCE(ff."platform_funding_pnl", 0) +
@@ -537,15 +559,15 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
     FROM
       time_intervals t
     LEFT JOIN
-      order_pnl o ON t."UTC+8" = o."timestamp" AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
+      order_pnl o ON t.interval_time_utc = o."timestamp_utc"
     LEFT JOIN
-      fee_data f ON t."UTC+8" = f."timestamp" AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
+      fee_data f ON t.interval_time_utc = f."timestamp_utc"
     LEFT JOIN
-      funding_pnl ff ON t."UTC+8" = ff."timestamp" AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
+      funding_pnl ff ON t.interval_time_utc = ff."timestamp_utc"
     LEFT JOIN
-      rebate_data r ON t."UTC+8" = r."timestamp" AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
+      rebate_data r ON t.interval_time_utc = r."timestamp_utc"
     ORDER BY
-      t."UTC+8" ASC
+      t.interval_time_utc ASC
     """
     
     try:
@@ -556,11 +578,12 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
             st.warning(f"No PNL data found for {pair_name}")
             return None
         
-        # Convert timestamp to pandas datetime
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        # Convert timestamp columns to pandas datetime
+        df['timestamp_utc'] = pd.to_datetime(df['timestamp_utc'])
+        df['timestamp_sg'] = pd.to_datetime(df['timestamp_sg'])
         
-        # Sort by timestamp
-        df = df.sort_values('timestamp')
+        # Sort by timestamp_utc
+        df = df.sort_values('timestamp_utc')
         
         # Calculate proper cumulative PNL (restarting from 0 at beginning of period)
         df['cumulative_pnl'] = df['platform_total_pnl'].cumsum()
@@ -573,11 +596,72 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
         st.error(f"Error fetching PNL data for {pair_name}: {e}")
         return None
 
-# Simple function to create plots without merge_asof
-def plot_metric_vs_pnl(metrics_df, pnl_df, metric_name, metric_display_name, selected_pair, exchange_filter):
-    """Create plot for a specific metric vs PNL without using merge_asof"""
+# Function to align metrics and PNL data on common timestamps
+def align_data_on_common_timestamps(metrics_df, pnl_df):
+    """Align metrics and PNL data on common timestamps for plotting and correlation analysis"""
+    if metrics_df.empty or pnl_df is None or pnl_df.empty:
+        return None
+    
     try:
-        if metrics_df.empty or pnl_df is None or pnl_df.empty:
+        # Create copies to avoid modifying the original dataframes
+        metrics = metrics_df.copy()
+        pnl = pnl_df.copy()
+        
+        # Ensure timestamp columns exist in both dataframes
+        if 'timestamp_utc' not in metrics.columns or 'timestamp_utc' not in pnl.columns:
+            return None
+        
+        # Set timestamp_utc as index for both dataframes
+        metrics.set_index('timestamp_utc', inplace=True)
+        pnl.set_index('timestamp_utc', inplace=True)
+        
+        # Create a common date range
+        all_timestamps = sorted(set(metrics.index) | set(pnl.index))
+        common_index = pd.DatetimeIndex(all_timestamps)
+        
+        # Reindex both dataframes to the common index
+        metrics_reindexed = metrics.reindex(common_index)
+        pnl_reindexed = pnl.reindex(common_index)
+        
+        # Forward fill NaN values (from one timestamp to the next)
+        metrics_reindexed = metrics_reindexed.fillna(method='ffill')
+        pnl_reindexed = pnl_reindexed.fillna(method='ffill')
+        
+        # Combine into a single dataframe
+        combined_df = pd.concat([metrics_reindexed, pnl_reindexed], axis=1)
+        
+        # Reset index to get timestamp_utc back as a column
+        combined_df.reset_index(inplace=True)
+        combined_df.rename(columns={'index': 'timestamp_utc'}, inplace=True)
+        
+        # Add timestamp_sg if it's missing
+        if 'timestamp_sg' not in combined_df.columns and 'timestamp_sg_x' in combined_df.columns:
+            combined_df['timestamp_sg'] = combined_df['timestamp_sg_x'].combine_first(combined_df['timestamp_sg_y'])
+        elif 'timestamp_sg' not in combined_df.columns:
+            # Convert UTC to SG timezone
+            combined_df['timestamp_sg'] = combined_df['timestamp_utc'].apply(
+                lambda x: x.replace(tzinfo=pytz.utc).astimezone(singapore_timezone) if pd.notnull(x) else None
+            )
+        
+        # Return the aligned dataframe
+        return combined_df
+        
+    except Exception as e:
+        st.error(f"Error aligning data on common timestamps: {e}")
+        return None
+
+# Function to create plots with aligned data
+def plot_metric_vs_pnl(combined_df, metric_name, metric_display_name, selected_pair, exchange_filter):
+    """Create plot for a specific metric vs PNL using aligned data"""
+    try:
+        if combined_df is None or combined_df.empty:
+            return None
+        
+        # Check if required columns exist
+        required_columns = [metric_name, 'cumulative_pnl', 'timestamp_sg']
+        if not all(col in combined_df.columns for col in required_columns):
+            missing = [col for col in required_columns if col not in combined_df.columns]
+            st.error(f"Missing columns in combined dataframe: {missing}")
             return None
         
         # Create figure
@@ -585,16 +669,16 @@ def plot_metric_vs_pnl(metrics_df, pnl_df, metric_name, metric_display_name, sel
         
         # Add PNL line
         fig.add_trace(go.Scatter(
-            x=pnl_df['timestamp'],
-            y=pnl_df['cumulative_pnl'],
+            x=combined_df['timestamp_sg'],
+            y=combined_df['cumulative_pnl'],
             name='Cumulative PNL (USD)',
             line=dict(color='green', width=3)
         ))
         
         # Add metric line on secondary axis
         fig.add_trace(go.Scatter(
-            x=metrics_df['timestamp'],
-            y=metrics_df[metric_name],
+            x=combined_df['timestamp_sg'],
+            y=combined_df[metric_name],
             name=metric_display_name,
             line=dict(color='blue', width=2),
             yaxis='y2'
@@ -626,8 +710,8 @@ def plot_metric_vs_pnl(metrics_df, pnl_df, metric_name, metric_display_name, sel
         if metric_name == 'hurst_exponent':
             fig.add_shape(
                 type="line",
-                x0=metrics_df['timestamp'].min(),
-                x1=metrics_df['timestamp'].max(),
+                x0=combined_df['timestamp_sg'].min(),
+                x1=combined_df['timestamp_sg'].max(),
                 y0=0.5,
                 y1=0.5,
                 line=dict(
@@ -640,7 +724,7 @@ def plot_metric_vs_pnl(metrics_df, pnl_df, metric_name, metric_display_name, sel
             
             # Add annotation for Hurst reference
             fig.add_annotation(
-                x=metrics_df['timestamp'].max(),
+                x=combined_df['timestamp_sg'].max(),
                 y=0.5,
                 text="Random Walk (H=0.5)",
                 showarrow=False,
@@ -653,38 +737,25 @@ def plot_metric_vs_pnl(metrics_df, pnl_df, metric_name, metric_display_name, sel
         st.error(f"Error creating plot for {metric_name}: {e}")
         return None
 
-# Function to calculate correlation without merge_asof
-def calculate_correlation(metrics_df, pnl_df, metric_name):
-    """Calculate correlation between a metric and PNL without using merge_asof"""
+# Function to calculate correlation with aligned data
+def calculate_correlation(combined_df, metric_name):
+    """Calculate correlation between a metric and PNL using aligned data"""
     try:
-        if metrics_df.empty or pnl_df is None or pnl_df.empty:
+        if combined_df is None or combined_df.empty:
             return None
         
-        # Get the metric values at each timestamp
-        metric_series = pd.Series(index=metrics_df['timestamp'], data=metrics_df[metric_name].values)
-        
-        # Get PNL values at each timestamp
-        pnl_series = pd.Series(index=pnl_df['timestamp'], data=pnl_df['cumulative_pnl'].values)
-        
-        # Resample both series to a common frequency (5 minute)
-        # This helps align the timestamps without using merge_asof
-        common_index = pd.date_range(
-            start=min(metric_series.index.min(), pnl_series.index.min()),
-            end=max(metric_series.index.max(), pnl_series.index.max()),
-            freq='5min'
-        )
-        
-        # Reindex both series to the common index
-        metric_resampled = metric_series.reindex(common_index, method='nearest')
-        pnl_resampled = pnl_series.reindex(common_index, method='nearest')
-        
-        # Calculate correlation on non-null values
-        valid_indices = ~(metric_resampled.isna() | pnl_resampled.isna())
-        
-        if valid_indices.sum() < 2:  # Need at least 2 points for correlation
+        # Check if required columns exist
+        if metric_name not in combined_df.columns or 'cumulative_pnl' not in combined_df.columns:
             return None
             
-        correlation = metric_resampled[valid_indices].corr(pnl_resampled[valid_indices])
+        # Drop rows with NaN values
+        valid_data = combined_df.dropna(subset=[metric_name, 'cumulative_pnl'])
+        
+        if len(valid_data) < 5:  # Need enough points for meaningful correlation
+            return None
+            
+        # Calculate Pearson correlation
+        correlation = valid_data[metric_name].corr(valid_data['cumulative_pnl'])
         
         return correlation
     except Exception as e:
@@ -831,350 +902,368 @@ if st.session_state.data_processed and 'analyzer' in st.session_state:
             metrics_df = pd.DataFrame(metrics_data)
             
             if not metrics_df.empty and metrics_df.shape[0] > 0:
-                # Convert timestamps to datetime if needed
-                metrics_df['timestamp'] = pd.to_datetime(metrics_df['timestamp'])
+                # Convert timestamps to pandas datetime if needed
+                for ts_col in ['timestamp_utc', 'timestamp_sg']:
+                    if ts_col in metrics_df.columns:
+                        metrics_df[ts_col] = pd.to_datetime(metrics_df[ts_col])
                 
-                # Sort by timestamp
-                metrics_df = metrics_df.sort_values('timestamp')
+                # Sort by timestamp_utc
+                if 'timestamp_utc' in metrics_df.columns:
+                    metrics_df = metrics_df.sort_values('timestamp_utc')
                 
                 # Check if we have PNL data
                 if pnl_data is not None and not pnl_data.empty:
-                    # Create tab visualization
-                    tab1, tab2, tab3, tab4 = st.tabs([
-                        "Hurst Exponent vs PNL", 
-                        "Direction Changes/Range vs PNL", 
-                        "Direction Changes vs PNL", 
-                        "Range % vs PNL"
-                    ])
+                    # Align metrics and PNL data
+                    combined_df = align_data_on_common_timestamps(metrics_df, pnl_data)
                     
-                    with tab1:
-                        st.subheader(f"Hurst Exponent vs Cumulative PNL: {selected_pair}")
+                    if combined_df is not None and not combined_df.empty:
+                        # Create tab visualization
+                        tab1, tab2, tab3, tab4 = st.tabs([
+                            "Hurst Exponent vs PNL", 
+                            "Direction Changes/Range vs PNL", 
+                            "Direction Changes vs PNL", 
+                            "Range % vs PNL"
+                        ])
                         
-                        # Create plot without using merge_asof
-                        fig = plot_metric_vs_pnl(
-                            metrics_df, 
-                            pnl_data, 
-                            'hurst_exponent', 
-                            'Hurst Exponent',
-                            selected_pair,
-                            exchange_filter
-                        )
-                        
-                        if fig:
-                            st.plotly_chart(fig, use_container_width=True)
+                        with tab1:
+                            st.subheader(f"Hurst Exponent vs Cumulative PNL: {selected_pair}")
                             
-                            # Calculate correlation without merge_asof
-                            corr = calculate_correlation(metrics_df, pnl_data, 'hurst_exponent')
+                            # Create plot with aligned data
+                            fig = plot_metric_vs_pnl(
+                                combined_df, 
+                                'hurst_exponent', 
+                                'Hurst Exponent',
+                                selected_pair,
+                                exchange_filter
+                            )
                             
-                            if corr is not None:
-                                st.write(f"**Correlation:** {corr:.3f}")
-                                
-                                if corr < -0.3:
-                                    st.success("Negative correlation suggests mean reversion (Hurst < 0.5) is associated with higher PNL")
-                                elif corr > 0.3:
-                                    st.info("Positive correlation suggests trending (Hurst > 0.5) is associated with higher PNL")
-                                else:
-                                    st.warning("No strong correlation between Hurst exponent and PNL")
-                        else:
-                            st.error("Could not create plot for Hurst Exponent")
-                    
-                    with tab2:
-                        st.subheader(f"Direction Changes/Range Ratio vs Cumulative PNL: {selected_pair}")
-                        
-                        # Create plot without using merge_asof
-                        fig = plot_metric_vs_pnl(
-                            metrics_df, 
-                            pnl_data, 
-                            'dc_range_ratio', 
-                            'DC/Range Ratio',
-                            selected_pair,
-                            exchange_filter
-                        )
-                        
-                        if fig:
-                            st.plotly_chart(fig, use_container_width=True)
-                            
-                            # Calculate correlation without merge_asof
-                            corr = calculate_correlation(metrics_df, pnl_data, 'dc_range_ratio')
-                            
-                            if corr is not None:
-                                st.write(f"**Correlation:** {corr:.3f}")
-                                
-                                if corr > 0.3:
-                                    st.success("Positive correlation suggests higher direction changes relative to range are associated with higher PNL")
-                                elif corr < -0.3:
-                                    st.info("Negative correlation suggests lower direction changes relative to range are associated with higher PNL")
-                                else:
-                                    st.warning("No strong correlation between DC/Range ratio and PNL")
-                        else:
-                            st.error("Could not create plot for DC/Range Ratio")
-                    
-                    with tab3:
-                        st.subheader(f"Direction Changes vs Cumulative PNL: {selected_pair}")
-                        
-                        # Create plot without using merge_asof
-                        fig = plot_metric_vs_pnl(
-                            metrics_df, 
-                            pnl_data, 
-                            'direction_changes_30min', 
-                            'Direction Changes (30min)',
-                            selected_pair,
-                            exchange_filter
-                        )
-                        
-                        if fig:
-                            st.plotly_chart(fig, use_container_width=True)
-                            
-                            # Calculate correlation without merge_asof
-                            corr = calculate_correlation(metrics_df, pnl_data, 'direction_changes_30min')
-                            
-                            if corr is not None:
-                                st.write(f"**Correlation:** {corr:.3f}")
-                                
-                                if corr > 0.3:
-                                    st.success("Positive correlation suggests higher direction changes are associated with higher PNL")
-                                elif corr < -0.3:
-                                    st.info("Negative correlation suggests lower direction changes are associated with higher PNL")
-                                else:
-                                    st.warning("No strong correlation between direction changes and PNL")
-                        else:
-                            st.error("Could not create plot for Direction Changes")
-                    
-                    with tab4:
-                        st.subheader(f"Range % vs Cumulative PNL: {selected_pair}")
-                        
-                        # Create plot without using merge_asof
-                        fig = plot_metric_vs_pnl(
-                            metrics_df, 
-                            pnl_data, 
-                            'absolute_range_pct', 
-                            'Range %',
-                            selected_pair,
-                            exchange_filter
-                        )
-                        
-                        if fig:
-                            st.plotly_chart(fig, use_container_width=True)
-                            
-                            # Calculate correlation without merge_asof
-                            corr = calculate_correlation(metrics_df, pnl_data, 'absolute_range_pct')
-                            
-                            if corr is not None:
-                                st.write(f"**Correlation:** {corr:.3f}")
-                                
-                                if corr > 0.3:
-                                    st.info("Positive correlation suggests higher price range is associated with higher PNL")
-                                elif corr < -0.3:
-                                    st.success("Negative correlation suggests lower price range is associated with higher PNL")
-                                else:
-                                    st.warning("No strong correlation between price range and PNL")
-                        else:
-                            st.error("Could not create plot for Range %")
-                    
-                    # Show multi-pair correlation analysis
-                    st.header("Multi-Pair Correlation Analysis")
-                    
-                    # Get correlation data for all analyzed pairs
-                    correlation_data = []
-                    
-                    with st.spinner("Calculating correlations across all pairs..."):
-                        for pair in analyzed_pairs:
-                            try:
-                                pair_pnl = fetch_platform_pnl_for_pair(conn, pair, hours=24)
-                                
-                                if pair in analyzer.time_series_data and exchange_filter in analyzer.time_series_data[pair]:
-                                    pair_metrics_data = analyzer.time_series_data[pair][exchange_filter]
-                                    pair_metrics_df = pd.DataFrame(pair_metrics_data)
-                                    
-                                    if not pair_metrics_df.empty and pair_pnl is not None and not pair_pnl.empty:
-                                        # Ensure timestamp is datetime
-                                        pair_metrics_df['timestamp'] = pd.to_datetime(pair_metrics_df['timestamp'])
-                                        
-                                        # Sort by timestamp
-                                        pair_metrics_df = pair_metrics_df.sort_values('timestamp')
-                                        
-                                        # Calculate correlations without using merge_asof
-                                        hurst_corr = calculate_correlation(pair_metrics_df, pair_pnl, 'hurst_exponent')
-                                        dc_range_corr = calculate_correlation(pair_metrics_df, pair_pnl, 'dc_range_ratio')
-                                        dc_corr = calculate_correlation(pair_metrics_df, pair_pnl, 'direction_changes_30min')
-                                        range_corr = calculate_correlation(pair_metrics_df, pair_pnl, 'absolute_range_pct')
-                                        
-                                        # Get final PNL
-                                        final_pnl = pair_pnl['cumulative_pnl'].iloc[-1] if not pair_pnl.empty else None
-                                        
-                                        # Only add if we have valid correlations
-                                        if hurst_corr is not None or dc_range_corr is not None or dc_corr is not None or range_corr is not None:
-                                            correlation_data.append({
-                                                'Pair': pair,
-                                                'Hurst-PNL Corr': hurst_corr if hurst_corr is not None else float('nan'),
-                                                'DC/Range-PNL Corr': dc_range_corr if dc_range_corr is not None else float('nan'),
-                                                'DC-PNL Corr': dc_corr if dc_corr is not None else float('nan'),
-                                                'Range-PNL Corr': range_corr if range_corr is not None else float('nan'),
-                                                'Final PNL': final_pnl if final_pnl is not None else float('nan'),
-                                                'Avg Hurst': pair_metrics_df['hurst_exponent'].mean(),
-                                                'Avg DC/Range': pair_metrics_df['dc_range_ratio'].mean()
-                                            })
-                            except Exception as e:
-                                st.error(f"Error processing multi-pair correlation for {pair}: {e}")
-                    
-                    if correlation_data:
-                        # Convert to DataFrame
-                        correlation_df = pd.DataFrame(correlation_data)
-                        
-                        # Sort by Final PNL (descending)
-                        correlation_df = correlation_df.sort_values('Final PNL', ascending=False)
-                        
-                        # Function to color correlations
-                        def color_correlation(val):
-                            if pd.isna(val):
-                                return ''
-                            elif val > 0.5:
-                                return 'background-color: rgba(0, 200, 0, 0.5); color: black'
-                            elif val > 0.3:
-                                return 'background-color: rgba(150, 200, 150, 0.5); color: black'
-                            elif val < -0.5:
-                                return 'background-color: rgba(200, 0, 0, 0.5); color: black'
-                            elif val < -0.3:
-                                return 'background-color: rgba(200, 150, 150, 0.5); color: black'
-                            else:
-                                return 'background-color: rgba(200, 200, 200, 0.5); color: black'
-                        
-                        # Function to color PNL
-                        def color_pnl(val):
-                            if pd.isna(val):
-                                return ''
-                            elif val > 5000:
-                                return 'background-color: rgba(0, 200, 0, 0.8); color: black'
-                            elif val > 1000:
-                                return 'background-color: rgba(100, 200, 100, 0.5); color: black'
-                            elif val > 0:
-                                return 'background-color: rgba(200, 255, 200, 0.5); color: black'
-                            elif val > -1000:
-                                return 'background-color: rgba(255, 200, 200, 0.5); color: black'
-                            else:
-                                return 'background-color: rgba(255, 100, 100, 0.5); color: black'
-                        
-                        # Style DataFrame
-                        styled_corr = correlation_df.style.format({
-                            'Hurst-PNL Corr': '{:.3f}',
-                            'DC/Range-PNL Corr': '{:.3f}',
-                            'DC-PNL Corr': '{:.3f}',
-                            'Range-PNL Corr': '{:.3f}',
-                            'Final PNL': '${:.2f}',
-                            'Avg Hurst': '{:.3f}',
-                            'Avg DC/Range': '{:.3f}'
-                        })
-                        
-                        # Apply coloring
-                        styled_corr = styled_corr.applymap(color_correlation, subset=['Hurst-PNL Corr', 'DC/Range-PNL Corr', 'DC-PNL Corr', 'Range-PNL Corr'])
-                        styled_corr = styled_corr.applymap(color_pnl, subset=['Final PNL'])
-                        
-                        # Show DataFrame
-                        st.subheader("Correlation Between Mean Reversion Metrics and PNL by Pair")
-                        st.dataframe(styled_corr, height=400, use_container_width=True)
-                        
-                        # Create scatter plot of Hurst vs PNL
-                        try:
-                            # Filter out rows with NaN values for the plot
-                            plot_df = correlation_df.dropna(subset=['Avg Hurst', 'Final PNL'])
-                            
-                            if not plot_df.empty:
-                                fig = px.scatter(
-                                    plot_df,
-                                    x='Avg Hurst',
-                                    y='Final PNL',
-                                    color='Avg DC/Range',
-                                    size=abs(plot_df['Hurst-PNL Corr']) * 10 + 5,
-                                    hover_name='Pair',
-                                    title='Average Hurst Exponent vs Final PNL (Color = Avg DC/Range)',
-                                    labels={
-                                        'Avg Hurst': 'Average Hurst Exponent', 
-                                        'Final PNL': 'Final PNL (USD)',
-                                        'Avg DC/Range': 'Avg Direction Changes / Range'
-                                    },
-                                    color_continuous_scale='Viridis'
-                                )
-                                
-                                # Add vertical line at Hurst = 0.5
-                                if len(plot_df) > 0:
-                                    fig.add_shape(
-                                        type="line",
-                                        x0=0.5,
-                                        y0=plot_df['Final PNL'].min(),
-                                        x1=0.5,
-                                        y1=plot_df['Final PNL'].max(),
-                                        line=dict(
-                                            color="red",
-                                            width=1,
-                                            dash="dash",
-                                        )
-                                    )
-                                    
-                                    # Add annotation for Hurst=0.5
-                                    fig.add_annotation(
-                                        x=0.5,
-                                        y=plot_df['Final PNL'].min(),
-                                        text="Random Walk (H=0.5)",
-                                        showarrow=False,
-                                        yshift=-20
-                                    )
-                                
-                                # Show plot
+                            if fig:
                                 st.plotly_chart(fig, use_container_width=True)
-                            else:
-                                st.warning("Not enough data points to create scatter plot")
-                        except Exception as e:
-                            st.error(f"Error creating scatter plot: {e}")
-                            
-                        # Summary insights
-                        st.subheader("Summary Insights")
-                        
-                        try:
-                            # Calculate average correlations (excluding NaN values)
-                            avg_hurst_corr = correlation_df['Hurst-PNL Corr'].mean()
-                            avg_dc_range_corr = correlation_df['DC/Range-PNL Corr'].mean()
-                            avg_dc_corr = correlation_df['DC-PNL Corr'].mean()
-                            avg_range_corr = correlation_df['Range-PNL Corr'].mean()
-                            
-                            # Count profitable pairs
-                            profitable_pairs = len(correlation_df[correlation_df['Final PNL'] > 0])
-                            unprofitable_pairs = len(correlation_df[correlation_df['Final PNL'] <= 0])
-                            
-                            # Average Hurst for profitable pairs
-                            profitable_df = correlation_df[correlation_df['Final PNL'] > 0]
-                            unprofitable_df = correlation_df[correlation_df['Final PNL'] <= 0]
-                            
-                            avg_hurst_profitable = profitable_df['Avg Hurst'].mean() if len(profitable_df) > 0 else None
-                            avg_hurst_unprofitable = unprofitable_df['Avg Hurst'].mean() if len(unprofitable_df) > 0 else None
-                            
-                            # Display insights
-                            col1, col2 = st.columns(2)
-                            
-                            with col1:
-                                st.write(f"**Profitable Pairs:** {profitable_pairs} out of {len(correlation_df)}")
-                                st.write(f"**Average Correlations:**")
-                                st.write(f"- Hurst-PNL: {avg_hurst_corr:.3f}")
-                                st.write(f"- DC/Range-PNL: {avg_dc_range_corr:.3f}")
-                                st.write(f"- Direction Changes-PNL: {avg_dc_corr:.3f}")
-                                st.write(f"- Range-PNL: {avg_range_corr:.3f}")
-                            
-                            with col2:
-                                if avg_hurst_profitable is not None:
-                                    st.write(f"**Average Hurst for Profitable Pairs:** {avg_hurst_profitable:.3f}")
-                                if avg_hurst_unprofitable is not None:
-                                    st.write(f"**Average Hurst for Unprofitable Pairs:** {avg_hurst_unprofitable:.3f}")
                                 
-                                # Determine if mean reversion is beneficial overall
-                                if avg_hurst_profitable is not None and avg_hurst_profitable < 0.5:
-                                    st.success("**Mean reversion (Hurst < 0.5) appears beneficial for profitability across pairs**")
-                                elif avg_hurst_profitable is not None and avg_hurst_profitable > 0.5:
-                                    st.info("**Trending behavior (Hurst > 0.5) appears beneficial for profitability across pairs**")
+                                # Calculate correlation with aligned data
+                                corr = calculate_correlation(combined_df, 'hurst_exponent')
+                                
+                                if corr is not None:
+                                    st.write(f"**Correlation:** {corr:.3f}")
+                                    
+                                    if corr < -0.3:
+                                        st.success("Negative correlation suggests mean reversion (Hurst < 0.5) is associated with higher PNL")
+                                    elif corr > 0.3:
+                                        st.info("Positive correlation suggests trending (Hurst > 0.5) is associated with higher PNL")
+                                    else:
+                                        st.warning("No strong correlation between Hurst exponent and PNL")
+                            else:
+                                st.error("Could not create plot for Hurst Exponent")
+                        
+                        with tab2:
+                            st.subheader(f"Direction Changes/Range Ratio vs Cumulative PNL: {selected_pair}")
+                            
+                            # Create plot with aligned data
+                            fig = plot_metric_vs_pnl(
+                                combined_df, 
+                                'dc_range_ratio', 
+                                'DC/Range Ratio',
+                                selected_pair,
+                                exchange_filter
+                            )
+                            
+                            if fig:
+                                st.plotly_chart(fig, use_container_width=True)
+                                
+                                # Calculate correlation with aligned data
+                                corr = calculate_correlation(combined_df, 'dc_range_ratio')
+                                
+                                if corr is not None:
+                                    st.write(f"**Correlation:** {corr:.3f}")
+                                    
+                                    if corr > 0.3:
+                                        st.success("Positive correlation suggests higher direction changes relative to range are associated with higher PNL")
+                                    elif corr < -0.3:
+                                        st.info("Negative correlation suggests lower direction changes relative to range are associated with higher PNL")
+                                    else:
+                                        st.warning("No strong correlation between DC/Range ratio and PNL")
+                            else:
+                                st.error("Could not create plot for DC/Range Ratio")
+                        
+                        with tab3:
+                            st.subheader(f"Direction Changes vs Cumulative PNL: {selected_pair}")
+                            
+                            # Create plot with aligned data
+                            fig = plot_metric_vs_pnl(
+                                combined_df, 
+                                'direction_changes_30min', 
+                                'Direction Changes (30min)',
+                                selected_pair,
+                                exchange_filter
+                            )
+                            
+                            if fig:
+                                st.plotly_chart(fig, use_container_width=True)
+                                
+                                # Calculate correlation with aligned data
+                                corr = calculate_correlation(combined_df, 'direction_changes_30min')
+                                
+                                if corr is not None:
+                                    st.write(f"**Correlation:** {corr:.3f}")
+                                    
+                                    if corr > 0.3:
+                                        st.success("Positive correlation suggests higher direction changes are associated with higher PNL")
+                                    elif corr < -0.3:
+                                        st.info("Negative correlation suggests lower direction changes are associated with higher PNL")
+                                    else:
+                                        st.warning("No strong correlation between direction changes and PNL")
+                            else:
+                                st.error("Could not create plot for Direction Changes")
+                        
+                        with tab4:
+                            st.subheader(f"Range % vs Cumulative PNL: {selected_pair}")
+                            
+                            # Create plot with aligned data
+                            fig = plot_metric_vs_pnl(
+                                combined_df, 
+                                'absolute_range_pct', 
+                                'Range %',
+                                selected_pair,
+                                exchange_filter
+                            )
+                            
+                            if fig:
+                                st.plotly_chart(fig, use_container_width=True)
+                                
+                                # Calculate correlation with aligned data
+                                corr = calculate_correlation(combined_df, 'absolute_range_pct')
+                                
+                                if corr is not None:
+                                    st.write(f"**Correlation:** {corr:.3f}")
+                                    
+                                    if corr > 0.3:
+                                        st.info("Positive correlation suggests higher price range is associated with higher PNL")
+                                    elif corr < -0.3:
+                                        st.success("Negative correlation suggests lower price range is associated with higher PNL")
+                                    else:
+                                        st.warning("No strong correlation between price range and PNL")
+                            else:
+                                st.error("Could not create plot for Range %")
+                        
+                        # Show multi-pair correlation analysis
+                        st.header("Multi-Pair Correlation Analysis")
+                        
+                        # Get correlation data for all analyzed pairs
+                        correlation_data = []
+                        
+                        with st.spinner("Calculating correlations across all pairs..."):
+                            for pair in analyzed_pairs:
+                                try:
+                                    pair_pnl = fetch_platform_pnl_for_pair(conn, pair, hours=24)
+                                    
+                                    if pair in analyzer.time_series_data and exchange_filter in analyzer.time_series_data[pair]:
+                                        pair_metrics_data = analyzer.time_series_data[pair][exchange_filter]
+                                        pair_metrics_df = pd.DataFrame(pair_metrics_data)
+                                        
+                                        if not pair_metrics_df.empty and pair_pnl is not None and not pair_pnl.empty:
+                                            # Ensure timestamp columns are datetime
+                                            for ts_col in ['timestamp_utc', 'timestamp_sg']:
+                                                if ts_col in pair_metrics_df.columns:
+                                                    pair_metrics_df[ts_col] = pd.to_datetime(pair_metrics_df[ts_col])
+                                            
+                                            # Sort by timestamp_utc
+                                            if 'timestamp_utc' in pair_metrics_df.columns:
+                                                pair_metrics_df = pair_metrics_df.sort_values('timestamp_utc')
+                                            
+                                            # Align metrics and PNL data
+                                            pair_combined_df = align_data_on_common_timestamps(pair_metrics_df, pair_pnl)
+                                            
+                                            if pair_combined_df is not None and not pair_combined_df.empty:
+                                                # Calculate correlations with aligned data
+                                                hurst_corr = calculate_correlation(pair_combined_df, 'hurst_exponent')
+                                                dc_range_corr = calculate_correlation(pair_combined_df, 'dc_range_ratio')
+                                                dc_corr = calculate_correlation(pair_combined_df, 'direction_changes_30min')
+                                                range_corr = calculate_correlation(pair_combined_df, 'absolute_range_pct')
+                                                
+                                                # Get final PNL
+                                                final_pnl = pair_pnl['cumulative_pnl'].iloc[-1] if not pair_pnl.empty else None
+                                                
+                                                # Only add if we have valid correlations or PNL
+                                                if (hurst_corr is not None or dc_range_corr is not None or 
+                                                    dc_corr is not None or range_corr is not None or final_pnl is not None):
+                                                    
+                                                    # Calculate average values
+                                                    avg_hurst = pair_combined_df['hurst_exponent'].mean() if 'hurst_exponent' in pair_combined_df.columns else None
+                                                    avg_dc_range = pair_combined_df['dc_range_ratio'].mean() if 'dc_range_ratio' in pair_combined_df.columns else None
+                                                    
+                                                    correlation_data.append({
+                                                        'Pair': pair,
+                                                        'Hurst-PNL Corr': hurst_corr if hurst_corr is not None else float('nan'),
+                                                        'DC/Range-PNL Corr': dc_range_corr if dc_range_corr is not None else float('nan'),
+                                                        'DC-PNL Corr': dc_corr if dc_corr is not None else float('nan'),
+                                                        'Range-PNL Corr': range_corr if range_corr is not None else float('nan'),
+                                                        'Final PNL': final_pnl if final_pnl is not None else float('nan'),
+                                                        'Avg Hurst': avg_hurst if avg_hurst is not None else float('nan'),
+                                                        'Avg DC/Range': avg_dc_range if avg_dc_range is not None else float('nan')
+                                                    })
+                                except Exception as e:
+                                    st.error(f"Error processing multi-pair correlation for {pair}: {e}")
+                        
+                        if correlation_data:
+                            # Convert to DataFrame
+                            correlation_df = pd.DataFrame(correlation_data)
+                            
+                            # Sort by Final PNL (descending)
+                            correlation_df = correlation_df.sort_values('Final PNL', ascending=False)
+                            
+                            # Function to color correlations
+                            def color_correlation(val):
+                                if pd.isna(val):
+                                    return ''
+                                elif val > 0.5:
+                                    return 'background-color: rgba(0, 200, 0, 0.5); color: black'
+                                elif val > 0.3:
+                                    return 'background-color: rgba(150, 200, 150, 0.5); color: black'
+                                elif val < -0.5:
+                                    return 'background-color: rgba(200, 0, 0, 0.5); color: black'
+                                elif val < -0.3:
+                                    return 'background-color: rgba(200, 150, 150, 0.5); color: black'
                                 else:
-                                    st.warning("**No clear pattern between Hurst exponent and profitability across pairs**")
-                        except Exception as e:
-                            st.error(f"Error calculating summary insights: {e}")
+                                    return 'background-color: rgba(200, 200, 200, 0.5); color: black'
+                            
+                            # Function to color PNL
+                            def color_pnl(val):
+                                if pd.isna(val):
+                                    return ''
+                                elif val > 5000:
+                                    return 'background-color: rgba(0, 200, 0, 0.8); color: black'
+                                elif val > 1000:
+                                    return 'background-color: rgba(100, 200, 100, 0.5); color: black'
+                                elif val > 0:
+                                    return 'background-color: rgba(200, 255, 200, 0.5); color: black'
+                                elif val > -1000:
+                                    return 'background-color: rgba(255, 200, 200, 0.5); color: black'
+                                else:
+                                    return 'background-color: rgba(255, 100, 100, 0.5); color: black'
+                            
+                            # Style DataFrame
+                            styled_corr = correlation_df.style.format({
+                                'Hurst-PNL Corr': '{:.3f}',
+                                'DC/Range-PNL Corr': '{:.3f}',
+                                'DC-PNL Corr': '{:.3f}',
+                                'Range-PNL Corr': '{:.3f}',
+                                'Final PNL': '${:.2f}',
+                                'Avg Hurst': '{:.3f}',
+                                'Avg DC/Range': '{:.3f}'
+                            })
+                            
+                            # Apply coloring
+                            styled_corr = styled_corr.applymap(color_correlation, subset=['Hurst-PNL Corr', 'DC/Range-PNL Corr', 'DC-PNL Corr', 'Range-PNL Corr'])
+                            styled_corr = styled_corr.applymap(color_pnl, subset=['Final PNL'])
+                            
+                            # Show DataFrame
+                            st.subheader("Correlation Between Mean Reversion Metrics and PNL by Pair")
+                            st.dataframe(styled_corr, height=400, use_container_width=True)
+                            
+                            # Create scatter plot of Hurst vs PNL
+                            try:
+                                # Filter out rows with NaN values for the plot
+                                plot_df = correlation_df.dropna(subset=['Avg Hurst', 'Final PNL'])
+                                
+                                if not plot_df.empty and len(plot_df) >= 3:  # Need at least 3 points for a meaningful plot
+                                    fig = px.scatter(
+                                        plot_df,
+                                        x='Avg Hurst',
+                                        y='Final PNL',
+                                        color='Avg DC/Range',
+                                        size=abs(plot_df['Hurst-PNL Corr']).fillna(0.1) * 10 + 5,
+                                        hover_name='Pair',
+                                        title='Average Hurst Exponent vs Final PNL (Color = Avg DC/Range)',
+                                        labels={
+                                            'Avg Hurst': 'Average Hurst Exponent', 
+                                            'Final PNL': 'Final PNL (USD)',
+                                            'Avg DC/Range': 'Avg Direction Changes / Range'
+                                        },
+                                        color_continuous_scale='Viridis'
+                                    )
+                                    
+                                    # Add vertical line at Hurst = 0.5
+                                    if len(plot_df) > 0:
+                                        fig.add_shape(
+                                            type="line",
+                                            x0=0.5,
+                                            y0=plot_df['Final PNL'].min(),
+                                            x1=0.5,
+                                            y1=plot_df['Final PNL'].max(),
+                                            line=dict(
+                                                color="red",
+                                                width=1,
+                                                dash="dash",
+                                            )
+                                        )
+                                        
+                                        # Add annotation for Hurst=0.5
+                                        fig.add_annotation(
+                                            x=0.5,
+                                            y=plot_df['Final PNL'].min(),
+                                            text="Random Walk (H=0.5)",
+                                            showarrow=False,
+                                            yshift=-20
+                                        )
+                                    
+                                    # Show plot
+                                    st.plotly_chart(fig, use_container_width=True)
+                                else:
+                                    st.warning("Not enough valid data points to create scatter plot")
+                            except Exception as e:
+                                st.error(f"Error creating scatter plot: {e}")
+                                
+                            # Summary insights
+                            st.subheader("Summary Insights")
+                            
+                            try:
+                                # Calculate average correlations (excluding NaN values)
+                                avg_hurst_corr = correlation_df['Hurst-PNL Corr'].mean()
+                                avg_dc_range_corr = correlation_df['DC/Range-PNL Corr'].mean()
+                                avg_dc_corr = correlation_df['DC-PNL Corr'].mean()
+                                avg_range_corr = correlation_df['Range-PNL Corr'].mean()
+                                
+                                # Count profitable pairs
+                                profitable_pairs = len(correlation_df[correlation_df['Final PNL'] > 0])
+                                unprofitable_pairs = len(correlation_df[correlation_df['Final PNL'] <= 0])
+                                
+                                # Average Hurst for profitable pairs
+                                profitable_df = correlation_df[correlation_df['Final PNL'] > 0]
+                                unprofitable_df = correlation_df[correlation_df['Final PNL'] <= 0]
+                                
+                                avg_hurst_profitable = profitable_df['Avg Hurst'].mean() if len(profitable_df) > 0 else None
+                                avg_hurst_unprofitable = unprofitable_df['Avg Hurst'].mean() if len(unprofitable_df) > 0 else None
+                                
+                                # Display insights
+                                col1, col2 = st.columns(2)
+                                
+                                with col1:
+                                    st.write(f"**Profitable Pairs:** {profitable_pairs} out of {len(correlation_df)}")
+                                    st.write(f"**Average Correlations:**")
+                                    st.write(f"- Hurst-PNL: {avg_hurst_corr:.3f}")
+                                    st.write(f"- DC/Range-PNL: {avg_dc_range_corr:.3f}")
+                                    st.write(f"- Direction Changes-PNL: {avg_dc_corr:.3f}")
+                                    st.write(f"- Range-PNL: {avg_range_corr:.3f}")
+                                
+                                with col2:
+                                    if avg_hurst_profitable is not None:
+                                        st.write(f"**Average Hurst for Profitable Pairs:** {avg_hurst_profitable:.3f}")
+                                    if avg_hurst_unprofitable is not None:
+                                        st.write(f"**Average Hurst for Unprofitable Pairs:** {avg_hurst_unprofitable:.3f}")
+                                    
+                                    # Determine if mean reversion is beneficial overall
+                                    if avg_hurst_profitable is not None and avg_hurst_profitable < 0.5:
+                                        st.success("**Mean reversion (Hurst < 0.5) appears beneficial for profitability across pairs**")
+                                    elif avg_hurst_profitable is not None and avg_hurst_profitable > 0.5:
+                                        st.info("**Trending behavior (Hurst > 0.5) appears beneficial for profitability across pairs**")
+                                    else:
+                                        st.warning("**No clear pattern between Hurst exponent and profitability across pairs**")
+                            except Exception as e:
+                                st.error(f"Error calculating summary insights: {e}")
+                        else:
+                            st.warning("No correlation data available for multi-pair analysis")
                     else:
-                        st.warning("No correlation data available for multi-pair analysis")
+                        st.error("Could not align metrics with PNL data for visualization")
                 else:
                     st.error(f"No PNL data available for {selected_pair}")
             else:
