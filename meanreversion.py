@@ -823,7 +823,8 @@ if st.session_state.data_processed and st.session_state.analysis_results:
         st.header("Historical Mean Reversion Trends")
         
         # Get the unique pairs from the results
-        unique_pairs = sorted(list(set([r['pair'] for r in results])))
+        unique_pairs = sorted(pairs)  # Use all selected pairs
+
         
         if unique_pairs:
             # Create a dictionary to track which exchanges have data for each pair
