@@ -58,7 +58,7 @@ st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
 # Create session state variables for caching if not already present
 if 'analyzed_data' not in st.session_state:
-    st.session_state.analyzed_data = None
+    st.session_state.analyzed_data = []
 if 'data_processed' not in st.session_state:
     st.session_state.data_processed = False
 if 'last_selected_pairs' not in st.session_state:
@@ -690,502 +690,508 @@ if st.session_state.data_processed and 'analyzer' in st.session_state:
     # Create metrics visualization with cumulative PNL
     st.header("Mean Reversion Metrics vs Cumulative PNL (24 Hours)")
     
-    # Get pairs list
-    analyzed_pairs = list(set([r['pair'] for r in st.session_state.analyzed_data]))
-    
-    # Select a pair for detailed analysis
-    selected_pair = st.selectbox(
-        "Select Pair for Analysis", 
-        analyzed_pairs,
-        index=0
-    )
-    
-    # Get PNL data for the selected pair
-    pnl_data = fetch_platform_pnl_for_pair(conn, selected_pair, hours=24)
-    
-    # Get mean reversion metrics for the selected pair and exchange
-    if selected_pair in analyzer.time_series_data and exchange_filter in analyzer.time_series_data[selected_pair]:
-        metrics_data = analyzer.time_series_data[selected_pair][exchange_filter]
-        metrics_df = pd.DataFrame(metrics_data)
-        
-        if not metrics_df.empty and metrics_df.shape[0] > 0:
-            # Convert timestamps to datetime if needed
-            metrics_df['timestamp'] = pd.to_datetime(metrics_df['timestamp'])
-            
-            # Sort by timestamp
-            metrics_df = metrics_df.sort_values('timestamp')
-            
-            # Check if we have PNL data to merge
-            if pnl_data is not None and not pnl_data.empty:
-                # Merge metrics with PNL data
-                merged_df = pd.merge_asof(
-                    pnl_data, 
-                    metrics_df,
-                    on='timestamp',
-                    direction='nearest',
-                    tolerance=pd.Timedelta('15 minutes')
-                )
-                
-                if not merged_df.empty:
-                    # Create tab visualization
-                    tab1, tab2, tab3, tab4 = st.tabs([
-                        "Hurst Exponent vs PNL", 
-                        "Direction Changes/Range vs PNL", 
-                        "Direction Changes vs PNL", 
-                        "Range % vs PNL"
-                    ])
-                    
-                    with tab1:
-                        st.subheader(f"Hurst Exponent vs Cumulative PNL: {selected_pair}")
-                        
-                        fig = go.Figure()
-                        
-                        # Add PNL line
-                        fig.add_trace(go.Scatter(
-                            x=merged_df['timestamp'],
-                            y=merged_df['cumulative_pnl'],
-                            name='Cumulative PNL (USD)',
-                            line=dict(color='green', width=3)
-                        ))
-                        
-                        # Add Hurst line on secondary axis
-                        fig.add_trace(go.Scatter(
-                            x=merged_df['timestamp'],
-                            y=merged_df['hurst_exponent'],
-                            name='Hurst Exponent',
-                            line=dict(color='blue', width=2),
-                            yaxis='y2'
-                        ))
-                        
-                        # Add horizontal line at Hurst=0.5
-                        fig.add_shape(
-                            type="line",
-                            x0=merged_df['timestamp'].min(),
-                            x1=merged_df['timestamp'].max(),
-                            y0=0.5,
-                            y1=0.5,
-                            line=dict(
-                                color="red",
-                                width=1,
-                                dash="dash",
-                            ),
-                            yref='y2'
-                        )
-                        
-                        # Add annotation for Hurst reference
-                        fig.add_annotation(
-                            x=merged_df['timestamp'].max(),
-                            y=0.5,
-                            text="Random Walk (H=0.5)",
-                            showarrow=False,
-                            yshift=10,
-                            yref='y2'
-                        )
-                        
-                        # Update layout with two y-axes
-                        fig.update_layout(
-                            title=f"Hurst Exponent vs Cumulative PNL for {selected_pair} ({exchange_filter})",
-                            xaxis=dict(title="Time (Singapore)"),
-                            yaxis=dict(
-                                title="Cumulative PNL (USD)",
-                                titlefont=dict(color="green"),
-                                tickfont=dict(color="green"),
-                                side="left"
-                            ),
-                            yaxis2=dict(
-                                title="Hurst Exponent",
-                                titlefont=dict(color="blue"),
-                                tickfont=dict(color="blue"),
-                                anchor="x",
-                                overlaying="y",
-                                side="right",
-                                range=[0, 1]
-                            ),
-                            legend=dict(x=0.01, y=0.99),
-                            height=500
-                        )
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Correlation analysis
-                        corr = merged_df['cumulative_pnl'].corr(merged_df['hurst_exponent'])
-                        st.write(f"**Correlation:** {corr:.3f}")
-                        
-                        if corr < -0.3:
-                            st.success("Negative correlation suggests mean reversion (Hurst < 0.5) is associated with higher PNL")
-                        elif corr > 0.3:
-                            st.info("Positive correlation suggests trending (Hurst > 0.5) is associated with higher PNL")
-                        else:
-                            st.warning("No strong correlation between Hurst exponent and PNL")
-                    
-                    with tab2:
-                        st.subheader(f"Direction Changes/Range Ratio vs Cumulative PNL: {selected_pair}")
-                        
-                        fig = go.Figure()
-                        
-                        # Add PNL line
-                        fig.add_trace(go.Scatter(
-                            x=merged_df['timestamp'],
-                            y=merged_df['cumulative_pnl'],
-                            name='Cumulative PNL (USD)',
-                            line=dict(color='green', width=3)
-                        ))
-                        
-                        # Add DC/Range line on secondary axis
-                        fig.add_trace(go.Scatter(
-                            x=merged_df['timestamp'],
-                            y=merged_df['dc_range_ratio'],
-                            name='DC/Range Ratio',
-                            line=dict(color='purple', width=2),
-                            yaxis='y2'
-                        ))
-                        
-                        # Update layout with two y-axes
-                        fig.update_layout(
-                            title=f"Direction Changes/Range Ratio vs Cumulative PNL for {selected_pair} ({exchange_filter})",
-                            xaxis=dict(title="Time (Singapore)"),
-                            yaxis=dict(
-                                title="Cumulative PNL (USD)",
-                                titlefont=dict(color="green"),
-                                tickfont=dict(color="green"),
-                                side="left"
-                            ),
-                            yaxis2=dict(
-                                title="DC/Range Ratio",
-                                titlefont=dict(color="purple"),
-                                tickfont=dict(color="purple"),
-                                anchor="x",
-                                overlaying="y",
-                                side="right"
-                            ),
-                            legend=dict(x=0.01, y=0.99),
-                            height=500
-                        )
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Correlation analysis
-                        corr = merged_df['cumulative_pnl'].corr(merged_df['dc_range_ratio'])
-                        st.write(f"**Correlation:** {corr:.3f}")
-                        
-                        if corr > 0.3:
-                            st.success("Positive correlation suggests higher direction changes relative to range are associated with higher PNL")
-                        elif corr < -0.3:
-                            st.info("Negative correlation suggests lower direction changes relative to range are associated with higher PNL")
-                        else:
-                            st.warning("No strong correlation between DC/Range ratio and PNL")
-                    
-                    with tab3:
-                        st.subheader(f"Direction Changes vs Cumulative PNL: {selected_pair}")
-                        
-                        fig = go.Figure()
-                        
-                        # Add PNL line
-                        fig.add_trace(go.Scatter(
-                            x=merged_df['timestamp'],
-                            y=merged_df['cumulative_pnl'],
-                            name='Cumulative PNL (USD)',
-                            line=dict(color='green', width=3)
-                        ))
-                        
-                        # Add Direction Changes line on secondary axis
-                        fig.add_trace(go.Scatter(
-                            x=merged_df['timestamp'],
-                            y=merged_df['direction_changes_30min'],
-                            name='Direction Changes (30min)',
-                            line=dict(color='orange', width=2),
-                            yaxis='y2'
-                        ))
-                        
-                        # Update layout with two y-axes
-                        fig.update_layout(
-                            title=f"Direction Changes vs Cumulative PNL for {selected_pair} ({exchange_filter})",
-                            xaxis=dict(title="Time (Singapore)"),
-                            yaxis=dict(
-                                title="Cumulative PNL (USD)",
-                                titlefont=dict(color="green"),
-                                tickfont=dict(color="green"),
-                                side="left"
-                            ),
-                            yaxis2=dict(
-                                title="Direction Changes (30min)",
-                                titlefont=dict(color="orange"),
-                                tickfont=dict(color="orange"),
-                                anchor="x",
-                                overlaying="y",
-                                side="right"
-                            ),
-                            legend=dict(x=0.01, y=0.99),
-                            height=500
-                        )
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Correlation analysis
-                        corr = merged_df['cumulative_pnl'].corr(merged_df['direction_changes_30min'])
-                        st.write(f"**Correlation:** {corr:.3f}")
-                        
-                        if corr > 0.3:
-                            st.success("Positive correlation suggests higher direction changes are associated with higher PNL")
-                        elif corr < -0.3:
-                            st.info("Negative correlation suggests lower direction changes are associated with higher PNL")
-                        else:
-                            st.warning("No strong correlation between direction changes and PNL")
-                    
-                    with tab4:
-                        st.subheader(f"Range % vs Cumulative PNL: {selected_pair}")
-                        
-                        fig = go.Figure()
-                        
-                        # Add PNL line
-                        fig.add_trace(go.Scatter(
-                            x=merged_df['timestamp'],
-                            y=merged_df['cumulative_pnl'],
-                            name='Cumulative PNL (USD)',
-                            line=dict(color='green', width=3)
-                        ))
-                        
-                        # Add Range % line on secondary axis
-                        fig.add_trace(go.Scatter(
-                            x=merged_df['timestamp'],
-                            y=merged_df['absolute_range_pct'],
-                            name='Range %',
-                            line=dict(color='red', width=2),
-                            yaxis='y2'
-                        ))
-                        
-                        # Update layout with two y-axes
-                        fig.update_layout(
-                            title=f"Range % vs Cumulative PNL for {selected_pair} ({exchange_filter})",
-                            xaxis=dict(title="Time (Singapore)"),
-                            yaxis=dict(
-                                title="Cumulative PNL (USD)",
-                                titlefont=dict(color="green"),
-                                tickfont=dict(color="green"),
-                                side="left"
-                            ),
-                            yaxis2=dict(
-                                title="Range %",
-                                titlefont=dict(color="red"),
-                                tickfont=dict(color="red"),
-                                anchor="x",
-                                overlaying="y",
-                                side="right"
-                            ),
-                            legend=dict(x=0.01, y=0.99),
-                            height=500
-                        )
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Correlation analysis
-                        corr = merged_df['cumulative_pnl'].corr(merged_df['absolute_range_pct'])
-                        st.write(f"**Correlation:** {corr:.3f}")
-                        
-                        if corr > 0.3:
-                            st.info("Positive correlation suggests higher price range is associated with higher PNL")
-                        elif corr < -0.3:
-                            st.success("Negative correlation suggests lower price range is associated with higher PNL")
-                        else:
-                            st.warning("No strong correlation between price range and PNL")
-                    
-                    # Show multi-pair correlation analysis
-                    st.header("Multi-Pair Correlation Analysis")
-                    
-                    # Get correlation data for all analyzed pairs
-                    correlation_data = []
-                    
-                    for pair in analyzed_pairs:
-                        pair_pnl = fetch_platform_pnl_for_pair(conn, pair, hours=24)
-                        
-                        if pair in analyzer.time_series_data and exchange_filter in analyzer.time_series_data[pair]:
-                            pair_metrics = pd.DataFrame(analyzer.time_series_data[pair][exchange_filter])
-                            
-                            if not pair_metrics.empty and pair_pnl is not None and not pair_pnl.empty:
-                                # Convert timestamps to datetime
-                                pair_metrics['timestamp'] = pd.to_datetime(pair_metrics['timestamp'])
-                                
-                                # Sort by timestamp
-                                pair_metrics = pair_metrics.sort_values('timestamp')
-                                
-                                # Merge metrics with PNL data
-                                merged = pd.merge_asof(
-                                    pair_pnl, 
-                                    pair_metrics,
-                                    on='timestamp',
-                                    direction='nearest',
-                                    tolerance=pd.Timedelta('15 minutes')
-                                )
-                                
-                                if not merged.empty:
-                                    # Calculate correlations
-                                    hurst_corr = merged['cumulative_pnl'].corr(merged['hurst_exponent'])
-                                    dc_range_corr = merged['cumulative_pnl'].corr(merged['dc_range_ratio'])
-                                    dc_corr = merged['cumulative_pnl'].corr(merged['direction_changes_30min'])
-                                    range_corr = merged['cumulative_pnl'].corr(merged['absolute_range_pct'])
-                                    
-                                    # Get final PNL
-                                    final_pnl = merged['cumulative_pnl'].iloc[-1]
-                                    
-                                    # Add to correlation data
-                                    correlation_data.append({
-                                        'Pair': pair,
-                                        'Hurst-PNL Corr': hurst_corr,
-                                        'DC/Range-PNL Corr': dc_range_corr,
-                                        'DC-PNL Corr': dc_corr,
-                                        'Range-PNL Corr': range_corr,
-                                        'Final PNL': final_pnl,
-                                        'Avg Hurst': merged['hurst_exponent'].mean(),
-                                        'Avg DC/Range': merged['dc_range_ratio'].mean()
-                                    })
-                    
-                    if correlation_data:
-                        # Convert to DataFrame
-                        correlation_df = pd.DataFrame(correlation_data)
-                        
-                        # Sort by Final PNL
-                        correlation_df = correlation_df.sort_values('Final PNL', ascending=False)
-                        
-                        # Function to color correlations
-                        def color_correlation(val):
-                            if pd.isna(val):
-                                return ''
-                            elif val > 0.5:
-                                return 'background-color: rgba(0, 200, 0, 0.5); color: black'
-                            elif val > 0.3:
-                                return 'background-color: rgba(150, 200, 150, 0.5); color: black'
-                            elif val < -0.5:
-                                return 'background-color: rgba(200, 0, 0, 0.5); color: black'
-                            elif val < -0.3:
-                                return 'background-color: rgba(200, 150, 150, 0.5); color: black'
-                            else:
-                                return 'background-color: rgba(200, 200, 200, 0.5); color: black'
-                        
-                        # Function to color PNL
-                        def color_pnl(val):
-                            if pd.isna(val):
-                                return ''
-                            elif val > 5000:
-                                return 'background-color: rgba(0, 200, 0, 0.8); color: black'
-                            elif val > 1000:
-                                return 'background-color: rgba(100, 200, 100, 0.5); color: black'
-                            elif val > 0:
-                                return 'background-color: rgba(200, 255, 200, 0.5); color: black'
-                            elif val > -1000:
-                                return 'background-color: rgba(255, 200, 200, 0.5); color: black'
-                            else:
-                                return 'background-color: rgba(255, 100, 100, 0.5); color: black'
-                        
-                        # Style DataFrame
-                        styled_corr = correlation_df.style.format({
-                            'Hurst-PNL Corr': '{:.3f}',
-                            'DC/Range-PNL Corr': '{:.3f}',
-                            'DC-PNL Corr': '{:.3f}',
-                            'Range-PNL Corr': '{:.3f}',
-                            'Final PNL': '${:.2f}',
-                            'Avg Hurst': '{:.3f}',
-                            'Avg DC/Range': '{:.3f}'
-                        })
-                        
-                        # Apply coloring
-                        styled_corr = styled_corr.applymap(color_correlation, subset=['Hurst-PNL Corr', 'DC/Range-PNL Corr', 'DC-PNL Corr', 'Range-PNL Corr'])
-                        styled_corr = styled_corr.applymap(color_pnl, subset=['Final PNL'])
-                        
-                        # Show DataFrame
-                        st.subheader("Correlation Between Mean Reversion Metrics and PNL by Pair")
-                        st.dataframe(styled_corr, height=400, use_container_width=True)
-                        
-                        # Create scatter plot of Hurst vs PNL
-                        fig = px.scatter(
-                            correlation_df,
-                            x='Avg Hurst',
-                            y='Final PNL',
-                            color='Avg DC/Range',
-                            size=abs(correlation_df['Hurst-PNL Corr']) * 10 + 5,
-                            hover_name='Pair',
-                            title='Average Hurst Exponent vs Final PNL (Color = Avg DC/Range)',
-                            labels={
-                                'Avg Hurst': 'Average Hurst Exponent', 
-                                'Final PNL': 'Final PNL (USD)',
-                                'Avg DC/Range': 'Avg Direction Changes / Range'
-                            },
-                            color_continuous_scale='Viridis'
-                        )
-                        
-                        # Add vertical line at Hurst = 0.5
-                        fig.add_shape(
-                            type="line",
-                            x0=0.5,
-                            y0=correlation_df['Final PNL'].min(),
-                            x1=0.5,
-                            y1=correlation_df['Final PNL'].max(),
-                            line=dict(
-                                color="red",
-                                width=1,
-                                dash="dash",
-                            )
-                        )
-                        
-                        # Add annotation for Hurst=0.5
-                        fig.add_annotation(
-                            x=0.5,
-                            y=correlation_df['Final PNL'].min(),
-                            text="Random Walk (H=0.5)",
-                            showarrow=False,
-                            yshift=-20
-                        )
-                        
-                        # Show plot
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Summary insights
-                        st.subheader("Summary Insights")
-                        
-                        # Calculate average correlations
-                        avg_hurst_corr = correlation_df['Hurst-PNL Corr'].mean()
-                        avg_dc_range_corr = correlation_df['DC/Range-PNL Corr'].mean()
-                        avg_dc_corr = correlation_df['DC-PNL Corr'].mean()
-                        avg_range_corr = correlation_df['Range-PNL Corr'].mean()
-                        
-                        # Count profitable pairs
-                        profitable_pairs = len(correlation_df[correlation_df['Final PNL'] > 0])
-                        unprofitable_pairs = len(correlation_df[correlation_df['Final PNL'] <= 0])
-                        
-                        # Average Hurst for profitable pairs
-                        avg_hurst_profitable = correlation_df[correlation_df['Final PNL'] > 0]['Avg Hurst'].mean()
-                        avg_hurst_unprofitable = correlation_df[correlation_df['Final PNL'] <= 0]['Avg Hurst'].mean() if unprofitable_pairs > 0 else None
-                        
-                        # Display insights
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            st.write(f"**Profitable Pairs:** {profitable_pairs} out of {len(correlation_df)}")
-                            st.write(f"**Average Correlations:**")
-                            st.write(f"- Hurst-PNL: {avg_hurst_corr:.3f}")
-                            st.write(f"- DC/Range-PNL: {avg_dc_range_corr:.3f}")
-                            st.write(f"- Direction Changes-PNL: {avg_dc_corr:.3f}")
-                            st.write(f"- Range-PNL: {avg_range_corr:.3f}")
-                        
-                        with col2:
-                            st.write(f"**Average Hurst for Profitable Pairs:** {avg_hurst_profitable:.3f}")
-                            if avg_hurst_unprofitable is not None:
-                                st.write(f"**Average Hurst for Unprofitable Pairs:** {avg_hurst_unprofitable:.3f}")
-                            
-                            # Determine if mean reversion is beneficial overall
-                            if avg_hurst_profitable < 0.5:
-                                st.success("**Mean reversion (Hurst < 0.5) appears beneficial for profitability across pairs**")
-                            elif avg_hurst_profitable > 0.5:
-                                st.info("**Trending behavior (Hurst > 0.5) appears beneficial for profitability across pairs**")
-                            else:
-                                st.warning("**No clear pattern between Hurst exponent and profitability across pairs**")
-                else:
-                    st.error("Could not align mean reversion metrics with PNL data for this pair")
-            else:
-                st.error(f"No PNL data available for {selected_pair}")
-        else:
-            st.error(f"No mean reversion metrics available for {selected_pair}")
+    # Get pairs list - fixed the error by checking for list type
+    if isinstance(st.session_state.analyzed_data, list) and len(st.session_state.analyzed_data) > 0:
+        analyzed_pairs = list(set([r['pair'] for r in st.session_state.analyzed_data]))
     else:
-        st.error(f"No time series data available for {selected_pair} on {exchange_filter}")
+        analyzed_pairs = pairs  # Fallback to selected pairs if no analyzed data
+    
+    if analyzed_pairs:
+        # Select a pair for detailed analysis
+        selected_pair = st.selectbox(
+            "Select Pair for Analysis", 
+            analyzed_pairs,
+            index=0
+        )
+        
+        # Get PNL data for the selected pair
+        pnl_data = fetch_platform_pnl_for_pair(conn, selected_pair, hours=24)
+        
+        # Get mean reversion metrics for the selected pair and exchange
+        if selected_pair in analyzer.time_series_data and exchange_filter in analyzer.time_series_data[selected_pair]:
+            metrics_data = analyzer.time_series_data[selected_pair][exchange_filter]
+            metrics_df = pd.DataFrame(metrics_data)
+            
+            if not metrics_df.empty and metrics_df.shape[0] > 0:
+                # Convert timestamps to datetime if needed
+                metrics_df['timestamp'] = pd.to_datetime(metrics_df['timestamp'])
+                
+                # Sort by timestamp
+                metrics_df = metrics_df.sort_values('timestamp')
+                
+                # Check if we have PNL data to merge
+                if pnl_data is not None and not pnl_data.empty:
+                    # Merge metrics with PNL data
+                    merged_df = pd.merge_asof(
+                        pnl_data, 
+                        metrics_df,
+                        on='timestamp',
+                        direction='nearest',
+                        tolerance=pd.Timedelta('15 minutes')
+                    )
+                    
+                    if not merged_df.empty:
+                        # Create tab visualization
+                        tab1, tab2, tab3, tab4 = st.tabs([
+                            "Hurst Exponent vs PNL", 
+                            "Direction Changes/Range vs PNL", 
+                            "Direction Changes vs PNL", 
+                            "Range % vs PNL"
+                        ])
+                        
+                        with tab1:
+                            st.subheader(f"Hurst Exponent vs Cumulative PNL: {selected_pair}")
+                            
+                            fig = go.Figure()
+                            
+                            # Add PNL line
+                            fig.add_trace(go.Scatter(
+                                x=merged_df['timestamp'],
+                                y=merged_df['cumulative_pnl'],
+                                name='Cumulative PNL (USD)',
+                                line=dict(color='green', width=3)
+                            ))
+                            
+                            # Add Hurst line on secondary axis
+                            fig.add_trace(go.Scatter(
+                                x=merged_df['timestamp'],
+                                y=merged_df['hurst_exponent'],
+                                name='Hurst Exponent',
+                                line=dict(color='blue', width=2),
+                                yaxis='y2'
+                            ))
+                            
+                            # Add horizontal line at Hurst=0.5
+                            fig.add_shape(
+                                type="line",
+                                x0=merged_df['timestamp'].min(),
+                                x1=merged_df['timestamp'].max(),
+                                y0=0.5,
+                                y1=0.5,
+                                line=dict(
+                                    color="red",
+                                    width=1,
+                                    dash="dash",
+                                ),
+                                yref='y2'
+                            )
+                            
+                            # Add annotation for Hurst reference
+                            fig.add_annotation(
+                                x=merged_df['timestamp'].max(),
+                                y=0.5,
+                                text="Random Walk (H=0.5)",
+                                showarrow=False,
+                                yshift=10,
+                                yref='y2'
+                            )
+                            
+                            # Update layout with two y-axes
+                            fig.update_layout(
+                                title=f"Hurst Exponent vs Cumulative PNL for {selected_pair} ({exchange_filter})",
+                                xaxis=dict(title="Time (Singapore)"),
+                                yaxis=dict(
+                                    title="Cumulative PNL (USD)",
+                                    titlefont=dict(color="green"),
+                                    tickfont=dict(color="green"),
+                                    side="left"
+                                ),
+                                yaxis2=dict(
+                                    title="Hurst Exponent",
+                                    titlefont=dict(color="blue"),
+                                    tickfont=dict(color="blue"),
+                                    anchor="x",
+                                    overlaying="y",
+                                    side="right",
+                                    range=[0, 1]
+                                ),
+                                legend=dict(x=0.01, y=0.99),
+                                height=500
+                            )
+                            
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            # Correlation analysis
+                            corr = merged_df['cumulative_pnl'].corr(merged_df['hurst_exponent'])
+                            st.write(f"**Correlation:** {corr:.3f}")
+                            
+                            if corr < -0.3:
+                                st.success("Negative correlation suggests mean reversion (Hurst < 0.5) is associated with higher PNL")
+                            elif corr > 0.3:
+                                st.info("Positive correlation suggests trending (Hurst > 0.5) is associated with higher PNL")
+                            else:
+                                st.warning("No strong correlation between Hurst exponent and PNL")
+                        
+                        with tab2:
+                            st.subheader(f"Direction Changes/Range Ratio vs Cumulative PNL: {selected_pair}")
+                            
+                            fig = go.Figure()
+                            
+                            # Add PNL line
+                            fig.add_trace(go.Scatter(
+                                x=merged_df['timestamp'],
+                                y=merged_df['cumulative_pnl'],
+                                name='Cumulative PNL (USD)',
+                                line=dict(color='green', width=3)
+                            ))
+                            
+                            # Add DC/Range line on secondary axis
+                            fig.add_trace(go.Scatter(
+                                x=merged_df['timestamp'],
+                                y=merged_df['dc_range_ratio'],
+                                name='DC/Range Ratio',
+                                line=dict(color='purple', width=2),
+                                yaxis='y2'
+                            ))
+                            
+                            # Update layout with two y-axes
+                            fig.update_layout(
+                                title=f"Direction Changes/Range Ratio vs Cumulative PNL for {selected_pair} ({exchange_filter})",
+                                xaxis=dict(title="Time (Singapore)"),
+                                yaxis=dict(
+                                    title="Cumulative PNL (USD)",
+                                    titlefont=dict(color="green"),
+                                    tickfont=dict(color="green"),
+                                    side="left"
+                                ),
+                                yaxis2=dict(
+                                    title="DC/Range Ratio",
+                                    titlefont=dict(color="purple"),
+                                    tickfont=dict(color="purple"),
+                                    anchor="x",
+                                    overlaying="y",
+                                    side="right"
+                                ),
+                                legend=dict(x=0.01, y=0.99),
+                                height=500
+                            )
+                            
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            # Correlation analysis
+                            corr = merged_df['cumulative_pnl'].corr(merged_df['dc_range_ratio'])
+                            st.write(f"**Correlation:** {corr:.3f}")
+                            
+                            if corr > 0.3:
+                                st.success("Positive correlation suggests higher direction changes relative to range are associated with higher PNL")
+                            elif corr < -0.3:
+                                st.info("Negative correlation suggests lower direction changes relative to range are associated with higher PNL")
+                            else:
+                                st.warning("No strong correlation between DC/Range ratio and PNL")
+                        
+                        with tab3:
+                            st.subheader(f"Direction Changes vs Cumulative PNL: {selected_pair}")
+                            
+                            fig = go.Figure()
+                            
+                            # Add PNL line
+                            fig.add_trace(go.Scatter(
+                                x=merged_df['timestamp'],
+                                y=merged_df['cumulative_pnl'],
+                                name='Cumulative PNL (USD)',
+                                line=dict(color='green', width=3)
+                            ))
+                            
+                            # Add Direction Changes line on secondary axis
+                            fig.add_trace(go.Scatter(
+                                x=merged_df['timestamp'],
+                                y=merged_df['direction_changes_30min'],
+                                name='Direction Changes (30min)',
+                                line=dict(color='orange', width=2),
+                                yaxis='y2'
+                            ))
+                            
+                            # Update layout with two y-axes
+                            fig.update_layout(
+                                title=f"Direction Changes vs Cumulative PNL for {selected_pair} ({exchange_filter})",
+                                xaxis=dict(title="Time (Singapore)"),
+                                yaxis=dict(
+                                    title="Cumulative PNL (USD)",
+                                    titlefont=dict(color="green"),
+                                    tickfont=dict(color="green"),
+                                    side="left"
+                                ),
+                                yaxis2=dict(
+                                    title="Direction Changes (30min)",
+                                    titlefont=dict(color="orange"),
+                                    tickfont=dict(color="orange"),
+                                    anchor="x",
+                                    overlaying="y",
+                                    side="right"
+                                ),
+                                legend=dict(x=0.01, y=0.99),
+                                height=500
+                            )
+                            
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            # Correlation analysis
+                            corr = merged_df['cumulative_pnl'].corr(merged_df['direction_changes_30min'])
+                            st.write(f"**Correlation:** {corr:.3f}")
+                            
+                            if corr > 0.3:
+                                st.success("Positive correlation suggests higher direction changes are associated with higher PNL")
+                            elif corr < -0.3:
+                                st.info("Negative correlation suggests lower direction changes are associated with higher PNL")
+                            else:
+                                st.warning("No strong correlation between direction changes and PNL")
+                        
+                        with tab4:
+                            st.subheader(f"Range % vs Cumulative PNL: {selected_pair}")
+                            
+                            fig = go.Figure()
+                            
+                            # Add PNL line
+                            fig.add_trace(go.Scatter(
+                                x=merged_df['timestamp'],
+                                y=merged_df['cumulative_pnl'],
+                                name='Cumulative PNL (USD)',
+                                line=dict(color='green', width=3)
+                            ))
+                            
+                            # Add Range % line on secondary axis
+                            fig.add_trace(go.Scatter(
+                                x=merged_df['timestamp'],
+                                y=merged_df['absolute_range_pct'],
+                                name='Range %',
+                                line=dict(color='red', width=2),
+                                yaxis='y2'
+                            ))
+                            
+                            # Update layout with two y-axes
+                            fig.update_layout(
+                                title=f"Range % vs Cumulative PNL for {selected_pair} ({exchange_filter})",
+                                xaxis=dict(title="Time (Singapore)"),
+                                yaxis=dict(
+                                    title="Cumulative PNL (USD)",
+                                    titlefont=dict(color="green"),
+                                    tickfont=dict(color="green"),
+                                    side="left"
+                                ),
+                                yaxis2=dict(
+                                    title="Range %",
+                                    titlefont=dict(color="red"),
+                                    tickfont=dict(color="red"),
+                                    anchor="x",
+                                    overlaying="y",
+                                    side="right"
+                                ),
+                                legend=dict(x=0.01, y=0.99),
+                                height=500
+                            )
+                            
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            # Correlation analysis
+                            corr = merged_df['cumulative_pnl'].corr(merged_df['absolute_range_pct'])
+                            st.write(f"**Correlation:** {corr:.3f}")
+                            
+                            if corr > 0.3:
+                                st.info("Positive correlation suggests higher price range is associated with higher PNL")
+                            elif corr < -0.3:
+                                st.success("Negative correlation suggests lower price range is associated with higher PNL")
+                            else:
+                                st.warning("No strong correlation between price range and PNL")
+                        
+                        # Show multi-pair correlation analysis
+                        st.header("Multi-Pair Correlation Analysis")
+                        
+                        # Get correlation data for all analyzed pairs
+                        correlation_data = []
+                        
+                        for pair in analyzed_pairs:
+                            pair_pnl = fetch_platform_pnl_for_pair(conn, pair, hours=24)
+                            
+                            if pair in analyzer.time_series_data and exchange_filter in analyzer.time_series_data[pair]:
+                                pair_metrics = pd.DataFrame(analyzer.time_series_data[pair][exchange_filter])
+                                
+                                if not pair_metrics.empty and pair_pnl is not None and not pair_pnl.empty:
+                                    # Convert timestamps to datetime
+                                    pair_metrics['timestamp'] = pd.to_datetime(pair_metrics['timestamp'])
+                                    
+                                    # Sort by timestamp
+                                    pair_metrics = pair_metrics.sort_values('timestamp')
+                                    
+                                    # Merge metrics with PNL data
+                                    merged = pd.merge_asof(
+                                        pair_pnl, 
+                                        pair_metrics,
+                                        on='timestamp',
+                                        direction='nearest',
+                                        tolerance=pd.Timedelta('15 minutes')
+                                    )
+                                    
+                                    if not merged.empty:
+                                        # Calculate correlations
+                                        hurst_corr = merged['cumulative_pnl'].corr(merged['hurst_exponent'])
+                                        dc_range_corr = merged['cumulative_pnl'].corr(merged['dc_range_ratio'])
+                                        dc_corr = merged['cumulative_pnl'].corr(merged['direction_changes_30min'])
+                                        range_corr = merged['cumulative_pnl'].corr(merged['absolute_range_pct'])
+                                        
+                                        # Get final PNL
+                                        final_pnl = merged['cumulative_pnl'].iloc[-1]
+                                        
+                                        # Add to correlation data
+                                        correlation_data.append({
+                                            'Pair': pair,
+                                            'Hurst-PNL Corr': hurst_corr,
+                                            'DC/Range-PNL Corr': dc_range_corr,
+                                            'DC-PNL Corr': dc_corr,
+                                            'Range-PNL Corr': range_corr,
+                                            'Final PNL': final_pnl,
+                                            'Avg Hurst': merged['hurst_exponent'].mean(),
+                                            'Avg DC/Range': merged['dc_range_ratio'].mean()
+                                        })
+                        
+                        if correlation_data:
+                            # Convert to DataFrame
+                            correlation_df = pd.DataFrame(correlation_data)
+                            
+                            # Sort by Final PNL
+                            correlation_df = correlation_df.sort_values('Final PNL', ascending=False)
+                            
+                            # Function to color correlations
+                            def color_correlation(val):
+                                if pd.isna(val):
+                                    return ''
+                                elif val > 0.5:
+                                    return 'background-color: rgba(0, 200, 0, 0.5); color: black'
+                                elif val > 0.3:
+                                    return 'background-color: rgba(150, 200, 150, 0.5); color: black'
+                                elif val < -0.5:
+                                    return 'background-color: rgba(200, 0, 0, 0.5); color: black'
+                                elif val < -0.3:
+                                    return 'background-color: rgba(200, 150, 150, 0.5); color: black'
+                                else:
+                                    return 'background-color: rgba(200, 200, 200, 0.5); color: black'
+                            
+                            # Function to color PNL
+                            def color_pnl(val):
+                                if pd.isna(val):
+                                    return ''
+                                elif val > 5000:
+                                    return 'background-color: rgba(0, 200, 0, 0.8); color: black'
+                                elif val > 1000:
+                                    return 'background-color: rgba(100, 200, 100, 0.5); color: black'
+                                elif val > 0:
+                                    return 'background-color: rgba(200, 255, 200, 0.5); color: black'
+                                elif val > -1000:
+                                    return 'background-color: rgba(255, 200, 200, 0.5); color: black'
+                                else:
+                                    return 'background-color: rgba(255, 100, 100, 0.5); color: black'
+                            
+                            # Style DataFrame
+                            styled_corr = correlation_df.style.format({
+                                'Hurst-PNL Corr': '{:.3f}',
+                                'DC/Range-PNL Corr': '{:.3f}',
+                                'DC-PNL Corr': '{:.3f}',
+                                'Range-PNL Corr': '{:.3f}',
+                                'Final PNL': '${:.2f}',
+                                'Avg Hurst': '{:.3f}',
+                                'Avg DC/Range': '{:.3f}'
+                            })
+                            
+                            # Apply coloring
+                            styled_corr = styled_corr.applymap(color_correlation, subset=['Hurst-PNL Corr', 'DC/Range-PNL Corr', 'DC-PNL Corr', 'Range-PNL Corr'])
+                            styled_corr = styled_corr.applymap(color_pnl, subset=['Final PNL'])
+                            
+                            # Show DataFrame
+                            st.subheader("Correlation Between Mean Reversion Metrics and PNL by Pair")
+                            st.dataframe(styled_corr, height=400, use_container_width=True)
+                            
+                            # Create scatter plot of Hurst vs PNL
+                            fig = px.scatter(
+                                correlation_df,
+                                x='Avg Hurst',
+                                y='Final PNL',
+                                color='Avg DC/Range',
+                                size=abs(correlation_df['Hurst-PNL Corr']) * 10 + 5,
+                                hover_name='Pair',
+                                title='Average Hurst Exponent vs Final PNL (Color = Avg DC/Range)',
+                                labels={
+                                    'Avg Hurst': 'Average Hurst Exponent', 
+                                    'Final PNL': 'Final PNL (USD)',
+                                    'Avg DC/Range': 'Avg Direction Changes / Range'
+                                },
+                                color_continuous_scale='Viridis'
+                            )
+                            
+                            # Add vertical line at Hurst = 0.5
+                            fig.add_shape(
+                                type="line",
+                                x0=0.5,
+                                y0=correlation_df['Final PNL'].min(),
+                                x1=0.5,
+                                y1=correlation_df['Final PNL'].max(),
+                                line=dict(
+                                    color="red",
+                                    width=1,
+                                    dash="dash",
+                                )
+                            )
+                            
+                            # Add annotation for Hurst=0.5
+                            fig.add_annotation(
+                                x=0.5,
+                                y=correlation_df['Final PNL'].min(),
+                                text="Random Walk (H=0.5)",
+                                showarrow=False,
+                                yshift=-20
+                            )
+                            
+                            # Show plot
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            # Summary insights
+                            st.subheader("Summary Insights")
+                            
+                            # Calculate average correlations
+                            avg_hurst_corr = correlation_df['Hurst-PNL Corr'].mean()
+                            avg_dc_range_corr = correlation_df['DC/Range-PNL Corr'].mean()
+                            avg_dc_corr = correlation_df['DC-PNL Corr'].mean()
+                            avg_range_corr = correlation_df['Range-PNL Corr'].mean()
+                            
+                            # Count profitable pairs
+                            profitable_pairs = len(correlation_df[correlation_df['Final PNL'] > 0])
+                            unprofitable_pairs = len(correlation_df[correlation_df['Final PNL'] <= 0])
+                            
+                            # Average Hurst for profitable pairs
+                            avg_hurst_profitable = correlation_df[correlation_df['Final PNL'] > 0]['Avg Hurst'].mean()
+                            avg_hurst_unprofitable = correlation_df[correlation_df['Final PNL'] <= 0]['Avg Hurst'].mean() if unprofitable_pairs > 0 else None
+                            
+                            # Display insights
+                            col1, col2 = st.columns(2)
+                            
+                            with col1:
+                                st.write(f"**Profitable Pairs:** {profitable_pairs} out of {len(correlation_df)}")
+                                st.write(f"**Average Correlations:**")
+                                st.write(f"- Hurst-PNL: {avg_hurst_corr:.3f}")
+                                st.write(f"- DC/Range-PNL: {avg_dc_range_corr:.3f}")
+                                st.write(f"- Direction Changes-PNL: {avg_dc_corr:.3f}")
+                                st.write(f"- Range-PNL: {avg_range_corr:.3f}")
+                            
+                            with col2:
+                                st.write(f"**Average Hurst for Profitable Pairs:** {avg_hurst_profitable:.3f}")
+                                if avg_hurst_unprofitable is not None:
+                                    st.write(f"**Average Hurst for Unprofitable Pairs:** {avg_hurst_unprofitable:.3f}")
+                                
+                                # Determine if mean reversion is beneficial overall
+                                if avg_hurst_profitable < 0.5:
+                                    st.success("**Mean reversion (Hurst < 0.5) appears beneficial for profitability across pairs**")
+                                elif avg_hurst_profitable > 0.5:
+                                    st.info("**Trending behavior (Hurst > 0.5) appears beneficial for profitability across pairs**")
+                                else:
+                                    st.warning("**No clear pattern between Hurst exponent and profitability across pairs**")
+                    else:
+                        st.error("Could not align mean reversion metrics with PNL data for this pair")
+                else:
+                    st.error(f"No PNL data available for {selected_pair}")
+            else:
+                st.error(f"No mean reversion metrics available for {selected_pair}")
+        else:
+            st.error(f"No time series data available for {selected_pair} on {exchange_filter}")
+    else:
+        st.error("No analyzed pairs found. Please run the analysis first.")
 else:
     st.info("Select pairs and click 'Analyze Mean Reversion vs PNL' to begin analysis")
 
