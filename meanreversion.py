@@ -700,48 +700,38 @@ if submit_button:
                 
                 if status_df is not None:
                     # Style the table to highlight mean reversion conditions
-                    def style_mean_reversion_table(val, col_name):
-                        """Highlight mean reversion indicators."""
-                        if col_name == 'hurst_exponent':
-                            if val < 0.4:
-                                return 'background-color: #a0d995; color: black'  # Strong mean reversion (green)
-                            elif val < 0.5:
-                                return 'background-color: #f1f1aa; color: black'  # Mild mean reversion (yellow)
-                            else:
-                                return 'background-color: #ffc299; color: black'  # No mean reversion (orange)
-                        elif col_name == 'dc_range_ratio':
-                            if val > 5:
-                                return 'background-color: #a0d995; color: black'  # High ratio (green)
-                            elif val > 2:
-                                return 'background-color: #f1f1aa; color: black'  # Medium ratio (yellow)
-                            else:
-                                return 'background-color: #ffc299; color: black'  # Low ratio (orange)
-                        elif col_name == 'mean_reversion_score':
-                            if val > 50:
-                                return 'background-color: #60b33c; color: white; font-weight: bold'  # Strong (green)
-                            elif val > 40:
-                                return 'background-color: #a0d995; color: black'  # Good (light green)
-                            elif val > 30:
-                                return 'background-color: #f1f1aa; color: black'  # Moderate (yellow)
-                            else:
-                                return 'background-color: #ffc299; color: black'  # Weak (orange)
-                        return ''
+                    def style_mean_reversion_table(df):
+                        # Create a DataFrame of styles
+                        styles = pd.DataFrame('', index=df.index, columns=df.columns)
+                        
+                        # Apply styles for hurst_exponent
+                        if 'hurst_exponent' in df.columns:
+                            styles.loc[df['hurst_exponent'] < 0.4, 'hurst_exponent'] = 'background-color: #a0d995; color: black'  # Strong mean reversion (green)
+                            styles.loc[(df['hurst_exponent'] >= 0.4) & (df['hurst_exponent'] < 0.5), 'hurst_exponent'] = 'background-color: #f1f1aa; color: black'  # Mild mean reversion (yellow)
+                            styles.loc[df['hurst_exponent'] >= 0.5, 'hurst_exponent'] = 'background-color: #ffc299; color: black'  # No mean reversion (orange)
+                        
+                        # Apply styles for dc_range_ratio
+                        if 'dc_range_ratio' in df.columns:
+                            styles.loc[df['dc_range_ratio'] > 5, 'dc_range_ratio'] = 'background-color: #a0d995; color: black'  # High ratio (green)
+                            styles.loc[(df['dc_range_ratio'] > 2) & (df['dc_range_ratio'] <= 5), 'dc_range_ratio'] = 'background-color: #f1f1aa; color: black'  # Medium ratio (yellow)
+                            styles.loc[df['dc_range_ratio'] <= 2, 'dc_range_ratio'] = 'background-color: #ffc299; color: black'  # Low ratio (orange)
+                        
+                        # Apply styles for mean_reversion_score
+                        if 'mean_reversion_score' in df.columns:
+                            styles.loc[df['mean_reversion_score'] > 50, 'mean_reversion_score'] = 'background-color: #60b33c; color: white; font-weight: bold'  # Strong (green)
+                            styles.loc[(df['mean_reversion_score'] > 40) & (df['mean_reversion_score'] <= 50), 'mean_reversion_score'] = 'background-color: #a0d995; color: black'  # Good (light green)
+                            styles.loc[(df['mean_reversion_score'] > 30) & (df['mean_reversion_score'] <= 40), 'mean_reversion_score'] = 'background-color: #f1f1aa; color: black'  # Moderate (yellow)
+                            styles.loc[df['mean_reversion_score'] <= 30, 'mean_reversion_score'] = 'background-color: #ffc299; color: black'  # Weak (orange)
+                        
+                        return styles
                     
                     # Define columns to display
                     display_cols = ['pair', 'exchange', 'direction_changes_30min', 'absolute_range_pct', 
                                     'dc_range_ratio', 'hurst_exponent', 'mean_reversion_score']
                     
-                    # Apply styling
-                    styled_df = status_df[display_cols].style.applymap(
-                        lambda x: style_mean_reversion_table(x, status_df.columns[status_df.columns.get_loc(
-                            next((col for col in display_cols if pd.Series(x).name == col), None)
-                        )]),
-                        subset=['hurst_exponent', 'dc_range_ratio', 'mean_reversion_score']
-                    )
-                    
-                    # Display the table
+                    # Display the table with styling
                     st.dataframe(
-                        styled_df,
+                        status_df[display_cols].style.apply(style_mean_reversion_table, axis=None),
                         height=600,
                         use_container_width=True,
                     )
