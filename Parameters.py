@@ -24,9 +24,9 @@ def init_db_connection():
     db_params = {
         'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
         'port': 5432,
-        'database': 'report_dev',
-        'user': 'public_rw',
-        'password': 'aTJ92^kl04hllk'
+        'database': 'replication_report',
+        'user': 'public_replication',
+        'password': '866^FKC4hllk'
     }
     
     try:
@@ -59,11 +59,11 @@ st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
 # Exchange comparison class
 class ExchangeAnalyzer:
-    """Specialized analyzer for comparing metrics between any two exchanges and ranking coins."""
+    """Specialized analyzer for comparing metrics between Surf and Rollbit"""
     
     def __init__(self):
         self.exchange_data = {}  # Will store data from different exchanges
-        self.all_exchanges = ['rollbit', 'uat', 'prod', 'sit']
+        self.all_exchanges = ['rollbit', 'surf']  # Only Rollbit and Surf
         
         # Metrics to calculate and compare
         self.metrics = [
@@ -156,7 +156,7 @@ class ExchangeAnalyzer:
         
         return existing_tables
 
-    def _build_query_for_partition_tables(self, tables, source_type, pair_name, start_time, end_time, is_prod=False, is_sit=False, is_uat=False):
+    def _build_query_for_partition_tables(self, tables, pair_name, start_time, end_time, exchange):
         """
         Build a complete UNION query for multiple partition tables.
         This creates a complete, valid SQL query with correct WHERE clauses.
@@ -167,38 +167,8 @@ class ExchangeAnalyzer:
         union_parts = []
         
         for table in tables:
-            # For PROD data
-            if is_prod:
-                query = f"""
-                SELECT 
-                    REPLACE(pair_name, 'PROD', '') AS pair_name,
-                    created_at + INTERVAL '8 hour' AS timestamp,
-                    final_price AS price
-                FROM 
-                    public.{table}
-                WHERE 
-                    created_at >= '{start_time}'::timestamp - INTERVAL '8 hour'
-                    AND created_at <= '{end_time}'::timestamp - INTERVAL '8 hour'
-                    AND LOWER(pair_name) LIKE '%prod%'
-                    AND REPLACE(pair_name, 'PROD', '') = '{pair_name}'
-                """
-            # For SIT data
-            elif is_sit:
-                query = f"""
-                SELECT 
-                    REPLACE(pair_name, 'SIT', '') AS pair_name,
-                    created_at + INTERVAL '8 hour' AS timestamp,
-                    final_price AS price
-                FROM 
-                    public.{table}
-                WHERE 
-                    created_at >= '{start_time}'::timestamp - INTERVAL '8 hour'
-                    AND created_at <= '{end_time}'::timestamp - INTERVAL '8 hour'
-                    AND LOWER(pair_name) LIKE '%sit%'
-                    AND REPLACE(pair_name, 'SIT', '') = '{pair_name}'
-                """
-            # For UAT data
-            elif is_uat:
+            # For Surf data (production)
+            if exchange == 'surf':
                 query = f"""
                 SELECT 
                     pair_name,
@@ -209,7 +179,7 @@ class ExchangeAnalyzer:
                 WHERE 
                     created_at >= '{start_time}'::timestamp - INTERVAL '8 hour'
                     AND created_at <= '{end_time}'::timestamp - INTERVAL '8 hour'
-                    AND source_type = 0
+                    AND source_type = 2
                     AND pair_name = '{pair_name}'
                 """
             else:
@@ -234,47 +204,26 @@ class ExchangeAnalyzer:
         complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp"
         return complete_query
 
-    def fetch_and_analyze(self, conn, pairs_to_analyze, exchanges_to_compare, hours=24, start_time=None, end_time=None):
+    def fetch_and_analyze(self, conn, pairs_to_analyze, hours=24):
         """
-        Fetch data for specified exchanges, analyze their convergence, and rank coins.
+        Fetch data for Surf and Rollbit, analyze metrics, and calculate rankings.
         
         Args:
             conn: Database connection
             pairs_to_analyze: List of coin pairs to analyze
-            exchanges_to_compare: List of 2 exchanges to compare
-            hours: Number of hours to analyze if start/end time not provided
-            start_time: Analysis start time (string)
-            end_time: Analysis end time (string)
+            hours: Hours to look back for data retrieval
         """
-        if len(exchanges_to_compare) != 2:
-            st.error("Error: Exactly 2 exchanges must be specified for comparison.")
-            return None
-            
-        # Validate exchanges
-        for exchange in exchanges_to_compare:
-            if exchange.lower() not in self.all_exchanges:
-                st.error(f"Error: Unknown exchange '{exchange}'. Valid options are: {', '.join(self.all_exchanges)}")
-                return None
-                
-        primary_exchange = exchanges_to_compare[0].lower()
-        secondary_exchange = exchanges_to_compare[1].lower()
+        # Always compare rollbit and surf
+        exchanges_to_compare = ['rollbit', 'surf']
+        primary_exchange = 'rollbit'
+        secondary_exchange = 'surf'
         
-        # Display time window information
-        if start_time and end_time:
-            start_dt = pd.to_datetime(start_time)
-            end_dt = pd.to_datetime(end_time)
-            duration = end_dt - start_dt
-            hours_diff = duration.total_seconds() / 3600
-            st.info(f"Time window: {hours_diff:.2f} hours ({start_time} to {end_time})")
-        else:
-            st.info(f"Time window: {hours} hours")
+        # Calculate times
+        end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        start_time = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
         
-        # Calculate start and end times if not provided
-        if not start_time:
-            start_time = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
-        if not end_time:
-            end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
+        st.info(f"Retrieving data from the last {hours} hours")
+        
         try:
             # Get relevant partition tables for this time range
             partition_tables = self._get_partition_tables(conn, start_time, end_time)
@@ -294,44 +243,14 @@ class ExchangeAnalyzer:
                 
                 # Process each exchange
                 for exchange in exchanges_to_compare:
-                    exchange = exchange.lower()
-                    
                     # Build appropriate query for this exchange
-                    if exchange == 'rollbit':
-                        query = self._build_query_for_partition_tables(
-                            partition_tables,
-                            source_type=1,
-                            pair_name=pair,
-                            start_time=start_time,
-                            end_time=end_time
-                        )
-                    elif exchange == 'uat':
-                        query = self._build_query_for_partition_tables(
-                            partition_tables,
-                            source_type=None,
-                            pair_name=pair,
-                            start_time=start_time,
-                            end_time=end_time,
-                            is_uat=True
-                        )
-                    elif exchange == 'prod':
-                        query = self._build_query_for_partition_tables(
-                            partition_tables,
-                            source_type=None,
-                            pair_name=pair,
-                            start_time=start_time,
-                            end_time=end_time,
-                            is_prod=True
-                        )
-                    elif exchange == 'sit':
-                        query = self._build_query_for_partition_tables(
-                            partition_tables,
-                            source_type=None,
-                            pair_name=pair,
-                            start_time=start_time,
-                            end_time=end_time,
-                            is_sit=True
-                        )
+                    query = self._build_query_for_partition_tables(
+                        partition_tables,
+                        pair_name=pair,
+                        start_time=start_time,
+                        end_time=end_time,
+                        exchange=exchange
+                    )
                     
                     # Fetch data
                     if query:
@@ -600,11 +519,15 @@ class ExchangeAnalyzer:
         
         return rankings
     
-    def create_parameter_comparison_table(self, primary_exchange, secondary_exchange):
+    def create_parameter_comparison_table(self):
         """
         Create a comprehensive table with all metrics for all pairs across all point counts.
         This is for tab 1 to display a huge table of parameters.
         """
+        # Always use rollbit as primary and surf as secondary
+        primary_exchange = 'rollbit'
+        secondary_exchange = 'surf'
+        
         # First, collect all coins that have data for any metric at any point count
         all_coins = set()
         for metric in self.metrics:
@@ -644,42 +567,26 @@ class ExchangeAnalyzer:
             return None
 
 
-# Setup form for parameters in the sidebar
+# Setup sidebar with simplified options
 with st.sidebar:
     st.header("Analysis Parameters")
     
     with st.form("exchange_comparison_form"):
-        # Exchange selection
-        primary_exchange = st.selectbox(
-            "Primary Exchange",
-            ["rollbit", "prod", "uat", "sit"],
-            index=0
-        )
-        
-        secondary_exchange = st.selectbox(
-            "Secondary Exchange",
-            ["prod", "rollbit", "uat", "sit"],
-            index=0
-        )
-        
-        # Time window selection
+        # Data retrieval window
         hours = st.number_input(
-        "Hours to Look Back (for data retrieval)",
-        min_value=1,
-        max_value=168,
-        value=24,
-        help="How many hours of historical data to retrieve. This ensures enough data for point-based analysis."
-)
-
-        start_time = None
-        end_time = None
-
+            "Hours to Look Back (for data retrieval)",
+            min_value=1,
+            max_value=168,
+            value=24,
+            help="How many hours of historical data to retrieve. This ensures enough data for point-based analysis."
+        )
+        
         st.info("Analysis will be performed on the most recent data points: 500, 2000, 5000, 10000, and 50000 points regardless of time span.")
         
         # Default list of pairs
         default_pairs = """PEPE/USDT
-            PAXG/USDT
-             DOGE/USDT
+PAXG/USDT
+DOGE/USDT
 BTC/USDT
 EOS/USDT
 BNB/USDT
@@ -735,8 +642,6 @@ ETH/USDT"""
 if submit_button:
     if not conn:
         st.error("Database connection not available.")
-    elif primary_exchange == secondary_exchange:
-        st.error("Please select two different exchanges to compare.")
     elif not pairs:
         st.error("Please enter at least one pair to analyze.")
     else:
@@ -744,16 +649,13 @@ if submit_button:
         analyzer = ExchangeAnalyzer()
         
         # Run analysis
-        st.header(f"Comparing {primary_exchange.upper()} vs {secondary_exchange.upper()}")
+        st.header("Comparing ROLLBIT vs SURF")
         
         with st.spinner("Fetching and analyzing data..."):
             results = analyzer.fetch_and_analyze(
                 conn=conn,
                 pairs_to_analyze=pairs,
-                exchanges_to_compare=[primary_exchange, secondary_exchange],
-                hours=hours,
-                start_time=start_time,
-                end_time=end_time
+                hours=hours
             )
         
         if results:
@@ -762,7 +664,7 @@ if submit_button:
                 st.header("Parameter Comparison Table")
                 st.write("This table shows all metrics for all pairs across different point counts.")
                 
-                comparison_table = analyzer.create_parameter_comparison_table(primary_exchange, secondary_exchange)
+                comparison_table = analyzer.create_parameter_comparison_table()
                 
                 if comparison_table is not None:
                     # Style the table
@@ -784,7 +686,7 @@ if submit_button:
                     st.download_button(
                         label="Download CSV",
                         data=csv,
-                        file_name=f"parameter_comparison_{primary_exchange}_vs_{secondary_exchange}.csv",
+                        file_name=f"parameter_comparison_rollbit_vs_surf.csv",
                         mime="text/csv"
                     )
                 else:
@@ -870,7 +772,7 @@ if submit_button:
                                 )
                                 
                                 fig.update_layout(
-                                    title=f"{secondary_exchange.upper()} Performance Relative to {primary_exchange.upper()} (100 = Equal)",
+                                    title=f"SURF Performance Relative to ROLLBIT (100 = Equal)",
                                     xaxis_title="Coin",
                                     yaxis_title="Relative Performance Score",
                                     barmode='group',
@@ -883,17 +785,17 @@ if submit_button:
                                 col1, col2 = st.columns(2)
                                 
                                 with col1:
-                                    # Individual rankings for primary exchange
-                                    st.subheader(f"{primary_exchange.upper()} Rankings")
+                                    # Individual rankings for Rollbit
+                                    st.subheader("ROLLBIT Rankings")
                                     
-                                    if point_count in results['individual_rankings'][primary_exchange]:
+                                    if point_count in results['individual_rankings']['rollbit']:
                                         # Create subtabs for each metric
                                         metric_tabs_primary = st.tabs([analyzer.metric_display_names[m] for m in analyzer.metrics 
-                                                              if m in results['individual_rankings'][primary_exchange][point_count]])
+                                                              if m in results['individual_rankings']['rollbit'][point_count]])
                                         
-                                        for j, metric in enumerate([m for m in analyzer.metrics if m in results['individual_rankings'][primary_exchange][point_count]]):
+                                        for j, metric in enumerate([m for m in analyzer.metrics if m in results['individual_rankings']['rollbit'][point_count]]):
                                             with metric_tabs_primary[j]:
-                                                metric_df = results['individual_rankings'][primary_exchange][point_count][metric]
+                                                metric_df = results['individual_rankings']['rollbit'][point_count][metric]
                                                 if not metric_df.empty:
                                                     st.dataframe(metric_df, height=300, use_container_width=True)
                                                     
@@ -909,20 +811,20 @@ if submit_button:
                                                     )
                                                     st.plotly_chart(fig, use_container_width=True)
                                     else:
-                                        st.warning(f"No ranking data available for {primary_exchange.upper()} at {point_count} points")
+                                        st.warning(f"No ranking data available for ROLLBIT at {point_count} points")
                                 
                                 with col2:
-                                    # Individual rankings for secondary exchange
-                                    st.subheader(f"{secondary_exchange.upper()} Rankings")
+                                    # Individual rankings for Surf
+                                    st.subheader("SURF Rankings")
                                     
-                                    if point_count in results['individual_rankings'][secondary_exchange]:
+                                    if point_count in results['individual_rankings']['surf']:
                                         # Create subtabs for each metric
                                         metric_tabs_secondary = st.tabs([analyzer.metric_display_names[m] for m in analyzer.metrics 
-                                                              if m in results['individual_rankings'][secondary_exchange][point_count]])
+                                                              if m in results['individual_rankings']['surf'][point_count]])
                                         
-                                        for j, metric in enumerate([m for m in analyzer.metrics if m in results['individual_rankings'][secondary_exchange][point_count]]):
+                                        for j, metric in enumerate([m for m in analyzer.metrics if m in results['individual_rankings']['surf'][point_count]]):
                                             with metric_tabs_secondary[j]:
-                                                metric_df = results['individual_rankings'][secondary_exchange][point_count][metric]
+                                                metric_df = results['individual_rankings']['surf'][point_count][metric]
                                                 if not metric_df.empty:
                                                     st.dataframe(metric_df, height=300, use_container_width=True)
                                                     
@@ -938,7 +840,7 @@ if submit_button:
                                                     )
                                                     st.plotly_chart(fig, use_container_width=True)
                                     else:
-                                        st.warning(f"No ranking data available for {secondary_exchange.upper()} at {point_count} points")
+                                        st.warning(f"No ranking data available for SURF at {point_count} points")
                             else:
                                 st.warning(f"No data available for {point_count} points")
                 else:
@@ -950,14 +852,14 @@ if submit_button:
 st.sidebar.markdown("---")
 st.sidebar.subheader("About This Dashboard")
 st.sidebar.markdown("""
-This dashboard analyzes cryptocurrency prices across different exchanges and calculates various metrics:
+This dashboard analyzes cryptocurrency prices between Rollbit and Surf exchanges and calculates various metrics:
 
 - **Direction Changes (%)**: Frequency of price reversals
 - **Choppiness**: Measures price oscillation within a range
 - **Tick ATR %**: Average True Range as percentage of mean price
 - **Trend Strength**: Measures directional price strength
 
-The dashboard compares these metrics between the selected exchanges and provides rankings and visualizations.
+The dashboard compares these metrics and provides rankings and visualizations for various point counts (500, 2000, 5000, 10000, and 50000).
 """)
 
 # Add footer
