@@ -33,6 +33,10 @@ if 'last_selected_pairs' not in st.session_state:
     st.session_state.last_selected_pairs = []
 if 'last_hours' not in st.session_state:
     st.session_state.last_hours = 0
+if 'selected_historical_exchange' not in st.session_state:
+    st.session_state.selected_historical_exchange = None
+if 'selected_historical_pair' not in st.session_state:
+    st.session_state.selected_historical_pair = None
 
 # Configure database
 def init_db_connection():
@@ -182,13 +186,13 @@ class MeanReversionAnalyzer:
                 query = f"""
                 SELECT 
                     pair_name,
-                    created_at + INTERVAL '8 hour' AS timestamp,
+                    created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp,
                     final_price AS price
                 FROM 
                     public.{table}
                 WHERE 
-                    created_at >= '{start_time}'::timestamp - INTERVAL '8 hour'
-                    AND created_at <= '{end_time}'::timestamp - INTERVAL '8 hour'
+                    created_at >= '{start_time}'::timestamp
+                    AND created_at <= '{end_time}'::timestamp
                     AND source_type = 0
                     AND pair_name = '{pair_name}'
                 """
@@ -197,13 +201,13 @@ class MeanReversionAnalyzer:
                 query = f"""
                 SELECT 
                     pair_name,
-                    created_at + INTERVAL '8 hour' AS timestamp,
+                    created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp,
                     final_price AS price
                 FROM 
                     public.{table}
                 WHERE 
-                    created_at >= '{start_time}'::timestamp - INTERVAL '8 hour'
-                    AND created_at <= '{end_time}'::timestamp - INTERVAL '8 hour'
+                    created_at >= '{start_time}'::timestamp
+                    AND created_at <= '{end_time}'::timestamp
                     AND source_type = 1
                     AND pair_name = '{pair_name}'
                 """
@@ -485,7 +489,8 @@ class MeanReversionAnalyzer:
             
             # Process each pair for both exchanges
             for i, pair in enumerate(pairs_to_analyze):
-                progress_bar.progress((i) / len(pairs_to_analyze))
+                progress_percentage = (i) / len(pairs_to_analyze)
+                progress_bar.progress(progress_percentage)
                 status_text.text(f"Analyzing {pair} ({i+1}/{len(pairs_to_analyze)})")
                 
                 # Process each exchange
@@ -512,7 +517,7 @@ class MeanReversionAnalyzer:
                                 # Process historical data for time series
                                 self.process_historical_data(df, pair, exchange)
                             else:
-                                st.warning(f"No data found for {exchange.upper()}_{pair}")
+                                print(f"No data found for {exchange.upper()}_{pair}")
                         except Exception as e:
                             st.error(f"Database query error for {exchange.upper()}_{pair}: {e}")
             
@@ -793,23 +798,14 @@ if st.session_state.data_processed and st.session_state.analysis_results:
         else:
             st.warning("No mean reversion data available.")
     
-    # Tab 2: Historical Trends - completely rewritten for performance
+    # Tab 2: Historical Trends - completely rewritten for better user experience
     with tab2:
         st.header("Historical Mean Reversion Trends")
         
         # Get the unique pairs from the results
-        unique_pairs = list(set([r['pair'] for r in results]))
-        unique_pairs.sort()
+        unique_pairs = sorted(list(set([r['pair'] for r in results])))
         
         if unique_pairs:
-            # Select a pair for detailed analysis
-            pair_selectbox_key = "pair_select_" + str(int(datetime.now().timestamp()))
-            selected_pair = st.selectbox(
-                "Select Pair for Historical Analysis", 
-                unique_pairs,
-                key=pair_selectbox_key
-            )
-            
             # Create a dictionary to track which exchanges have data for each pair
             pair_exchanges = {}
             for r in results:
@@ -818,36 +814,41 @@ if st.session_state.data_processed and st.session_state.analysis_results:
                 if r['exchange'] not in pair_exchanges[r['pair']]:
                     pair_exchanges[r['pair']].append(r['exchange'])
             
-            # Get exchanges with data for the selected pair - sort for consistent order
+            # Use or update selected_historical_pair in session state
+            if st.session_state.selected_historical_pair not in unique_pairs:
+                st.session_state.selected_historical_pair = unique_pairs[0]
+                
+            # Select a pair for detailed analysis
+            selected_pair = st.selectbox(
+                "Select Pair for Historical Analysis", 
+                unique_pairs,
+                index=unique_pairs.index(st.session_state.selected_historical_pair),
+                key="pair_selector"
+            )
+            
+            # Update session state
+            st.session_state.selected_historical_pair = selected_pair
+            
+            # Get exchanges with data for the selected pair
             if selected_pair in pair_exchanges:
                 exchanges_with_data = sorted(pair_exchanges[selected_pair])
                 
                 if exchanges_with_data:
-                    # Use a unique key for the radio button to force it to update
-                    radio_key = "exchange_radio_" + str(int(datetime.now().timestamp()))
+                    # Initialize selected exchange if needed
+                    if st.session_state.selected_historical_exchange not in exchanges_with_data:
+                        st.session_state.selected_historical_exchange = exchanges_with_data[0]
+                    
+                    # Select exchange with persistent state
                     selected_exchange = st.radio(
                         "Select Exchange", 
                         exchanges_with_data,
+                        index=exchanges_with_data.index(st.session_state.selected_historical_exchange),
                         horizontal=True,
-                        key=radio_key
+                        key="exchange_selector"
                     )
                     
-                    # Add debug information
-                    with st.expander("Debug Information"):
-                        st.write(f"Selected pair: {selected_pair}")
-                        st.write(f"Selected exchange: {selected_exchange}")
-                        
-                        # Check if we have time series data
-                        if selected_pair in analyzer.time_series_data:
-                            st.write(f"Exchanges with time series data for {selected_pair}: {list(analyzer.time_series_data[selected_pair].keys())}")
-                            
-                            if selected_exchange in analyzer.time_series_data[selected_pair]:
-                                data_points = len(analyzer.time_series_data[selected_pair][selected_exchange])
-                                st.write(f"Number of time series data points for {selected_exchange}: {data_points}")
-                            else:
-                                st.write(f"No time series data for {selected_exchange}")
-                        else:
-                            st.write(f"No time series data for {selected_pair}")
+                    # Update session state
+                    st.session_state.selected_historical_exchange = selected_exchange
                     
                     # Safely check if we have time series data for this pair/exchange
                     has_data = (
@@ -861,7 +862,10 @@ if st.session_state.data_processed and st.session_state.analysis_results:
                         ts_data = analyzer.time_series_data[selected_pair][selected_exchange]
                         ts_df = pd.DataFrame(ts_data)
                         
-                        # Display charts - without using create_time_series_chart method
+                        # Sort by timestamp
+                        ts_df = ts_df.sort_values('timestamp')
+                        
+                        # Display charts
                         st.subheader(f"30-Minute Interval Metrics for {selected_pair} on {selected_exchange.upper()}")
                         
                         # Define metrics to plot with their display names
@@ -875,9 +879,6 @@ if st.session_state.data_processed and st.session_state.analysis_results:
                         # Create and display each chart
                         for metric, title in metrics_to_plot:
                             if metric in ts_df.columns:
-                                # Make sure timestamps are sorted
-                                ts_df = ts_df.sort_values('timestamp')
-                                
                                 # Create basic line chart
                                 fig = px.line(
                                     ts_df, 
@@ -957,9 +958,15 @@ if st.session_state.data_processed and st.session_state.analysis_results:
                                         except Exception as e:
                                             st.warning(f"Could not calculate trend line: {e}")
                                 
+                                # Ensure timestamps display correctly
+                                fig.update_xaxes(
+                                    title_text="Singapore Time",
+                                    tickformat="%H:%M\n%b %d"  # Format: Hours:Minutes and date below
+                                )
+                                
                                 # Update layout
                                 fig.update_layout(
-                                    xaxis_title="Time",
+                                    xaxis_title="Time (Singapore)",
                                     yaxis_title=title,
                                     height=400
                                 )
