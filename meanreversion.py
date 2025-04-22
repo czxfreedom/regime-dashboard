@@ -1279,10 +1279,14 @@ if st.session_state.data_processed and st.session_state.analysis_results:
                         # Ensure timestamps are datetime objects
                         metrics_df['timestamp'] = pd.to_datetime(metrics_df['timestamp'])
                         pnl_data['timestamp'] = pd.to_datetime(pnl_data['timestamp'])
-                        
-                        # Sort by timestamp
+                        # Remove timezone info if present (make both naive)
+                        metrics_df['timestamp'] = metrics_df['timestamp'].dt.tz_localize(None)
+                        pnl_data['timestamp'] = pnl_data['timestamp'].dt.tz_localize(None)
+
+                        # Sort both dataframes by timestamp
                         metrics_df = metrics_df.sort_values('timestamp')
                         
+                                                
                         # Reset PNL to start from 0 at the beginning of the timeframe
                         pnl_data = pnl_data.sort_values('timestamp')
                         initial_pnl = pnl_data['platform_total_pnl'].iloc[0]
