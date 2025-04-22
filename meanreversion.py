@@ -540,58 +540,6 @@ class MeanReversionAnalyzer:
         
         return df
 
-    def create_time_series_chart(self, pair, exchange, metric):
-        """Create a time series chart for a specific pair, exchange, and metric."""
-        if pair not in self.time_series_data or exchange not in self.time_series_data[pair]:
-            return None
-            
-        # Get time series data
-        ts_data = self.time_series_data[pair][exchange]
-        
-        # Convert to DataFrame
-        df = pd.DataFrame(ts_data)
-        
-        # Create time series plot
-        fig = px.line(
-            df, 
-            x='timestamp', 
-            y=metric,
-            title=f"{self.metric_display_names[metric]} for {pair} ({exchange.upper()})"
-        )
-        
-        # Add reference lines for Hurst exponent
-        if metric == 'hurst_exponent':
-            fig.add_shape(
-                type="line",
-                x0=df['timestamp'].min(),
-                y0=0.5,
-                x1=df['timestamp'].max(),
-                y1=0.5,
-                line=dict(
-                    color="red",
-                    width=1,
-                    dash="dash",
-                )
-            )
-            
-            # Add annotation for Hurst reference
-            fig.add_annotation(
-                x=df['timestamp'].max(),
-                y=0.5,
-                text="Random Walk (H=0.5)",
-                showarrow=False,
-                yshift=10
-            )
-        
-        fig.update_layout(
-            xaxis_title="Time",
-            yaxis_title=self.metric_display_names[metric],
-            height=400
-        )
-        
-        return fig
-
-
 # Setup sidebar with simplified options
 with st.sidebar:
     st.header("Analysis Parameters")
@@ -679,6 +627,9 @@ if submit_button:
         # Initialize analyzer
         analyzer = MeanReversionAnalyzer()
         
+        # Store analyzer in session state to keep it across reruns
+        st.session_state.analyzer = analyzer
+        
         # Run analysis
         with st.spinner("Fetching and analyzing data..."):
             results = analyzer.fetch_and_analyze(
@@ -686,6 +637,9 @@ if submit_button:
                 pairs_to_analyze=pairs,
                 hours=hours
             )
+            # Store results in session state
+            if results:
+                st.session_state.analysis_results = results
         
         if results:
             # Tab 1: Current Status
@@ -810,70 +764,135 @@ if submit_button:
             # Tab 2: Historical Trends
             with tab2:
                 st.header("Historical Mean Reversion Trends")
-                if 'historical_data_processed' not in st.session_state:
-                    st.session_state.historical_data_processed = False
+                
                 # Select a pair for detailed analysis
                 if results:
                     unique_pairs = sorted(list(set([r['pair'] for r in results])))
                     selected_pair = st.selectbox("Select Pair for Historical Analysis", unique_pairs)
                     
-                    # Select exchange
-                    exchanges_with_data = [r['exchange'] for r in results if r['pair'] == selected_pair]
+                    # Select exchange - this is the key part that needs fixing
+                    exchanges_with_data = sorted(list(set([r['exchange'] for r in results if r['pair'] == selected_pair])))
+                    
                     if exchanges_with_data:
                         selected_exchange = st.radio(
                             "Select Exchange", 
                             exchanges_with_data,
                             horizontal=True
                         )
-                        # Mark the data as processed to avoid reloading
-                        st.session_state.historical_data_processed = True
                         
-                        # Create time series charts
-                        st.subheader(f"30-Minute Interval Metrics for {selected_pair} on {selected_exchange.upper()}")
+                        # Check if we actually have time series data for this pair/exchange
+                        has_data = (selected_pair in analyzer.time_series_data and 
+                                  selected_exchange in analyzer.time_series_data[selected_pair] and 
+                                  analyzer.time_series_data[selected_pair][selected_exchange])
                         
-                        # DC/Range Ratio chart
-                        dc_range_fig = analyzer.create_time_series_chart(
-                            selected_pair,
-                            selected_exchange,
-                            'dc_range_ratio'
-                        )
-                        if dc_range_fig:
-                            st.plotly_chart(dc_range_fig, use_container_width=True)
-                        else:
-                            st.warning(f"No historical DC/Range Ratio data for {selected_pair} on {selected_exchange}")
-                        
-                        # Hurst Exponent chart
-                        hurst_fig = analyzer.create_time_series_chart(
-                            selected_pair,
-                            selected_exchange,
-                            'hurst_exponent'
-                        )
-                        if hurst_fig:
-                            st.plotly_chart(hurst_fig, use_container_width=True)
-                        else:
-                            st.warning(f"No historical Hurst Exponent data for {selected_pair} on {selected_exchange}")
-                        
-                        # Direction Changes chart
-                        dir_changes_fig = analyzer.create_time_series_chart(
-                            selected_pair,
-                            selected_exchange,
-                            'direction_changes_30min'
-                        )
-                        if dir_changes_fig:
-                            st.plotly_chart(dir_changes_fig, use_container_width=True)
-                        else:
-                            st.warning(f"No historical Direction Changes data for {selected_pair} on {selected_exchange}")
+                        if has_data:
+                            # Create time series charts directly from the data
+                            st.subheader(f"30-Minute Interval Metrics for {selected_pair} on {selected_exchange.upper()}")
                             
-                        # Range Percentage chart
-                        range_fig = analyzer.create_time_series_chart(
-                            selected_pair,
-                            selected_exchange,
-                            'absolute_range_pct'
-                        )
-                        if range_fig:
-                            st.plotly_chart(range_fig, use_container_width=True)
+                            # Get time series data
+                            ts_data = analyzer.time_series_data[selected_pair][selected_exchange]
+                            ts_df = pd.DataFrame(ts_data)
+                            
+                            # Create time series charts
+                            metrics_to_plot = [
+                                ('dc_range_ratio', 'Dir Changes/Range Ratio'),
+                                ('hurst_exponent', 'Hurst Exponent'),
+                                ('direction_changes_30min', 'Direction Changes (30min)'),
+                                ('absolute_range_pct', 'Range %')
+                            ]
+                            
+                            for metric, title in metrics_to_plot:
+                                if metric in ts_df.columns:
+                                    fig = px.line(
+                                        ts_df, 
+                                        x='timestamp', 
+                                        y=metric,
+                                        title=f"{title} for {selected_pair} ({selected_exchange.upper()})"
+                                    )
+                                    
+                                    # Add reference line for Hurst
+                                    if metric == 'hurst_exponent':
+                                        fig.add_shape(
+                                            type="line",
+                                            x0=ts_df['timestamp'].min(),
+                                            y0=0.5,
+                                            x1=ts_df['timestamp'].max(),
+                                            y1=0.5,
+                                            line=dict(
+                                                color="red",
+                                                width=1,
+                                                dash="dash",
+                                            )
+                                        )
+                                        
+                                        # Calculate and add trend line for Hurst
+                                        if len(ts_df) > 1:
+                                            try:
+                                                # Calculate trend line
+                                                x_numeric = np.arange(len(ts_df))
+                                                y = ts_df[metric].values
+                                                slope, intercept, _, _, _ = stats.linregress(x_numeric, y)
+                                                trend_y = intercept + slope * x_numeric
+                                                
+                                                # Add trend line to figure
+                                                fig.add_trace(go.Scatter(
+                                                    x=ts_df['timestamp'],
+                                                    y=trend_y,
+                                                    mode='lines',
+                                                    line=dict(color='blue', width=1, dash='solid'),
+                                                    name='Trend'
+                                                ))
+                                            except Exception as e:
+                                                st.error(f"Error creating trend line: {e}")
+                                        
+                                        # Add annotation for Hurst reference
+                                        fig.add_annotation(
+                                            x=ts_df['timestamp'].max(),
+                                            y=0.5,
+                                            text="Random Walk (H=0.5)",
+                                            showarrow=False,
+                                            yshift=10
+                                        )
+                                    
+                                    # Add mean line to all charts
+                                    if len(ts_df) > 0:
+                                        mean_value = ts_df[metric].mean()
+                                        fig.add_shape(
+                                            type="line",
+                                            x0=ts_df['timestamp'].min(),
+                                            y0=mean_value,
+                                            x1=ts_df['timestamp'].max(),
+                                            y1=mean_value,
+                                            line=dict(
+                                                color="green",
+                                                width=1,
+                                                dash="dot",
+                                            )
+                                        )
+                                        
+                                        # Add annotation for mean line
+                                        fig.add_annotation(
+                                            x=ts_df['timestamp'].min(),
+                                            y=mean_value,
+                                            text=f"Mean: {mean_value:.2f}",
+                                            showarrow=False,
+                                            yshift=10,
+                                            xshift=50
+                                        )
+                                    
+                                    # Update layout
+                                    fig.update_layout(
+                                        xaxis_title="Time",
+                                        yaxis_title=title,
+                                        height=400
+                                    )
+                                    
+                                    # Display the chart
+                                    st.plotly_chart(fig, use_container_width=True)
+                                else:
+                                    st.warning(f"No {title} data available for {selected_pair} on {selected_exchange}")
                         else:
-                            st.warning(f"No historical Range % data for {selected_pair} on {selected_exchange}")
+                            st.warning(f"No historical data available for {selected_pair} on {selected_exchange}. Try analyzing with more hours of data.")
                     else:
                         st.warning(f"No exchanges with data for {selected_pair}")
                 else:
@@ -906,6 +925,18 @@ Mean reversion trading strategies are based on the theory that prices and return
 - Frequent oscillation within a price band
 
 These patterns can suggest potential trading opportunities for strategies that exploit price movements back toward the average.
+""")
+
+# Add explanation of the mean reversion score
+st.sidebar.subheader("Mean Reversion Score")
+st.sidebar.markdown("""
+The mean reversion score is calculated as:
+
+**Score = (1 - Hurst) × 50 + log(1 + DC/Range) × 25**
+
+- The Hurst component contributes up to 50 points (lower Hurst = higher score)
+- The DC/Range ratio is log-transformed to handle extreme values
+- Higher scores indicate stronger mean-reverting tendencies
 """)
 
 # Add footer
