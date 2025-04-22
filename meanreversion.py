@@ -8,6 +8,7 @@ import psycopg2
 import warnings
 import pytz
 from scipy import stats
+import statsmodels.api as sm  # Add this import
 import math
 
 # Suppress warnings
@@ -37,6 +38,8 @@ if 'selected_historical_exchange' not in st.session_state:
     st.session_state.selected_historical_exchange = None
 if 'selected_historical_pair' not in st.session_state:
     st.session_state.selected_historical_pair = None
+if 'pnl_data_cache' not in st.session_state:
+    st.session_state.pnl_data_cache = {}
 
 # Configure database
 def init_db_connection():
@@ -78,7 +81,7 @@ st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 st.write(f"UTC Time: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}")
 
 # Create tabs
-tab1, tab2 = st.tabs(["Current Status", "Historical Trends"])
+tab1, tab2, tab3 = st.tabs(["Current Status", "Historical Trends", "PNL Correlation"])
 
 class MeanReversionAnalyzer:
     """Analyzer for mean reversion behaviors in cryptocurrency prices"""
@@ -579,6 +582,151 @@ class MeanReversionAnalyzer:
         
         return df
 
+# Function to fetch PNL data for a specific pair
+def fetch_platform_pnl_for_pair(pair_name, hours=24):
+    """Fetch platform PNL data for a specific pair over the past hours"""
+    # Check if already cached
+    cache_key = f"{pair_name}_{hours}"
+    if cache_key in st.session_state.pnl_data_cache:
+        return st.session_state.pnl_data_cache[cache_key]
+    
+    # Set up time range
+    now_utc = datetime.now(pytz.utc)
+    now_sg = now_utc.astimezone(singapore_timezone)
+    start_time_sg = now_sg - timedelta(hours=hours)
+    
+    # Convert to UTC for database query
+    start_time_utc = start_time_sg.astimezone(pytz.utc)
+    end_time_utc = now_sg.astimezone(pytz.utc)
+
+    # Query for platform PNL data at 30-minute intervals
+    query = f"""
+    WITH time_intervals AS (
+      -- Generate 30-minute intervals for the past hours
+      SELECT
+        generate_series(
+          date_trunc('hour', '{start_time_utc}'::timestamp) + 
+          INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 30),
+          '{end_time_utc}'::timestamp,
+          INTERVAL '30 minutes'
+        ) AS "UTC+8"
+    ),
+    
+    order_pnl AS (
+      -- Calculate platform order PNL
+      SELECT
+        date_trunc('hour', "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
+        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 30) AS "timestamp",
+        COALESCE(SUM(-1 * "taker_pnl" * "collateral_price"), 0) AS "platform_order_pnl"
+      FROM
+        "public"."trade_fill_fresh"
+      WHERE
+        "created_at" BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+        AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
+        AND "taker_way" IN (0, 1, 2, 3, 4)
+      GROUP BY
+        date_trunc('hour', "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
+        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 30)
+    ),
+    
+    fee_data AS (
+      -- Calculate user fee payments
+      SELECT
+        date_trunc('hour', "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
+        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 30) AS "timestamp",
+        COALESCE(SUM("taker_fee" * "collateral_price"), 0) AS "user_fee_payments"
+      FROM
+        "public"."trade_fill_fresh"
+      WHERE
+        "created_at" BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+        AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
+        AND "taker_fee_mode" = 1
+        AND "taker_way" IN (1, 3)
+      GROUP BY
+        date_trunc('hour', "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
+        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 30)
+    ),
+    
+    funding_pnl AS (
+      -- Calculate platform funding fee PNL
+      SELECT
+        date_trunc('hour', "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
+        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 30) AS "timestamp",
+        COALESCE(SUM(-1 * "funding_fee" * "collateral_price"), 0) AS "platform_funding_pnl"
+      FROM
+        "public"."trade_fill_fresh"
+      WHERE
+        "created_at" BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+        AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
+        AND "taker_way" = 0
+      GROUP BY
+        date_trunc('hour', "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
+        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 30)
+    ),
+    
+    rebate_data AS (
+      -- Calculate platform rebate payments
+      SELECT
+        date_trunc('hour', "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
+        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 30) AS "timestamp",
+        COALESCE(SUM(-1 * "amount" * "coin_price"), 0) AS "platform_rebate_payments"
+      FROM
+        "public"."user_cashbooks"
+      WHERE
+        "created_at" BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+        AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
+        AND "remark" = '给邀请人返佣'
+      GROUP BY
+        date_trunc('hour', "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
+        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 30)
+    )
+    
+    -- Final query: combine all data sources
+    SELECT
+      t."UTC+8" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS "timestamp",
+      COALESCE(o."platform_order_pnl", 0) +
+      COALESCE(f."user_fee_payments", 0) +
+      COALESCE(ff."platform_funding_pnl", 0) +
+      COALESCE(r."platform_rebate_payments", 0) AS "platform_total_pnl"
+    FROM
+      time_intervals t
+    LEFT JOIN
+      order_pnl o ON t."UTC+8" = o."timestamp" AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
+    LEFT JOIN
+      fee_data f ON t."UTC+8" = f."timestamp" AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
+    LEFT JOIN
+      funding_pnl ff ON t."UTC+8" = ff."timestamp" AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
+    LEFT JOIN
+      rebate_data r ON t."UTC+8" = r."timestamp" AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
+    ORDER BY
+      t."UTC+8" ASC
+    """
+    
+    try:
+        # Execute query
+        df = pd.read_sql_query(query, conn)
+        
+        if df.empty:
+            st.warning(f"No PNL data found for {pair_name}")
+            return None
+        
+        # Convert timestamp to pandas datetime
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        
+        # Create cumulative PNL column starting from 0
+        df = df.sort_values('timestamp')
+        df['cumulative_pnl'] = df['platform_total_pnl'].cumsum()
+        
+        # Cache the result
+        st.session_state.pnl_data_cache[cache_key] = df
+        
+        return df
+    except Exception as e:
+        st.error(f"Error fetching PNL data for {pair_name}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
 
 # Setup sidebar with simplified options
 with st.sidebar:
@@ -689,6 +837,9 @@ if should_run_analysis:
             st.session_state.data_processed = True
             st.session_state.last_selected_pairs = pairs.copy()
             st.session_state.last_hours = hours
+            
+            # Clear PNL data cache when new analysis is run
+            st.session_state.pnl_data_cache = {}
         else:
             st.error("No results returned from analysis.")
             st.session_state.data_processed = False
@@ -738,7 +889,7 @@ if st.session_state.data_processed and st.session_state.analysis_results:
             
             # Define columns to display
             display_cols = ['pair', 'exchange', 'direction_changes_30min', 'absolute_range_pct', 
-                            'dc_range_ratio', 'hurst_exponent', 'mean_reversion_score']
+                           'dc_range_ratio', 'hurst_exponent', 'mean_reversion_score']
             
             # Display the table with styling
             st.dataframe(
@@ -1016,7 +1167,7 @@ if st.session_state.data_processed and st.session_state.analysis_results:
                                                     fig.add_trace(go.Scatter(
                                                         x=metric_df['timestamp'],
                                                         y=trend_y,
-                                                        mode='lines',
+                                                        mode='lines+markers',
                                                         line=dict(color='blue', width=1, dash='solid'),
                                                         name='Trend'
                                                     ))
@@ -1051,6 +1202,568 @@ if st.session_state.data_processed and st.session_state.analysis_results:
                 st.warning(f"No exchange data available for {selected_pair}")
         else:
             st.warning("No pairs available for historical analysis")
+    
+    # Tab 3: PNL Correlation Analysis
+    with tab3:
+        st.header("PNL Correlation Analysis")
+        st.subheader("Understanding How Mean Reversion Metrics Impact Platform PNL")
+        
+        # Get the unique pairs from the results
+        unique_pairs = sorted(pairs)
+        
+        if unique_pairs:
+            # Create a dictionary to track which exchanges have data for each pair
+            pair_exchanges = {}
+            for r in results:
+                if r['pair'] not in pair_exchanges:
+                    pair_exchanges[r['pair']] = []
+                if r['exchange'] not in pair_exchanges[r['pair']]:
+                    pair_exchanges[r['pair']].append(r['exchange'])
+            
+            # Use or update selected pair in session state for PNL analysis
+            if 'selected_pnl_pair' not in st.session_state:
+                st.session_state.selected_pnl_pair = unique_pairs[0]
+            elif st.session_state.selected_pnl_pair not in unique_pairs:
+                st.session_state.selected_pnl_pair = unique_pairs[0]
+            
+            # Select a pair for detailed PNL analysis
+            selected_pair = st.selectbox(
+                "Select Pair for PNL Correlation Analysis", 
+                unique_pairs,
+                index=unique_pairs.index(st.session_state.selected_pnl_pair),
+                key="pnl_pair_selector"
+            )
+            
+            # Update session state
+            st.session_state.selected_pnl_pair = selected_pair
+            
+            # Get exchanges with data for the selected pair
+            if selected_pair in pair_exchanges:
+                exchanges_with_data = sorted(pair_exchanges[selected_pair])
+                
+                if exchanges_with_data:
+                    # Use or update selected exchange in session state for PNL analysis
+                    if 'selected_pnl_exchange' not in st.session_state:
+                        st.session_state.selected_pnl_exchange = exchanges_with_data[0]
+                    elif st.session_state.selected_pnl_exchange not in exchanges_with_data:
+                        st.session_state.selected_pnl_exchange = exchanges_with_data[0]
+                    
+                    # Select exchange with persistent state
+                    selected_exchange = st.radio(
+                        "Select Exchange", 
+                        exchanges_with_data,
+                        index=exchanges_with_data.index(st.session_state.selected_pnl_exchange),
+                        horizontal=True,
+                        key="pnl_exchange_selector"
+                    )
+                    
+                    # Update session state
+                    st.session_state.selected_pnl_exchange = selected_exchange
+                    
+                    # Fetch PNL data for this pair
+                    with st.spinner(f"Fetching PNL data for {selected_pair}..."):
+                        pnl_data = fetch_platform_pnl_for_pair(selected_pair, hours=hours)
+                    
+                    # Check if we have time series data for mean reversion metrics
+                    has_metrics_data = (
+                        selected_pair in analyzer.time_series_data and 
+                        selected_exchange in analyzer.time_series_data[selected_pair] and 
+                        len(analyzer.time_series_data[selected_pair][selected_exchange]) > 0
+                    )
+                    
+                    if has_metrics_data and pnl_data is not None and not pnl_data.empty:
+                        # Get time series data for mean reversion metrics
+                        metrics_data = analyzer.time_series_data[selected_pair][selected_exchange]
+                        metrics_df = pd.DataFrame(metrics_data)
+                        
+                        # Ensure timestamps are datetime objects
+                        metrics_df['timestamp'] = pd.to_datetime(metrics_df['timestamp'])
+                        
+                        # Sort by timestamp
+                        metrics_df = metrics_df.sort_values('timestamp')
+                        
+                        # Reset PNL to start from 0 at the beginning of the timeframe
+                        pnl_data = pnl_data.sort_values('timestamp')
+                        initial_pnl = pnl_data['platform_total_pnl'].iloc[0]
+                        pnl_data['cumulative_pnl'] = pnl_data['platform_total_pnl'].cumsum() - initial_pnl
+                        
+                        # Merge PNL data with metrics data based on closest timestamp
+                        # First, create a column to join on by rounding timestamp to nearest 30 min
+                        metrics_df['rounded_timestamp'] = metrics_df['timestamp'].dt.floor('30min')
+                        pnl_data['rounded_timestamp'] = pnl_data['timestamp'].dt.floor('30min')
+                        
+                        # Merge the dataframes
+                        merged_df = pd.merge_asof(
+                            pnl_data.sort_values('timestamp'),
+                            metrics_df.sort_values('timestamp'),
+                            left_on='timestamp',
+                            right_on='timestamp',
+                            direction='nearest',
+                            tolerance=pd.Timedelta('15 minutes')
+                        )
+                        
+                        # Filter out rows with missing data
+                        merged_df = merged_df.dropna(subset=['direction_changes_30min', 'absolute_range_pct', 'dc_range_ratio', 'hurst_exponent'])
+                        
+                        if merged_df.empty:
+                            st.warning("Unable to align mean reversion metrics with PNL data. Time ranges may not overlap.")
+                        else:
+                            # Calculate correlations
+                            correlation_metrics = [
+                                'direction_changes_30min', 
+                                'absolute_range_pct', 
+                                'dc_range_ratio', 
+                                'hurst_exponent'
+                            ]
+                            
+                            correlation_results = {}
+                            for metric in correlation_metrics:
+                                correlation = merged_df['cumulative_pnl'].corr(merged_df[metric])
+                                correlation_results[metric] = correlation
+                            
+                            # Show correlation summary
+                            st.subheader("Correlation Between Mean Reversion Metrics and PNL")
+                            
+                            # Create a correlation table
+                            corr_df = pd.DataFrame({
+                                'Metric': [analyzer.metric_display_names[m] for m in correlation_metrics],
+                                'Correlation with PNL': [correlation_results[m] for m in correlation_metrics]
+                            })
+                            
+                            # Style the correlation table
+                            def style_correlation(val):
+                                if abs(val) > 0.7:
+                                    return 'background-color: #60b33c; color: white; font-weight: bold'  # Strong correlation
+                                elif abs(val) > 0.4:
+                                    return 'background-color: #a0d995; color: black'  # Moderate correlation
+                                elif abs(val) > 0.2:
+                                    return 'background-color: #f1f1aa; color: black'  # Weak correlation
+                                else:
+                                    return 'background-color: #ffc299; color: black'  # No significant correlation
+                            
+                            # Display styled correlation table
+                            st.dataframe(
+                                corr_df.style.format({
+                                    'Correlation with PNL': '{:.3f}'
+                                }).applymap(style_correlation, subset=['Correlation with PNL']),
+                                height=200,
+                                use_container_width=True
+                            )
+                            
+                            # Interpretation of correlation
+                            st.markdown("### Interpretation")
+                            st.markdown("""
+                            - **Positive correlation (> 0)**: As the metric increases, PNL tends to increase
+                            - **Negative correlation (< 0)**: As the metric increases, PNL tends to decrease
+                            - **Strong correlation (> 0.7 or < -0.7)**: Very strong relationship
+                            - **Moderate correlation (0.4 to 0.7 or -0.4 to -0.7)**: Noticeable relationship
+                            - **Weak correlation (0.2 to 0.4 or -0.2 to -0.4)**: Slight relationship
+                            - **No correlation (-0.2 to 0.2)**: No significant relationship
+                            """)
+                            
+                            # Create visualization of PNL vs. metrics over time
+                            st.subheader("PNL vs. Mean Reversion Metrics Over Time")
+                            
+                            # Define metrics to plot with their display names
+                            metrics_to_plot = [
+                                ('dc_range_ratio', 'Dir Changes/Range Ratio'),
+                                ('hurst_exponent', 'Hurst Exponent'),('direction_changes_30min', 'Direction Changes (30min)'),('absolute_range_pct', 'Range %')
+                            ]
+                            # Plot each metric against cumulative PNL
+                            for metric, title in metrics_to_plot:
+                                # Create figure with secondary y-axis
+                                fig = go.Figure()
+                                
+                                # Add PNL line
+                                fig.add_trace(go.Scatter(
+                                    x=merged_df['timestamp'],
+                                    y=merged_df['cumulative_pnl'],
+                                    name='Cumulative PNL (USD)',
+                                    line=dict(color='green', width=3)
+                                ))
+                                
+                                # Add metric line on secondary axis
+                                fig.add_trace(go.Scatter(
+                                    x=merged_df['timestamp'],
+                                    y=merged_df[metric],
+                                    name=title,
+                                    line=dict(color='blue', width=2),
+                                    yaxis='y2'
+                                ))
+                                
+                                # Update layout with two y-axes
+                                fig.update_layout(
+                                    title=f"Cumulative PNL vs. {title} Over Time",
+                                    xaxis=dict(title="Time (Singapore)"),
+                                    yaxis=dict(
+                                        title="Cumulative PNL (USD)",
+                                        titlefont=dict(color="green"),
+                                        tickfont=dict(color="green"),
+                                        side="left"
+                                    ),
+                                    yaxis2=dict(
+                                        title=title,
+                                        titlefont=dict(color="blue"),
+                                        tickfont=dict(color="blue"),
+                                        anchor="x",
+                                        overlaying="y",
+                                        side="right"
+                                    ),
+                                    legend=dict(x=0.01, y=0.99),
+                                    height=500
+                                )
+                                
+                                # Ensure timestamps display correctly
+                                fig.update_xaxes(
+                                    tickformat="%H:%M\n%b %d"  # Format: Hours:Minutes and date below
+                                )
+                                
+                                # Display the chart
+                                st.plotly_chart(fig, use_container_width=True)
+                                
+                                # Add correlation annotation
+                                corr_value = correlation_results[metric]
+                                corr_text = "Strong " if abs(corr_value) > 0.7 else "Moderate " if abs(corr_value) > 0.4 else "Weak " if abs(corr_value) > 0.2 else "No "
+                                corr_text += "positive correlation" if corr_value > 0 else "negative correlation"
+                                
+                                st.markdown(f"**Correlation Analysis:** {corr_text} between {title} and PNL (r = {corr_value:.3f}).")
+                                
+                                # Add specific insights based on the metric
+                                if metric == 'hurst_exponent':
+                                    if corr_value < -0.2:
+                                        st.markdown("**Insight:** Lower Hurst exponents (more mean-reverting behavior) appear to be associated with higher PNL. "
+                                                  "This suggests that mean reversion trading strategies may be more profitable in this market.")
+                                    elif corr_value > 0.2:
+                                        st.markdown("**Insight:** Higher Hurst exponents (more trending behavior) appear to be associated with higher PNL. "
+                                                  "This suggests that trend-following strategies may be more profitable in this market.")
+                                    else:
+                                        st.markdown("**Insight:** No clear relationship between Hurst exponent and PNL. "
+                                                  "This suggests that other factors may be more important for profitability.")
+                                
+                                elif metric == 'dc_range_ratio':
+                                    if corr_value > 0.2:
+                                        st.markdown("**Insight:** Higher direction changes to range ratio appears to be associated with higher PNL. "
+                                                  "This suggests that markets with more direction changes relative to their range are more profitable.")
+                                    elif corr_value < -0.2:
+                                        st.markdown("**Insight:** Lower direction changes to range ratio appears to be associated with higher PNL. "
+                                                  "This suggests that markets with fewer direction changes relative to their range are more profitable.")
+                                    else:
+                                        st.markdown("**Insight:** No clear relationship between direction changes to range ratio and PNL. "
+                                                  "This suggests that other factors may be more important for profitability.")
+                            
+                            # Add scatter plots for each metric vs PNL change (not cumulative)
+                            st.subheader("Mean Reversion Metrics vs. PNL Changes")
+                            
+                            # Calculate PNL changes between intervals
+                            merged_df['pnl_change'] = merged_df['platform_total_pnl'].diff().fillna(0)
+                            
+                            # Create 2x2 grid of scatter plots
+                            col1, col2 = st.columns(2)
+                            
+                            for i, (metric, title) in enumerate(metrics_to_plot):
+                                fig = px.scatter(
+                                    merged_df, 
+                                    x=metric, 
+                                    y='pnl_change',
+                                    color='pnl_change',
+                                    color_continuous_scale='RdYlGn',
+                                    title=f"{title} vs. PNL Change per Interval",
+                                    labels={metric: title, 'pnl_change': 'PNL Change (USD)'},
+                                    hover_data=['timestamp']
+                                )
+                                
+                                # Add trendline
+                                fig.update_layout(height=400)
+                                
+                                # Add to appropriate column
+                                if i % 2 == 0:
+                                    col1.plotly_chart(fig, use_container_width=True)
+                                else:
+                                    col2.plotly_chart(fig, use_container_width=True)
+                            
+                            # Multiple regression analysis
+                            st.subheader("Multiple Regression Analysis")
+                            
+                            try:
+                                # Prepare data for regression
+                                X = merged_df[correlation_metrics]
+                                y = merged_df['pnl_change']
+                                
+                                # Add constant for intercept
+                                X = sm.add_constant(X)
+                                
+                                # Fit regression model
+                                model = sm.OLS(y, X).fit()
+                                
+                                # Display results
+                                st.write("### Regression Results")
+                                
+                                # Create a summary table
+                                results_df = pd.DataFrame({
+                                    'Variable': model.params.index,
+                                    'Coefficient': model.params.values,
+                                    'P-Value': model.pvalues.values,
+                                    'Significant': model.pvalues < 0.05
+                                })
+                                
+                                # Format the table
+                                st.dataframe(
+                                    results_df.style.format({
+                                        'Coefficient': '{:.4f}',
+                                        'P-Value': '{:.4f}'
+                                    }),
+                                    height=200,
+                                    use_container_width=True
+                                )
+                                
+                                # Model summary statistics
+                                st.write(f"**R-squared:** {model.rsquared:.4f} (Higher values indicate better fit)")
+                                st.write(f"**Adjusted R-squared:** {model.rsquared_adj:.4f}")
+                                st.write(f"**F-statistic:** {model.fvalue:.4f} (P-value: {model.f_pvalue:.4f})")
+                                
+                                # Interpretation
+                                if model.f_pvalue < 0.05:
+                                    st.success("The model is statistically significant (p < 0.05). The mean reversion metrics together have a meaningful relationship with PNL changes.")
+                                    
+                                    # Identify significant variables
+                                    sig_vars = results_df[results_df['Significant'] == True]
+                                    if not sig_vars.empty:
+                                        st.write("### Significant Factors:")
+                                        for _, row in sig_vars.iterrows():
+                                            if row['Variable'] != 'const':
+                                                var_name = analyzer.metric_display_names.get(row['Variable'], row['Variable'])
+                                                direction = "increases" if row['Coefficient'] > 0 else "decreases"
+                                                st.write(f"- As {var_name} increases by 1 unit, PNL {direction} by ${abs(row['Coefficient']):.2f} on average")
+                                else:
+                                    st.warning("The model is not statistically significant (p >= 0.05). The mean reversion metrics together do not show a clear relationship with PNL changes.")
+                            except Exception as e:
+                                st.error(f"Error performing regression analysis: {e}")
+                                st.write("This typically occurs when there is insufficient data or high multicollinearity between variables.")
+                            
+                            # Intraday Analysis
+                            st.subheader("Intraday PNL Patterns")
+                            
+                            # Group by hour of day
+                            merged_df['hour'] = merged_df['timestamp'].dt.hour
+                            hourly_analysis = merged_df.groupby('hour').agg({
+                                'pnl_change': ['mean', 'sum', 'std'],
+                                'direction_changes_30min': 'mean',
+                                'absolute_range_pct': 'mean',
+                                'dc_range_ratio': 'mean',
+                                'hurst_exponent': 'mean'
+                            })
+                            
+                            hourly_analysis.columns = ['_'.join(col).strip() for col in hourly_analysis.columns.values]
+                            hourly_analysis = hourly_analysis.reset_index()
+                            
+                            # Create hourly PNL chart
+                            fig = go.Figure()
+                            
+                            fig.add_trace(go.Bar(
+                                x=hourly_analysis['hour'],
+                                y=hourly_analysis['pnl_change_sum'],
+                                name='Total PNL Change',
+                                marker_color='green'
+                            ))
+                            
+                            fig.update_layout(
+                                title="Total PNL Change by Hour of Day (Singapore Time)",
+                                xaxis=dict(title="Hour of Day", tickmode='linear', tick0=0, dtick=1),
+                                yaxis=dict(title="Total PNL Change (USD)"),
+                                height=500
+                            )
+                            
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            # Show hourly metrics table
+                            st.write("### Mean Reversion Metrics by Hour of Day")
+                            
+                            # Format the table
+                            hourly_display = hourly_analysis.rename(columns={
+                                'hour': 'Hour',
+                                'pnl_change_mean': 'Avg PNL Change',
+                                'pnl_change_sum': 'Total PNL Change',
+                                'pnl_change_std': 'PNL Volatility',
+                                'direction_changes_30min_mean': 'Avg Dir Changes',
+                                'absolute_range_pct_mean': 'Avg Range %',
+                                'dc_range_ratio_mean': 'Avg DC/Range Ratio',
+                                'hurst_exponent_mean': 'Avg Hurst Exponent'
+                            })
+                            
+                            st.dataframe(
+                                hourly_display.style.format({
+                                    'Avg PNL Change': '${:.2f}',
+                                    'Total PNL Change': '${:.2f}',
+                                    'PNL Volatility': '${:.2f}',
+                                    'Avg Dir Changes': '{:.2f}',
+                                    'Avg Range %': '{:.2f}%',
+                                    'Avg DC/Range Ratio': '{:.3f}',
+                                    'Avg Hurst Exponent': '{:.3f}'
+                                }),
+                                height=500,
+                                use_container_width=True
+                            )
+                            
+                            # Thresholds and Decision Boundaries
+                            st.subheader("Finding Optimal Thresholds for Trading Decisions")
+                            
+                            # Choose a metric to analyze thresholds
+                            threshold_metric = st.selectbox(
+                                "Select Metric for Threshold Analysis",
+                                [('hurst_exponent', 'Hurst Exponent'),
+                                 ('dc_range_ratio', 'DC/Range Ratio'),
+                                 ('direction_changes_30min', 'Direction Changes (30min)'),
+                                 ('absolute_range_pct', 'Range %')],
+                                format_func=lambda x: x[1]
+                            )
+                            
+                            selected_metric, metric_display = threshold_metric
+                            
+                            # Create threshold ranges
+                            min_val = merged_df[selected_metric].min()
+                            max_val = merged_df[selected_metric].max()
+                            
+                            # Create 10 threshold points
+                            thresholds = np.linspace(min_val, max_val, 10)
+                            
+                            # Calculate PNL performance at different thresholds
+                            threshold_results = []
+                            
+                            for threshold in thresholds:
+                                # For metrics where lower is better (Hurst)
+                                if selected_metric == 'hurst_exponent':
+                                    filtered_df = merged_df[merged_df[selected_metric] <= threshold]
+                                    comparison = "<="
+                                # For metrics where higher is better
+                                else:
+                                    filtered_df = merged_df[merged_df[selected_metric] >= threshold]
+                                    comparison = ">="
+                                
+                                if len(filtered_df) > 0:
+                                    total_pnl = filtered_df['pnl_change'].sum()
+                                    avg_pnl = filtered_df['pnl_change'].mean()
+                                    count = len(filtered_df)
+                                    
+                                    threshold_results.append({
+                                        'Threshold': threshold,
+                                        'Comparison': comparison,
+                                        'Total PNL': total_pnl,
+                                        'Average PNL': avg_pnl,
+                                        'Count': count,
+                                        'Percent of Total': count / len(merged_df) * 100
+                                    })
+                            
+                            # Convert to DataFrame
+                            threshold_df = pd.DataFrame(threshold_results)
+                            
+                            # Plot threshold analysis
+                            fig = go.Figure()
+                            
+                            fig.add_trace(go.Bar(
+                                x=threshold_df['Threshold'],
+                                y=threshold_df['Total PNL'],
+                                name='Total PNL',
+                                marker_color='green'
+                            ))
+                            
+                            fig.add_trace(go.Scatter(
+                                x=threshold_df['Threshold'],
+                                y=threshold_df['Count'],
+                                name='Number of Intervals',
+                                yaxis='y2',
+                                line=dict(color='blue', width=2)
+                            ))
+                            
+                            # Update layout with two y-axes
+                            fig.update_layout(
+                                title=f"PNL Performance vs {metric_display} Thresholds",
+                                xaxis=dict(title=f"{metric_display} Threshold"),
+                                yaxis=dict(
+                                    title="Total PNL (USD)",
+                                    titlefont=dict(color="green"),
+                                    tickfont=dict(color="green")
+                                ),
+                                yaxis2=dict(
+                                    title="Number of Intervals",
+                                    titlefont=dict(color="blue"),
+                                    tickfont=dict(color="blue"),
+                                    anchor="x",
+                                    overlaying="y",
+                                    side="right"
+                                ),
+                                height=500
+                            )
+                            
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            # Display threshold analysis table
+                            st.write("### Threshold Analysis Results")
+                            
+                            # Format the table
+                            st.dataframe(
+                                threshold_df.style.format({
+                                    'Threshold': '{:.3f}',
+                                    'Total PNL': '${:.2f}',
+                                    'Average PNL': '${:.2f}',
+                                    'Percent of Total': '{:.1f}%'
+                                }),
+                                height=300,
+                                use_container_width=True
+                            )
+                            
+                            # Find optimal threshold
+                            if not threshold_df.empty:
+                                optimal_row = threshold_df.loc[threshold_df['Total PNL'].idxmax()]
+                                
+                                st.success(f"**Optimal Threshold:** {optimal_row['Threshold']:.3f} " +
+                                           f"({optimal_row['Comparison']} {optimal_row['Threshold']:.3f})")
+                                
+                                st.write(f"**Total PNL at optimal threshold:** ${optimal_row['Total PNL']:.2f}")
+                                st.write(f"**Average PNL per interval:** ${optimal_row['Average PNL']:.2f}")
+                                st.write(f"**Number of trading intervals:** {optimal_row['Count']} " +
+                                       f"({optimal_row['Percent of Total']:.1f}% of all intervals)")
+                                
+                                # Trading strategy conclusion
+                                st.subheader("Trading Strategy Recommendation")
+                                
+                                strategy = f"Based on this analysis, an optimal strategy would be to trade {selected_pair} " + \
+                                          f"when the {metric_display} is {optimal_row['Comparison']} {optimal_row['Threshold']:.3f}. "
+                                
+                                # Add specific guidelines based on metric
+                                if selected_metric == 'hurst_exponent':
+                                    if optimal_row['Threshold'] < 0.5:
+                                        strategy += "This confirms that mean-reverting market conditions " + \
+                                                   "are more profitable for this pair. "
+                                    else:
+                                        strategy += "Interestingly, this suggests trending or random market conditions " + \
+                                                   "are more profitable for this pair, contrary to mean reversion theory. "
+                                elif selected_metric == 'dc_range_ratio':
+                                    strategy += "This confirms that markets with high direction changes relative to their range " + \
+                                               "create more profitable trading conditions. "
+                                elif selected_metric == 'direction_changes_30min':
+                                    strategy += "This suggests that markets with more price reversals " + \
+                                               "create more profitable trading opportunities. "
+                                elif selected_metric == 'absolute_range_pct':
+                                    if optimal_row['Comparison'] == ">=":
+                                        strategy += "This suggests that more volatile markets with wider ranges " + \
+                                                   "create more profitable trading opportunities. "
+                                    else:
+                                        strategy += "This suggests that less volatile markets with narrower ranges " + \
+                                                   "create more profitable trading opportunities. "
+                                
+                                # Add combined insight
+                                strategy += "\n\nFor optimal results, consider combining metrics. The multiple regression " + \
+                                           "analysis shows which combination of factors has the strongest relationship with PNL."
+                                
+                                st.write(strategy)
+                            else:
+                                st.warning("Unable to fetch PNL data or time series data for the selected pair and exchange. Please ensure both datasets are available.")
+                else:
+                    st.warning(f"No exchanges with data for {selected_pair}")
+            else:
+                st.warning(f"No exchange data available for {selected_pair}")
+        else:
+            st.warning("No pairs available for PNL correlation analysis")
 else:
     if not st.session_state.data_processed and submit_button:
         st.warning("Please click 'Analyze Mean Reversion' to fetch and process data.")
@@ -1094,6 +1807,19 @@ The mean reversion score is calculated as:
 - The Hurst component contributes up to 50 points (lower Hurst = higher score)
 - The DC/Range ratio is log-transformed to handle extreme values
 - Higher scores indicate stronger mean-reverting tendencies
+""")
+
+# Add information about PNL correlation
+st.sidebar.subheader("PNL Correlation Analysis")
+st.sidebar.markdown("""
+The PNL Correlation tab helps you understand:
+
+- How mean reversion metrics impact trading profitability
+- Which market conditions generate the most profit
+- How to establish optimal thresholds for trading decisions
+- When to apply mean reversion trading strategies
+
+Use this analysis to develop data-driven trading strategies based on quantifiable market behaviors.
 """)
 
 # Add footer
