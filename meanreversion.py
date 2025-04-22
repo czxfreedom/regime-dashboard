@@ -74,6 +74,9 @@ now_utc = datetime.now(pytz.utc)
 now_sg = now_utc.astimezone(singapore_timezone)
 st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
+# Debug current time
+st.write(f"UTC Time: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}")
+
 # Create tabs
 tab1, tab2 = st.tabs(["Current Status", "Historical Trends"])
 
@@ -218,17 +221,19 @@ class MeanReversionAnalyzer:
         complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp"
         return complete_query
 
-    def calculate_hurst_exponent(self, prices, min_k=10, max_k=None):
+    def calculate_hurst_exponent(self, prices, min_k=5, max_k=None):
         """
         Calculate the Hurst exponent, which indicates:
         H < 0.5: Mean-reverting series
         H = 0.5: Random walk
         H > 0.5: Trending series
+        
+        Lowered min_k to 5 (from 10) to allow calculation with smaller data samples
         """
         try:
             # Convert to numpy array and ensure we have enough data
             prices = np.array(prices)
-            if len(prices) < 100:
+            if len(prices) < 50:  # Reduced minimum requirement from 100 to 50
                 return 0.5  # Return neutral value if not enough data
                 
             # Calculate returns
@@ -236,10 +241,10 @@ class MeanReversionAnalyzer:
             
             # Set default max_k if not provided
             if max_k is None:
-                max_k = min(int(len(returns) / 10), 120)  # Use at most 120 or 1/10 of series length
+                max_k = min(int(len(returns) / 4), 120)  # Use at most 120 or 1/4 of series length (more aggressive)
             
             if max_k <= min_k:
-                max_k = min_k + 10
+                max_k = min_k + 5  # Smaller window size
                 
             # Create a range of k values
             k_values = list(range(min_k, max_k))
@@ -277,7 +282,7 @@ class MeanReversionAnalyzer:
                     rs_values.append(np.mean(rs_array))
                     
             # If we don't have enough values, return default
-            if len(rs_values) < 5:
+            if len(rs_values) < 3:  # Reduced from 5 to 3
                 return 0.5
                 
             # Perform regression to estimate Hurst exponent
@@ -298,6 +303,7 @@ class MeanReversionAnalyzer:
                 
             return hurst
         except Exception as e:
+            st.error(f"Error calculating Hurst exponent: {e}")
             return 0.5  # Return neutral value on error
 
     def calculate_direction_changes(self, prices):
@@ -408,7 +414,8 @@ class MeanReversionAnalyzer:
             # Filter data to the lookback period
             df_lookback = df[df['timestamp'] >= start_time]
             
-            if len(df_lookback) < 100:  # Need at least 100 data points for time series
+            if len(df_lookback) < 50:  # Reduced from 100 to 50
+                st.warning(f"Not enough historical data for {pair_name} on {exchange}: {len(df_lookback)} points")
                 return
                 
             # Create 30-minute intervals
@@ -429,11 +436,15 @@ class MeanReversionAnalyzer:
                 df_interval = df_lookback[(df_lookback['timestamp'] >= interval_start) & 
                                          (df_lookback['timestamp'] < interval_end)]
                 
-                if len(df_interval) < 10:  # Skip intervals with insufficient data
+                if len(df_interval) < 5:  # Reduced from 10 to 5
                     continue
                     
                 # Extract prices
                 prices = pd.to_numeric(df_interval['price'], errors='coerce').dropna().values
+                
+                # Skip if no valid prices
+                if len(prices) < 5:
+                    continue
                 
                 # Calculate metrics
                 direction_changes = self.calculate_direction_changes(prices)
@@ -443,8 +454,8 @@ class MeanReversionAnalyzer:
                 dc_range_ratio = direction_changes / (range_pct + 1e-10)
                 
                 # Calculate Hurst exponent
-                # For historical data, use only the interval data to see how it changes
-                hurst = self.calculate_hurst_exponent(prices, min_k=5, max_k=min(len(prices)//4, 20))
+                # For historical data, use the available data to calculate Hurst
+                hurst = self.calculate_hurst_exponent(prices, min_k=3, max_k=min(len(prices)//3, 20))
                 
                 # Add to time series
                 self.time_series_data[pair_name][exchange].append({
@@ -466,11 +477,11 @@ class MeanReversionAnalyzer:
             pairs_to_analyze: List of coin pairs to analyze
             hours: Hours to look back for data retrieval
         """
-        # Calculate times
+        # Calculate times - using exact current time to get the most recent data
         end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         start_time = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
         
-        st.info(f"Retrieving data from the last {hours} hours")
+        st.info(f"Retrieving data from {start_time} to {end_time} ({hours} hours)")
         
         try:
             # Get relevant partition tables for this time range
@@ -479,6 +490,8 @@ class MeanReversionAnalyzer:
             if not partition_tables:
                 st.error("No data tables available for the selected time range.")
                 return None
+            
+            st.write(f"Found {len(partition_tables)} partition tables: {', '.join(partition_tables)}")
             
             # Progress bar
             progress_bar = st.progress(0)
@@ -508,6 +521,13 @@ class MeanReversionAnalyzer:
                     if query:
                         try:
                             df = pd.read_sql_query(query, conn)
+                            
+                            # Debug timestamp range
+                            if len(df) > 0:
+                                min_time = df['timestamp'].min()
+                                max_time = df['timestamp'].max()
+                                st.write(f"{exchange.upper()} {pair} data range: {min_time} to {max_time} ({len(df)} points)")
+                            
                             if len(df) > 0:
                                 # Process current 30-min data
                                 result = self.process_30min_data(df, pair, exchange)
@@ -517,7 +537,7 @@ class MeanReversionAnalyzer:
                                 # Process historical data for time series
                                 self.process_historical_data(df, pair, exchange)
                             else:
-                                print(f"No data found for {exchange.upper()}_{pair}")
+                                st.warning(f"No data found for {exchange.upper()}_{pair}")
                         except Exception as e:
                             st.error(f"Database query error for {exchange.upper()}_{pair}: {e}")
             
@@ -850,6 +870,38 @@ if st.session_state.data_processed and st.session_state.analysis_results:
                     # Update session state
                     st.session_state.selected_historical_exchange = selected_exchange
                     
+                    # Add debug information
+                    with st.expander("Debug Information"):
+                        st.write(f"Selected pair: {selected_pair}")
+                        st.write(f"Selected exchange: {selected_exchange}")
+                        
+                        # Check if we have time series data
+                        if selected_pair in analyzer.time_series_data:
+                            st.write(f"Exchanges with time series data for {selected_pair}: {list(analyzer.time_series_data[selected_pair].keys())}")
+                            
+                            if selected_exchange in analyzer.time_series_data[selected_pair]:
+                                data_points = len(analyzer.time_series_data[selected_pair][selected_exchange])
+                                st.write(f"Number of time series data points for {selected_exchange}: {data_points}")
+                                
+                                if data_points > 0:
+                                    ts_data = analyzer.time_series_data[selected_pair][selected_exchange]
+                                    ts_df = pd.DataFrame(ts_data)
+                                    
+                                    # Show the first and last timestamp
+                                    if not ts_df.empty:
+                                        st.write(f"First timestamp: {ts_df['timestamp'].min()}")
+                                        st.write(f"Last timestamp: {ts_df['timestamp'].max()}")
+                                        
+                                        # Show data completeness for each metric
+                                        for metric in ['direction_changes_30min', 'absolute_range_pct', 'dc_range_ratio', 'hurst_exponent']:
+                                            missing = ts_df[metric].isna().sum()
+                                            if missing > 0:
+                                                st.write(f"Missing values in {metric}: {missing} out of {len(ts_df)}")
+                            else:
+                                st.write(f"No time series data for {selected_exchange}")
+                        else:
+                            st.write(f"No time series data for {selected_pair}")
+                    
                     # Safely check if we have time series data for this pair/exchange
                     has_data = (
                         selected_pair in analyzer.time_series_data and 
@@ -862,119 +914,133 @@ if st.session_state.data_processed and st.session_state.analysis_results:
                         ts_data = analyzer.time_series_data[selected_pair][selected_exchange]
                         ts_df = pd.DataFrame(ts_data)
                         
-                        # Sort by timestamp
-                        ts_df = ts_df.sort_values('timestamp')
-                        
-                        # Display charts
-                        st.subheader(f"30-Minute Interval Metrics for {selected_pair} on {selected_exchange.upper()}")
-                        
-                        # Define metrics to plot with their display names
-                        metrics_to_plot = [
-                            ('dc_range_ratio', 'Dir Changes/Range Ratio'),
-                            ('hurst_exponent', 'Hurst Exponent'),
-                            ('direction_changes_30min', 'Direction Changes (30min)'),
-                            ('absolute_range_pct', 'Range %')
-                        ]
-                        
-                        # Create and display each chart
-                        for metric, title in metrics_to_plot:
-                            if metric in ts_df.columns:
-                                # Create basic line chart
-                                fig = px.line(
-                                    ts_df, 
-                                    x='timestamp', 
-                                    y=metric,
-                                    title=f"{title} for {selected_pair} ({selected_exchange.upper()})"
-                                )
-                                
-                                # Calculate mean value
-                                mean_value = ts_df[metric].mean()
-                                
-                                # Add mean line to all charts
-                                fig.add_shape(
-                                    type="line",
-                                    x0=ts_df['timestamp'].min(),
-                                    y0=mean_value,
-                                    x1=ts_df['timestamp'].max(),
-                                    y1=mean_value,
-                                    line=dict(
-                                        color="green",
-                                        width=1,
-                                        dash="dot",
-                                    )
-                                )
-                                
-                                # Add annotation for mean line
-                                fig.add_annotation(
-                                    x=ts_df['timestamp'].min(),
-                                    y=mean_value,
-                                    text=f"Mean: {mean_value:.2f}",
-                                    showarrow=False,
-                                    yshift=10,
-                                    xshift=50
-                                )
-                                
-                                # Add reference line for Hurst exponent
-                                if metric == 'hurst_exponent':
-                                    fig.add_shape(
-                                        type="line",
-                                        x0=ts_df['timestamp'].min(),
-                                        y0=0.5,
-                                        x1=ts_df['timestamp'].max(),
-                                        y1=0.5,
-                                        line=dict(
-                                            color="red",
-                                            width=1,
-                                            dash="dash",
+                        # Get the time range for all charts
+                        if not ts_df.empty:
+                            min_time = ts_df['timestamp'].min()
+                            max_time = ts_df['timestamp'].max()
+                            
+                            # Sort by timestamp
+                            ts_df = ts_df.sort_values('timestamp')
+                            
+                            # Display charts
+                            st.subheader(f"30-Minute Interval Metrics for {selected_pair} on {selected_exchange.upper()}")
+                            
+                            # Define metrics to plot with their display names
+                            metrics_to_plot = [
+                                ('dc_range_ratio', 'Dir Changes/Range Ratio'),
+                                ('hurst_exponent', 'Hurst Exponent'),
+                                ('direction_changes_30min', 'Direction Changes (30min)'),
+                                ('absolute_range_pct', 'Range %')
+                            ]
+                            
+                            # Create and display each chart
+                            for metric, title in metrics_to_plot:
+                                if metric in ts_df.columns:
+                                    # Filter out NaN values
+                                    metric_df = ts_df[['timestamp', metric]].dropna()
+                                    
+                                    if len(metric_df) > 0:
+                                        # Create basic line chart
+                                        fig = px.line(
+                                            metric_df, 
+                                            x='timestamp', 
+                                            y=metric,
+                                            title=f"{title} for {selected_pair} ({selected_exchange.upper()})"
                                         )
-                                    )
-                                    
-                                    # Add annotation for Hurst reference
-                                    fig.add_annotation(
-                                        x=ts_df['timestamp'].max(),
-                                        y=0.5,
-                                        text="Random Walk (H=0.5)",
-                                        showarrow=False,
-                                        yshift=10
-                                    )
-                                    
-                                    # Add trend line for Hurst
-                                    if len(ts_df) > 1:
-                                        try:
-                                            # Calculate trend line
-                                            x_numeric = np.arange(len(ts_df))
-                                            y = ts_df[metric].values
-                                            slope, intercept, _, _, _ = stats.linregress(x_numeric, y)
-                                            trend_y = intercept + slope * x_numeric
+                                        
+                                        # Ensure all charts share the same x-axis range
+                                        fig.update_xaxes(range=[min_time, max_time])
+                                        
+                                        # Calculate mean value
+                                        mean_value = metric_df[metric].mean()
+                                        
+                                        # Add mean line to all charts
+                                        fig.add_shape(
+                                            type="line",
+                                            x0=min_time,
+                                            y0=mean_value,
+                                            x1=max_time,
+                                            y1=mean_value,
+                                            line=dict(
+                                                color="green",
+                                                width=1,
+                                                dash="dot",
+                                            )
+                                        )
+                                        
+                                        # Add annotation for mean line
+                                        fig.add_annotation(
+                                            x=min_time,
+                                            y=mean_value,
+                                            text=f"Mean: {mean_value:.2f}",
+                                            showarrow=False,
+                                            yshift=10,
+                                            xshift=50
+                                        )
+                                        
+                                        # Add reference line for Hurst exponent
+                                        if metric == 'hurst_exponent':
+                                            fig.add_shape(
+                                                type="line",
+                                                x0=min_time,
+                                                y0=0.5,
+                                                x1=max_time,
+                                                y1=0.5,
+                                                line=dict(
+                                                    color="red",
+                                                    width=1,
+                                                    dash="dash",
+                                                )
+                                            )
                                             
-                                            # Add trend line to figure
-                                            fig.add_trace(go.Scatter(
-                                                x=ts_df['timestamp'],
-                                                y=trend_y,
-                                                mode='lines',
-                                                line=dict(color='blue', width=1, dash='solid'),
-                                                name='Trend'
-                                            ))
-                                        except Exception as e:
-                                            st.warning(f"Could not calculate trend line: {e}")
-                                
-                                # Ensure timestamps display correctly
-                                fig.update_xaxes(
-                                    title_text="Singapore Time",
-                                    tickformat="%H:%M\n%b %d"  # Format: Hours:Minutes and date below
-                                )
-                                
-                                # Update layout
-                                fig.update_layout(
-                                    xaxis_title="Time (Singapore)",
-                                    yaxis_title=title,
-                                    height=400
-                                )
-                                
-                                # Display the chart
-                                st.plotly_chart(fig, use_container_width=True)
-                            else:
-                                st.warning(f"No {title} data available")
+                                            # Add annotation for Hurst reference
+                                            fig.add_annotation(
+                                                x=max_time,
+                                                y=0.5,
+                                                text="Random Walk (H=0.5)",
+                                                showarrow=False,
+                                                yshift=10
+                                            )
+                                            
+                                            # Add trend line for Hurst
+                                            if len(metric_df) > 1:
+                                                try:
+                                                    # Calculate trend line
+                                                    x_numeric = np.arange(len(metric_df))
+                                                    y = metric_df[metric].values
+                                                    slope, intercept, _, _, _ = stats.linregress(x_numeric, y)
+                                                    trend_y = intercept + slope * x_numeric
+                                                    
+                                                    # Add trend line to figure
+                                                    fig.add_trace(go.Scatter(
+                                                        x=metric_df['timestamp'],
+                                                        y=trend_y,
+                                                        mode='lines',
+                                                        line=dict(color='blue', width=1, dash='solid'),
+                                                        name='Trend'
+                                                    ))
+                                                except Exception as e:
+                                                    st.warning(f"Could not calculate trend line: {e}")
+                                        
+                                        # Ensure timestamps display correctly
+                                        fig.update_xaxes(
+                                            title_text="Singapore Time",
+                                            tickformat="%H:%M\n%b %d"  # Format: Hours:Minutes and date below
+                                        )
+                                        
+                                        # Update layout
+                                        fig.update_layout(
+                                            xaxis_title="Time (Singapore)",
+                                            yaxis_title=title,
+                                            height=400
+                                        )
+                                        
+                                        # Display the chart
+                                        st.plotly_chart(fig, use_container_width=True)
+                                    else:
+                                        st.warning(f"No valid data for {title} metric")
+                                else:
+                                    st.warning(f"Metric {title} not found in data")
                     else:
                         st.warning(f"No historical data available for {selected_pair} on {selected_exchange}.")
                         st.info("Try increasing the 'Hours to Look Back' parameter to collect more data.")
