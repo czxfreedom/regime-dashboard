@@ -8,7 +8,7 @@ import psycopg2
 import warnings
 import pytz
 from scipy import stats
-import statsmodels.api as sm  # Add this import
+import statsmodels.api as sm  # Added missing import
 import math
 
 # Suppress warnings
@@ -713,10 +713,6 @@ def fetch_platform_pnl_for_pair(pair_name, hours=24):
         # Convert timestamp to pandas datetime
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         
-        # Create cumulative PNL column starting from 0
-        df = df.sort_values('timestamp')
-        df['cumulative_pnl'] = df['platform_total_pnl'].cumsum()
-        
         # Cache the result
         st.session_state.pnl_data_cache[cache_key] = df
         
@@ -1276,33 +1272,51 @@ if st.session_state.data_processed and st.session_state.analysis_results:
                         metrics_data = analyzer.time_series_data[selected_pair][selected_exchange]
                         metrics_df = pd.DataFrame(metrics_data)
                         
+                        # Show raw data sample for debugging PNL values
+                        with st.expander("Debug PNL Data"):
+                            st.write("### Raw PNL Data Sample (first 10 rows)")
+                            st.dataframe(pnl_data.head(10))
+                            
+                            # Show summary statistics
+                            st.write("### PNL Data Summary")
+                            st.write(f"Total PNL entries: {len(pnl_data)}")
+                            st.write(f"Min PNL value: ${pnl_data['platform_total_pnl'].min():.2f}")
+                            st.write(f"Max PNL value: ${pnl_data['platform_total_pnl'].max():.2f}")
+                            st.write(f"Total PNL (sum): ${pnl_data['platform_total_pnl'].sum():.2f}")
+                            st.write(f"Average PNL per interval: ${pnl_data['platform_total_pnl'].mean():.2f}")
+                        
                         # Ensure timestamps are datetime objects
                         metrics_df['timestamp'] = pd.to_datetime(metrics_df['timestamp'])
                         pnl_data['timestamp'] = pd.to_datetime(pnl_data['timestamp'])
+                        
                         # Remove timezone info if present (make both naive)
                         metrics_df['timestamp'] = metrics_df['timestamp'].dt.tz_localize(None)
                         pnl_data['timestamp'] = pnl_data['timestamp'].dt.tz_localize(None)
-
+                        
                         # Sort both dataframes by timestamp
                         metrics_df = metrics_df.sort_values('timestamp')
+                        pnl_data = pnl_data.sort_values('timestamp')
                         
+                        # Display raw data indicator
+                        st.write(f"Raw platform_total_pnl range: ${pnl_data['platform_total_pnl'].min():.2f} to ${pnl_data['platform_total_pnl'].max():.2f}")
                                                 
                         # Reset PNL to start from 0 at the beginning of the timeframe
-                        pnl_data = pnl_data.sort_values('timestamp')
-                        initial_pnl = pnl_data['platform_total_pnl'].iloc[0]
-                        pnl_data['cumulative_pnl'] = pnl_data['platform_total_pnl'].cumsum() - initial_pnl
+                        # Calculate true 24-hour cumulative PNL
+                        pnl_data['cumulative_pnl'] = pnl_data['platform_total_pnl'].cumsum()
                         
-                        # Merge PNL data with metrics data based on closest timestamp
+                        # Normalize to start at 0
+                        initial_pnl = pnl_data['cumulative_pnl'].iloc[0]
+                        pnl_data['cumulative_pnl'] = pnl_data['cumulative_pnl'] - initial_pnl
+                        
                         # First, create a column to join on by rounding timestamp to nearest 30 min
                         metrics_df['rounded_timestamp'] = metrics_df['timestamp'].dt.floor('30min')
                         pnl_data['rounded_timestamp'] = pnl_data['timestamp'].dt.floor('30min')
                         
                         # Merge the dataframes
                         merged_df = pd.merge_asof(
-                            pnl_data.sort_values('timestamp'),
-                            metrics_df.sort_values('timestamp'),
-                            left_on='timestamp',
-                            right_on='timestamp',
+                            pnl_data,
+                            metrics_df,
+                            on='timestamp',
                             direction='nearest',
                             tolerance=pd.Timedelta('15 minutes')
                         )
@@ -1345,8 +1359,7 @@ if st.session_state.data_processed and st.session_state.analysis_results:
                                     return 'background-color: #f1f1aa; color: black'  # Weak correlation
                                 else:
                                     return 'background-color: #ffc299; color: black'  # No significant correlation
-                            
-                            # Display styled correlation table
+                                # Display styled correlation table
                             st.dataframe(
                                 corr_df.style.format({
                                     'Correlation with PNL': '{:.3f}'
@@ -1372,8 +1385,11 @@ if st.session_state.data_processed and st.session_state.analysis_results:
                             # Define metrics to plot with their display names
                             metrics_to_plot = [
                                 ('dc_range_ratio', 'Dir Changes/Range Ratio'),
-                                ('hurst_exponent', 'Hurst Exponent'),('direction_changes_30min', 'Direction Changes (30min)'),('absolute_range_pct', 'Range %')
+                                ('hurst_exponent', 'Hurst Exponent'),
+                                ('direction_changes_30min', 'Direction Changes (30min)'),
+                                ('absolute_range_pct', 'Range %')
                             ]
+                            
                             # Plot each metric against cumulative PNL
                             for metric, title in metrics_to_plot:
                                 # Create figure with secondary y-axis
