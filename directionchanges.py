@@ -19,6 +19,19 @@ st.set_page_config(
     layout="wide"
 )
 
+# Specify the exact pairs to analyze
+PAIRS_TO_ANALYZE = [
+    "PEPE/USDT", "PAXG/USDT", "DOGE/USDT", "BTC/USDT", "EOS/USDT",
+    "BNB/USDT", "MERL/USDT", "FHE/USDT", "IP/USDT", "ORCA/USDT",
+    "TRUMP/USDT", "LIBRA/USDT", "AI16Z/USDT", "OM/USDT", "TRX/USDT",
+    "S/USDT", "PI/USDT", "JUP/USDT", "BABY/USDT", "PARTI/USDT",
+    "ADA/USDT", "HYPE/USDT", "VIRTUAL/USDT", "SUI/USDT", "SATS/USDT",
+    "XRP/USDT", "ORDI/USDT", "WIF/USDT", "VANA/USDT", "PENGU/USDT",
+    "VINE/USDT", "GRIFFAIN/USDT", "MEW/USDT", "POPCAT/USDT", "FARTCOIN/USDT",
+    "TON/USDT", "MELANIA/USDT", "SOL/USDT", "PNUT/USDT", "CAKE/USDT",
+    "TST/USDT", "ETH/USDT"
+]
+
 # --- DB CONFIG ---
 try:
     # You can use st.secrets in production, or hardcode for testing
@@ -54,7 +67,7 @@ except Exception as e:
 
 # --- UI Setup ---
 st.title("Direction Changes Analysis (10min Intervals)")
-st.subheader("All Trading Pairs - Last 24 Hours (Singapore Time)")
+st.subheader("Selected Trading Pairs - Last 24 Hours (Singapore Time)")
 
 # Define parameters
 timeframe = "10min"  # Using 10-minute intervals as requested
@@ -120,34 +133,33 @@ def get_partition_tables(conn, start_date, end_date):
     
     return existing_tables
 
-# Function to check if a partition table has data for a specific time period
-def check_table_data_coverage(conn, table, start_time, end_time):
+# Function to check table data by hour using Singapore time
+def check_table_data_by_hour(conn, table):
     """
-    Check if a partition table has data for the specified time period.
-    Returns a tuple of (earliest_time, latest_time, record_count)
+    Check data available by hour in Singapore time for a given partition table
     """
     cursor = conn.cursor()
     
     try:
-        # Query to get data coverage
+        # Query to get data by hour
         cursor.execute(f"""
             SELECT 
-                MIN(created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') AS earliest_time,
-                MAX(created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') AS latest_time,
+                EXTRACT(HOUR FROM created_at + INTERVAL '8 hour') AS hour,
                 COUNT(*) AS record_count
             FROM 
                 public.{table}
             WHERE 
                 source_type = 0
-                AND created_at >= '{start_time}'::timestamp - INTERVAL '8 hour'
-                AND created_at <= '{end_time}'::timestamp - INTERVAL '8 hour'
+            GROUP BY 
+                hour
+            ORDER BY 
+                hour
         """)
         
-        result = cursor.fetchone()
-        return result
+        return cursor.fetchall()
     except Exception as e:
-        print(f"Error checking data coverage for {table}: {e}")
-        return (None, None, 0)
+        print(f"Error checking hourly data for {table}: {e}")
+        return []
     finally:
         cursor.close()
 
@@ -163,11 +175,11 @@ def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
     union_parts = []
     
     for table in tables:
-        # Query for Surf data (source_type = 0)
+        # Use the correct time zone conversion for our query
         query = f"""
         SELECT 
             pair_name,
-            created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp,
+            created_at + INTERVAL '8 hour' AS timestamp_sg, 
             final_price AS price
         FROM 
             public.{table}
@@ -181,44 +193,8 @@ def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
         union_parts.append(query)
     
     # Join with UNION and add ORDER BY at the end
-    complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp"
+    complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp_sg"
     return complete_query
-
-# Fetch all available tokens from DB
-@st.cache_data(show_spinner="Fetching tokens...")
-def fetch_all_tokens():
-    # Calculate time range for the last 24 hours
-    end_time = now_sg.strftime("%Y-%m-%d %H:%M:%S")
-    start_time = (now_sg - timedelta(days=lookback_days)).strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Get partition tables for this period
-    partition_tables = get_partition_tables(conn, start_time, end_time)
-    
-    if not partition_tables:
-        st.error("No partition tables found for the last 24 hours.")
-        return []
-    
-    # Use the most recent partition table to get the token list
-    latest_table = sorted(partition_tables)[-1]
-    
-    # Get distinct tokens from the most recent partition table
-    cursor = conn.cursor()
-    try:
-        cursor.execute(f"""
-        SELECT DISTINCT pair_name 
-        FROM public.{latest_table}
-        WHERE source_type = 0
-        ORDER BY pair_name
-        """)
-        tokens = [row[0] for row in cursor.fetchall()]
-        return tokens
-    except Exception as e:
-        st.error(f"Error fetching tokens: {e}")
-        return ["BTC", "ETH", "SOL", "DOGE", "PEPE", "AI16Z"]  # Default fallback
-    finally:
-        cursor.close()
-
-all_tokens = fetch_all_tokens()
 
 # UI Controls
 col1, col2 = st.columns([3, 1])
@@ -228,12 +204,12 @@ with col1:
     select_all = st.checkbox("Select All Tokens", value=True)
     
     if select_all:
-        selected_tokens = all_tokens
+        selected_tokens = PAIRS_TO_ANALYZE
     else:
         selected_tokens = st.multiselect(
             "Select Tokens", 
-            all_tokens,
-            default=all_tokens[:5] if len(all_tokens) > 5 else all_tokens
+            PAIRS_TO_ANALYZE,
+            default=PAIRS_TO_ANALYZE[:5] if len(PAIRS_TO_ANALYZE) > 5 else PAIRS_TO_ANALYZE
         )
 
 with col2:
@@ -346,56 +322,66 @@ def analyze_price_runs(df):
 
     return result
 
-# Enhanced fetch and calculate function to handle midnight transition
+# Check data availability in today's partition table
+today_str = now_sg.date().strftime("%Y%m%d")
+yesterday_str = (now_sg.date() - timedelta(days=1)).strftime("%Y%m%d")
+today_table = f"oracle_price_log_partition_{today_str}"
+yesterday_table = f"oracle_price_log_partition_{yesterday_str}"
+
+# Check tables exist
+cursor = conn.cursor()
+today_exists = False
+yesterday_exists = False
+
+cursor.execute("""
+    SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = %s
+    );
+""", (today_table,))
+today_exists = cursor.fetchone()[0]
+
+cursor.execute("""
+    SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = %s
+    );
+""", (yesterday_table,))
+yesterday_exists = cursor.fetchone()[0]
+
+cursor.close()
+
+with st.expander("View Data Availability by Hour"):
+    # Show data availability by hour
+    if today_exists:
+        today_data = check_table_data_by_hour(conn, today_table)
+        st.write(f"Today's Data ({today_str}) by Hour (Singapore Time):")
+        today_df = pd.DataFrame(today_data, columns=['Hour', 'Record Count'])
+        st.dataframe(today_df)
+    
+    if yesterday_exists:
+        yesterday_data = check_table_data_by_hour(conn, yesterday_table)
+        st.write(f"Yesterday's Data ({yesterday_str}) by Hour (Singapore Time):")
+        yesterday_df = pd.DataFrame(yesterday_data, columns=['Hour', 'Record Count'])
+        st.dataframe(yesterday_df)
+
+# Enhanced fetch and calculate function with correct time zone handling
 @st.cache_data(ttl=600, show_spinner="Calculating direction changes...")
 def fetch_and_calculate_direction_changes(token):
     # Get current time in Singapore timezone
     now_utc = datetime.now(pytz.utc)
     now_sg = now_utc.astimezone(singapore_timezone)
+    
+    # Calculate the lookback period
     start_time_sg = now_sg - timedelta(days=lookback_days)
     
-    # Convert for database query (keep as Singapore time strings as the query will handle timezone)
+    # Convert for database query (keep as Singapore time strings but we'll adjust in the query)
     start_time = start_time_sg.strftime("%Y-%m-%d %H:%M:%S")
     end_time = now_sg.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Split the query into two parts: before and after midnight
-    midnight_sg = now_sg.replace(hour=0, minute=0, second=0, microsecond=0)
-    midnight_cutoff = midnight_sg.strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Get tables for yesterday and today
-    yesterday = now_sg.date() - timedelta(days=1)
-    yesterday_str = yesterday.strftime("%Y%m%d")
-    today_str = now_sg.date().strftime("%Y%m%d")
-    
-    yesterday_table = f"oracle_price_log_partition_{yesterday_str}"
-    today_table = f"oracle_price_log_partition_{today_str}"
-    
-    # Check which tables exist
-    cursor = conn.cursor()
-    yesterday_exists = False
-    today_exists = False
-    
-    cursor.execute("""
-        SELECT EXISTS (
-            SELECT FROM information_schema.tables 
-            WHERE table_schema = 'public' 
-            AND table_name = %s
-        );
-    """, (yesterday_table,))
-    yesterday_exists = cursor.fetchone()[0]
-    
-    cursor.execute("""
-        SELECT EXISTS (
-            SELECT FROM information_schema.tables 
-            WHERE table_schema = 'public' 
-            AND table_name = %s
-        );
-    """, (today_table,))
-    today_exists = cursor.fetchone()[0]
-    
-    cursor.close()
-    
-    # Full list of tables to query
+    # Get tables for today and yesterday
     tables_to_query = []
     if yesterday_exists:
         tables_to_query.append(yesterday_table)
@@ -406,31 +392,7 @@ def fetch_and_calculate_direction_changes(token):
         print(f"[{token}] No partition tables found for the specified date range")
         return None
     
-    # Check data coverage in each table
-    if yesterday_exists:
-        yesterday_coverage = check_table_data_coverage(
-            conn, 
-            yesterday_table, 
-            start_time if start_time_sg < midnight_sg else midnight_cutoff, 
-            midnight_cutoff
-        )
-    else:
-        yesterday_coverage = (None, None, 0)
-    
-    if today_exists:
-        today_coverage = check_table_data_coverage(
-            conn, 
-            today_table, 
-            midnight_cutoff, 
-            end_time
-        )
-    else:
-        today_coverage = (None, None, 0)
-    
-    print(f"[{token}] Yesterday coverage: {yesterday_coverage}")
-    print(f"[{token}] Today coverage: {today_coverage}")
-    
-    # Build query using partition tables
+    # Build query using all available partition tables
     query = build_query_for_partition_tables(
         tables_to_query,
         pair_name=token,
@@ -447,7 +409,18 @@ def fetch_and_calculate_direction_changes(token):
             print(f"[{token}] No data found.")
             return None
 
+        # Rename column for clarity - timestamp_sg contains Singapore time
+        df = df.rename(columns={'timestamp_sg': 'timestamp'})
         df['timestamp'] = pd.to_datetime(df['timestamp'])
+        
+        # Filter to just the last 24 hours of data
+        last_24h_cutoff = now_sg - timedelta(days=1)
+        df = df[df['timestamp'] >= last_24h_cutoff]
+        
+        if df.empty:
+            print(f"[{token}] No data in the last 24 hours.")
+            return None
+            
         df = df.set_index('timestamp').sort_index()
         
         # Calculate basic metrics (using same logic as CryptoMarketAnalyzer)
@@ -568,12 +541,17 @@ if token_results:
             st.info(f"Data coverage: From {earliest_data.strftime('%Y-%m-%d %H:%M')} to {latest_data.strftime('%Y-%m-%d %H:%M')} (Singapore Time)")
         
         with data_range_col2:
-            # Show a warning if the latest data is more than 2 hours old
-            time_since_latest = now_sg - latest_data
-            hours_since_latest = time_since_latest.total_seconds() / 3600
+            # Calculate the exact time difference for display and warning
+            now_naive = now_sg.replace(tzinfo=None)
+            latest_naive = latest_data.replace(tzinfo=None) if hasattr(latest_data, 'tzinfo') else latest_data
             
-            if hours_since_latest > 2:
-                st.warning(f"⚠️ Latest data is {hours_since_latest:.1f} hours old")
+            # Calculate time difference in hours
+            time_diff = now_naive - latest_naive
+            hours_diff = time_diff.total_seconds() / 3600
+            
+            # Show a warning if the latest data is more than 2 hours old
+            if hours_diff > 2:
+                st.warning(f"⚠️ Latest data is {hours_diff:.1f} hours old")
             else:
                 st.success(f"✅ Data is up to date (last update: {latest_data.strftime('%H:%M')})")
 
@@ -821,10 +799,10 @@ if token_results:
         total = few_changes + moderate_changes + many_changes + extreme_changes
         
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Few Changes", f"{few_changes} ({few_changes/total*100:.1f}%)")
-        col2.metric("Moderate Changes", f"{moderate_changes} ({moderate_changes/total*100:.1f}%)")
-        col3.metric("Many Changes", f"{many_changes} ({many_changes/total*100:.1f}%)")
-        col4.metric("Extreme Changes", f"{extreme_changes} ({extreme_changes/total*100:.1f}%)")
+        col1.metric("Few Changes", f"{few_changes} ({few_changes/total*100:.1f}%)" if total > 0 else "0 (0.0%)")
+        col2.metric("Moderate Changes", f"{moderate_changes} ({moderate_changes/total*100:.1f}%)" if total > 0 else "0 (0.0%)")
+        col3.metric("Many Changes", f"{many_changes} ({many_changes/total*100:.1f}%)" if total > 0 else "0 (0.0%)")
+        col4.metric("Extreme Changes", f"{extreme_changes} ({extreme_changes/total*100:.1f}%)" if total > 0 else "0 (0.0%)")
         
         labels = ['Few Changes', 'Moderate Changes', 'Many Changes', 'Extreme Changes']
         values = [few_changes, moderate_changes, many_changes, extreme_changes]
@@ -915,13 +893,18 @@ if token_results:
         if all_timestamps:
             earliest_data = min(all_timestamps)
             latest_data = max(all_timestamps)
-            time_since_latest = now_sg - latest_data
-            hours_since_latest = time_since_latest.total_seconds() / 3600
+            
+            # Calculate the exact time difference
+            now_naive = now_sg.replace(tzinfo=None)
+            latest_naive = latest_data.replace(tzinfo=None) if hasattr(latest_data, 'tzinfo') else latest_data
+            
+            time_diff = now_naive - latest_naive
+            hours_diff = time_diff.total_seconds() / 3600
             
             st.write(f"""
         4. Data covers from **{earliest_data.strftime('%Y-%m-%d %H:%M')}** to **{latest_data.strftime('%Y-%m-%d %H:%M')}** (Singapore Time).
         
-        5. Latest available data is **{hours_since_latest:.1f} hours** old.
+        5. Latest available data is **{hours_diff:.1f} hours** old.
             """)
     else:
         st.warning("Insufficient data to generate an executive summary.")
