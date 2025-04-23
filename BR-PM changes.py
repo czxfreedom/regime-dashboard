@@ -18,164 +18,81 @@ st.set_page_config(
 # Apply custom CSS styling
 st.markdown("""
 <style>
-    .header-style {
-        font-size:24px !important;
-        font-weight: bold;
-        padding: 10px 0;
-    }
-    .subheader-style {
-        font-size:20px !important;
-        font-weight: bold;
-        padding: 5px 0;
-    }
-    .info-box {
-        background-color: #f8f9fa;
-        padding: 10px;
-        border-radius: 5px;
-        margin-bottom: 15px;
-        border: 1px solid #e9ecef;
-    }
-    /* Center numeric columns in dataframes */
-    .dataframe th, .dataframe td {
-        text-align: center !important;
-        font-family: monospace;
-    }
-    /* First column (Token) remains left-aligned */
-    .dataframe th:first-child, .dataframe td:first-child {
-        text-align: left !important;
-        font-family: inherit;
-    }
-    /* Highlight changes */
-    .positive-change {
-        color: green;
-        font-weight: bold;
-    }
-    .negative-change {
-        color: red;
-        font-weight: bold;
-    }
-    /* Highlight spread ranges */
-    .high-range {
-        background-color: rgba(255, 152, 0, 0.2);
-    }
-    .extreme-range {
-        background-color: rgba(244, 67, 54, 0.2);
-    }
-    /* Success message */
-    .success-message {
-        background-color: #d4edda;
-        color: #155724;
-        padding: 10px;
-        border-radius: 5px;
-        margin: 10px 0;
-        border: 1px solid #c3e6cb;
-    }
-    /* Warning message */
-    .warning-message {
-        background-color: #fff3cd;
-        color: #856404;
-        padding: 10px;
-        border-radius: 5px;
-        margin: 10px 0;
-        border: 1px solid #ffeeba;
-    }
-    /* Parameter controls section */
-    .parameter-controls {
-        background-color: #e9ecef;
-        padding: 15px;
-        border-radius: 5px;
-        margin: 15px 0;
-    }
+    .header-style {font-size:24px !important; font-weight: bold; padding: 10px 0;}
+    .subheader-style {font-size:20px !important; font-weight: bold; padding: 5px 0;}
+    .info-box {background-color: #f8f9fa; padding: 10px; border-radius: 5px; margin-bottom: 15px; border: 1px solid #e9ecef;}
+    .dataframe th, .dataframe td {text-align: center !important; font-family: monospace;}
+    .dataframe th:first-child, .dataframe td:first-child {text-align: left !important; font-family: inherit;}
+    .positive-change {color: green; font-weight: bold;}
+    .negative-change {color: red; font-weight: bold;}
+    .high-range {background-color: rgba(255, 152, 0, 0.2);}
+    .extreme-range {background-color: rgba(244, 67, 54, 0.2);}
+    .success-message {background-color: #d4edda; color: #155724; padding: 10px; border-radius: 5px; margin: 10px 0; border: 1px solid #c3e6cb;}
+    .warning-message {background-color: #fff3cd; color: #856404; padding: 10px; border-radius: 5px; margin: 10px 0; border: 1px solid #ffeeba;}
+    .parameter-controls {background-color: #e9ecef; padding: 15px; border-radius: 5px; margin: 15px 0;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- Constants and Configuration ---
-# Define exchanges for spread calculation
+# Constants and Configuration
 exchanges = ["binanceFuture", "gateFuture", "hyperliquidFuture"]
 exchanges_display = {
-    "binanceFuture": "Binance",
-    "gateFuture": "Gate",
-    "hyperliquidFuture": "Hyperliquid"
+    "binanceFuture": "Binance", "gateFuture": "Gate", "hyperliquidFuture": "Hyperliquid"
 }
-
-# Define time parameters
 singapore_timezone = pytz.timezone('Asia/Singapore')
-lookback_days = 1  # Default to 1 day
-weekly_lookback_days = 7  # For weekly range
-
-# Use a fixed scale factor for consistency
+lookback_days = 1
+weekly_lookback_days = 7
 scale_factor = 10000
 scale_label = "× 10,000"
 
-# --- Database Configuration ---
+# Database Configuration
 @st.cache_resource
 def init_connection():
     try:
-        # Try to get database config from secrets
         db_config = st.secrets["database"]
-        db_uri = (
-            f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
-            f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-        )
+        db_uri = f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
         return create_engine(db_uri)
     except Exception as e:
         st.sidebar.error(f"Error connecting to the database: {e}")
         return None
 
-# --- Utility Functions ---
+# Utility Functions
 def is_major(token):
-    """Determine if a token is a major token"""
     majors = ["BTC", "ETH", "SOL", "XRP", "BNB"]
-    for major in majors:
-        if major in token:
-            return True
-    return False
+    return any(major in token for major in majors)
 
 def get_depth_level(token):
-    """Get the appropriate depth level based on token type"""
-    if is_major(token):
-        return "50K", "fee1"  # 50K for majors
-    else:
-        return "20K", "fee1"  # 20K for altcoins
+    return ("50K", "fee1") if is_major(token) else ("20K", "fee1")
 
 def parse_leverage_config(leverage_config):
-    """Parse the leverage_config JSON to extract max leverage info"""
     if not leverage_config or leverage_config == '[]':
-        return 100  # Default max leverage if not specified
-    
+        return 100
     try:
         if isinstance(leverage_config, str):
             config = json.loads(leverage_config)
         else:
             config = leverage_config
-            
         if isinstance(config, list) and len(config) > 0:
-            # Find the maximum leverage value in the config
             max_lev = max([item.get('leverage', 0) for item in config])
             return max_lev if max_lev > 0 else 100
     except Exception as e:
         print(f"Error parsing leverage config: {e}")
-        return 100  # Default
+        return 100
 
 def format_percent(value):
-    """Format value as percentage with 2 decimal places"""
     return f"{value*100:.2f}%"
 
 def format_number(value):
-    """Format large numbers with commas"""
     return f"{int(value):,}"
 
 def format_with_change_indicator(old_value, new_value, is_percent=False):
-    """Format a value with color coding and change indicator"""
     if is_percent:
         formatted_old = format_percent(old_value)
         formatted_new = format_percent(new_value)
-        change_pct = ((new_value - old_value) / old_value) * 100 if old_value != 0 else 0
     else:
-        formatted_old = format_number(old_value) 
+        formatted_old = format_number(old_value)
         formatted_new = format_number(new_value)
-        change_pct = ((new_value - old_value) / old_value) * 100 if old_value != 0 else 0
     
+    change_pct = ((new_value - old_value) / old_value) * 100 if old_value != 0 else 0
     change_indicator = f"({change_pct:+.2f}%)"
     
     if new_value > old_value:
@@ -186,119 +103,81 @@ def format_with_change_indicator(old_value, new_value, is_percent=False):
         return formatted_new
 
 def format_spread_range(low, high, current, baseline):
-    """Format the spread range with indicators for position in range"""
     range_value = high - low
-    # Calculate percentile position of current in range
     if range_value > 0:
         position_pct = (current - low) / range_value * 100
     else:
-        position_pct = 50  # Default if there's no range
+        position_pct = 50
     
-    # Determine if current is near high/low
     css_class = ""
-    if position_pct > 80:
-        css_class = "high-range"  # Near high
-    elif position_pct < 20:
-        css_class = "high-range"  # Near low
-    
-    # Check if current is outside the range (extreme value)
+    if position_pct > 80 or position_pct < 20:
+        css_class = "high-range"
     if current > high or current < low:
         css_class = "extreme-range"
     
-    # Format with range and indicator
     return f"<span class='{css_class}'>{low:.2f} - {high:.2f} [{range_value:.2f}]</span>"
 
 def format_range_as_percent_of_current(low, high, current):
-    """Format the weekly range as a percentage of current market spread"""
     range_value = high - low
     if current > 0:
         range_percent = (range_value / current) * 100
-        # Use color formatting for different ranges
         if range_percent > 100:
-            return f"<span style='color:#E53935;font-weight:bold'>{range_percent:.2f}%</span>"  # Red
+            return f"<span style='color:#E53935;font-weight:bold'>{range_percent:.2f}%</span>"
         elif range_percent > 50:
-            return f"<span style='color:#FFA726;font-weight:bold'>{range_percent:.2f}%</span>"  # Orange
+            return f"<span style='color:#FFA726;font-weight:bold'>{range_percent:.2f}%</span>"
         elif range_percent > 25:
-            return f"<span style='color:#43A047;font-weight:bold'>{range_percent:.2f}%</span>"  # Green
+            return f"<span style='color:#43A047;font-weight:bold'>{range_percent:.2f}%</span>"
         else:
-            return f"<span style='color:#1E88E5;font-weight:bold'>{range_percent:.2f}%</span>"  # Blue
+            return f"<span style='color:#1E88E5;font-weight:bold'>{range_percent:.2f}%</span>"
     else:
         return "N/A"
 
-# --- Data Fetching Functions ---
-# Note: We're not using the engine as a cache key parameter anymore
+# Data Fetching Functions
 @st.cache_data(ttl=600)
 def fetch_all_tokens():
-    """Fetch all active tokens from the database"""
     try:
         engine = init_connection()
         if not engine:
             return []
-            
-        query = """
-        SELECT DISTINCT pair_name 
-        FROM public.trade_pool_pairs
-        WHERE status = 1
-        ORDER BY pair_name
-        """
-        
+        query = "SELECT DISTINCT pair_name FROM public.trade_pool_pairs WHERE status = 1 ORDER BY pair_name"
         df = pd.read_sql(query, engine)
-        if df.empty:
-            st.error("No tokens found in the database.")
-            return []
-        return df['pair_name'].tolist()
+        return df['pair_name'].tolist() if not df.empty else []
     except Exception as e:
         st.error(f"Error fetching tokens: {e}")
         return []
 
 @st.cache_data(ttl=600)
 def fetch_daily_spread_averages(tokens):
-    """Fetch daily spread averages for multiple tokens (last 24 hours)"""
     try:
         engine = init_connection()
         if not engine:
             return None
-            
-        # Get current time in Singapore timezone
+        
         now_utc = datetime.now(pytz.utc)
         now_sg = now_utc.astimezone(singapore_timezone)
         start_time_sg = now_sg - timedelta(days=lookback_days)
         
-        # Convert back to UTC for database query
         start_time_utc = start_time_sg.astimezone(pytz.utc)
         end_time_utc = now_sg.astimezone(pytz.utc)
         
-        # Create placeholders for tokens
         tokens_str = "', '".join(tokens)
-
-        # Query to get average fee data for all selected tokens
         query = f"""
         SELECT 
-            pair_name,
-            source,
-            AVG(fee1) as avg_fee1,
-            AVG(fee2) as avg_fee2,
-            AVG(fee3) as avg_fee3,
-            AVG(fee4) as avg_fee4,
+            pair_name, source,
+            AVG(fee1) as avg_fee1, AVG(fee2) as avg_fee2, 
+            AVG(fee3) as avg_fee3, AVG(fee4) as avg_fee4,
             AVG(total_fee) as avg_total_fee
-        FROM 
-            oracle_exchange_fee
+        FROM oracle_exchange_fee
         WHERE 
             pair_name IN ('{tokens_str}')
             AND time_group BETWEEN '{start_time_utc}' AND '{end_time_utc}'
             AND source IN ('binanceFuture', 'gateFuture', 'hyperliquidFuture')
-        GROUP BY 
-            pair_name, source
-        ORDER BY 
-            pair_name, source
+        GROUP BY pair_name, source
+        ORDER BY pair_name, source
         """
         
         df = pd.read_sql(query, engine)
-        
-        if df.empty:
-            return None
-
-        return df
+        return df if not df.empty else None
             
     except Exception as e:
         st.error(f"Error fetching daily spread averages: {e}")
@@ -306,74 +185,47 @@ def fetch_daily_spread_averages(tokens):
 
 @st.cache_data(ttl=600)
 def fetch_weekly_spread_ranges(tokens):
-    """Fetch weekly high/low/average spread data for multiple tokens"""
     try:
         engine = init_connection()
         if not engine:
             return None
             
-        # Get current time in Singapore timezone
         now_utc = datetime.now(pytz.utc)
         now_sg = now_utc.astimezone(singapore_timezone)
         start_time_sg = now_sg - timedelta(days=weekly_lookback_days)
         
-        # Convert back to UTC for database query
         start_time_utc = start_time_sg.astimezone(pytz.utc)
         end_time_utc = now_sg.astimezone(pytz.utc)
         
-        # Create placeholders for tokens
         tokens_str = "', '".join(tokens)
-
-        # Query to get high/low/avg spread data for all selected tokens
         query = f"""
         WITH spread_data AS (
             SELECT 
-                pair_name,
-                source,
-                time_group,
-                fee1,
-                fee2,
-                fee3,
-                fee4,
-                total_fee
-            FROM 
-                oracle_exchange_fee
+                pair_name, source, time_group, fee1, fee2, fee3, fee4, total_fee
+            FROM oracle_exchange_fee
             WHERE 
                 pair_name IN ('{tokens_str}')
                 AND time_group BETWEEN '{start_time_utc}' AND '{end_time_utc}'
                 AND source IN ('binanceFuture', 'gateFuture', 'hyperliquidFuture')
         ),
         aggregated_data AS (
-            -- Calculate average spread for each pair, source, and time point
             SELECT 
-                pair_name,
-                time_group,
-                AVG(fee1) as avg_spread
-            FROM 
-                spread_data
-            GROUP BY 
-                pair_name, time_group
+                pair_name, time_group, AVG(fee1) as avg_spread
+            FROM spread_data
+            GROUP BY pair_name, time_group
         )
-        -- Calculate high, low, avg for each pair
         SELECT 
             pair_name,
             MIN(avg_spread) as weekly_low,
             MAX(avg_spread) as weekly_high,
             AVG(avg_spread) as weekly_avg
-        FROM 
-            aggregated_data
-        GROUP BY 
-            pair_name
-        ORDER BY 
-            pair_name
+        FROM aggregated_data
+        GROUP BY pair_name
+        ORDER BY pair_name
         """
         
         df = pd.read_sql(query, engine)
-        
-        if df.empty:
-            return None
-
-        return df
+        return df if not df.empty else None
             
     except Exception as e:
         st.error(f"Error fetching weekly spread ranges: {e}")
@@ -381,7 +233,6 @@ def fetch_weekly_spread_ranges(tokens):
 
 @st.cache_data(ttl=600)
 def fetch_current_parameters():
-    """Fetch current trading parameters from the database"""
     try:
         engine = init_connection()
         if not engine:
@@ -389,23 +240,14 @@ def fetch_current_parameters():
             
         query = """
         SELECT
-            pair_name,
-            buffer_rate,
-            position_multiplier,
-            max_leverage,
-            leverage_config,
-            status
-        FROM
-            public.trade_pool_pairs
-        WHERE
-            status = 1
-        ORDER BY
-            pair_name
+            pair_name, buffer_rate, position_multiplier,
+            max_leverage, leverage_config, status
+        FROM public.trade_pool_pairs
+        WHERE status = 1
+        ORDER BY pair_name
         """
         
         df = pd.read_sql(query, engine)
-        
-        # Add max_leverage column from leverage_config if it doesn't exist
         if 'max_leverage' not in df.columns or df['max_leverage'].isna().all():
             df['max_leverage'] = df['leverage_config'].apply(parse_leverage_config)
         
@@ -415,11 +257,7 @@ def fetch_current_parameters():
         return None
 
 def get_non_surf_average_spread(spread_data, pair_name, fee_level='avg_fee1'):
-    """Calculate the average spread across non-SurfFuture exchanges for a specific pair"""
-    # Filter for the specific pair
     pair_data = spread_data[spread_data['pair_name'] == pair_name]
-    
-    # Keep only supported exchanges
     valid_sources = [source for source in exchanges if source in pair_data['source'].values]
     filtered_data = pair_data[pair_data['source'].isin(valid_sources)]
     
@@ -429,61 +267,32 @@ def get_non_surf_average_spread(spread_data, pair_name, fee_level='avg_fee1'):
         return avg_value
     return None
 
-def calculate_recommended_params(current_buffer_rate, current_position_multiplier, current_spread, baseline_spread, max_leverage, buffer_sensitivity, position_sensitivity, significant_change_threshold):
-    """
-    Calculate recommended buffer rate and position multiplier based on spread changes
-    
-    Args:
-        current_buffer_rate: Current buffer rate in the system
-        current_position_multiplier: Current position multiplier in the system
-        current_spread: Current non-Surf average spread
-        baseline_spread: Baseline non-Surf average spread to compare against
-        max_leverage: Maximum leverage allowed for this trading pair
-        buffer_sensitivity: How sensitive buffer rate is to spread changes
-        position_sensitivity: How sensitive position multiplier is to spread changes
-        significant_change_threshold: Minimum % change required to trigger adjustments
-        
-    Returns:
-        Tuple of (recommended_buffer_rate, recommended_position_multiplier)
-    """
+def calculate_recommended_params(current_buffer_rate, current_position_multiplier, current_spread, 
+                              baseline_spread, max_leverage, buffer_sensitivity, 
+                              position_sensitivity, significant_change_threshold):
     if current_spread is None or baseline_spread is None or baseline_spread <= 0:
         return current_buffer_rate, current_position_multiplier
     
-    # Calculate relative change in spread compared to baseline
     spread_change_ratio = current_spread / baseline_spread
     
-    # Only make changes if the spread has changed significantly
     if abs(spread_change_ratio - 1.0) < significant_change_threshold:
         return current_buffer_rate, current_position_multiplier
     
-    # Calculate recommended buffer rate (direct relationship with spread)
-    # Higher spread -> higher buffer rate
     recommended_buffer_rate = current_buffer_rate * (spread_change_ratio ** buffer_sensitivity)
-    
-    # Calculate recommended position multiplier (inverse relationship with spread)
-    # Higher spread -> lower position multiplier
     recommended_position_multiplier = current_position_multiplier / (spread_change_ratio ** position_sensitivity)
     
-    # Apply bounds to prevent extreme values
-    # Buffer rate should never exceed 1/max_leverage (to avoid immediate liquidations)
     max_buffer_rate = 0.9 / max_leverage if max_leverage > 0 else 0.009
     recommended_buffer_rate = max(0.001, min(max_buffer_rate, recommended_buffer_rate))
-    
-    # Position multiplier bounds
     recommended_position_multiplier = max(100000, min(10000000, recommended_position_multiplier))
     
     return recommended_buffer_rate, recommended_position_multiplier
 
 def create_baseline_spreads(spread_data):
-    """
-    Create or update baseline spreads in the database
-    """
     try:
         engine = init_connection()
         if not engine:
             return "Database connection failed"
             
-        # Create table if it doesn't exist
         create_table_query = """
         CREATE TABLE IF NOT EXISTS spread_baselines (
             pair_name VARCHAR(50) PRIMARY KEY,
@@ -495,19 +304,16 @@ def create_baseline_spreads(spread_data):
             connection.execute(text(create_table_query))
             connection.commit()
         
-        # For each pair, calculate and save the baseline spread
         success_count = 0
         error_count = 0
         
         for pair_name in spread_data['pair_name'].unique():
-            # Calculate non-Surf average spread
             depth_label, fee_level = get_depth_level(pair_name)
             fee_column = f"avg_{fee_level}"
             
             non_surf_avg = get_non_surf_average_spread(spread_data, pair_name, fee_column)
             
             if non_surf_avg is not None:
-                # Insert or update baseline
                 upsert_query = f"""
                 INSERT INTO spread_baselines (pair_name, baseline_spread, updated_at)
                 VALUES ('{pair_name}', {non_surf_avg}, NOW())
@@ -530,7 +336,6 @@ def create_baseline_spreads(spread_data):
 
 @st.cache_data(ttl=600)
 def get_baseline_spreads():
-    """Get baseline spreads from the database"""
     try:
         engine = init_connection()
         if not engine:
@@ -538,15 +343,12 @@ def get_baseline_spreads():
             
         query = "SELECT pair_name, baseline_spread, updated_at FROM spread_baselines"
         df = pd.read_sql(query, engine)
-        if df.empty:
-            return None
-        return df
+        return df if not df.empty else None
     except Exception as e:
         st.error(f"Error fetching baseline spreads: {e}")
         return None
 
 def update_trading_parameters(pair_name, buffer_rate, position_multiplier):
-    """Update buffer_rate and position_multiplier for a trading pair"""
     try:
         engine = init_connection()
         if not engine:
@@ -569,7 +371,7 @@ def update_trading_parameters(pair_name, buffer_rate, position_multiplier):
         st.error(f"Error updating parameters for {pair_name}: {e}")
         return False
 
-# --- Main Application ---
+# Main Application
 def main():
     st.markdown('<div class="header-style">Trading Parameters Optimizer</div>', unsafe_allow_html=True)
     
@@ -591,11 +393,8 @@ def main():
                 if all([db_user, db_password, db_host, db_port, db_name]):
                     # Store connection info in session state
                     st.session_state.db_params = {
-                        'user': db_user,
-                        'password': db_password,
-                        'host': db_host,
-                        'port': db_port,
-                        'database': db_name
+                        'user': db_user, 'password': db_password,
+                        'host': db_host, 'port': db_port, 'database': db_name
                     }
                     st.experimental_rerun()
                 else:
@@ -697,7 +496,6 @@ def main():
             <li><strong>Position Sensitivity:</strong> How strongly position multipliers respond to spread changes (higher = more responsive)</li>
             <li><strong>Change Threshold:</strong> Minimum spread change needed before parameters are adjusted (lower = more frequent updates)</li>
         </ul>
-        <p>Adjust these settings in the sidebar to fine-tune the recommendations.</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -732,19 +530,13 @@ def main():
     st.markdown("""
     <div class="info-box">
     <b>Trading Parameters Optimization</b><br>
-    This tool helps optimize buffer rates and position multipliers based on market spread conditions.<br><br>
-    <b>How it works:</b>
+    This tool helps optimize buffer rates and position multipliers based on market spread conditions.<br>
+    <b>Key Features:</b>
     <ul>
-        <li>We monitor non-SurfFuture spreads at 50K (majors) / 20K (altcoins) sizes as a baseline</li>
-        <li>When spreads increase above baseline, buffer rates increase and position multipliers decrease</li>
-        <li>When spreads decrease below baseline, buffer rates decrease and position multipliers increase</li>
-        <li>Parameters are kept within safe bounds based on max leverage and other constraints</li>
-        <li>Weekly spread ranges provide context about whether current spreads are at unusual levels</li>
-    </ul>
-    <b>Actions:</b>
-    <ul>
-        <li>Use "Apply All Recommendations" to update parameters in the system</li>
-        <li>Use "Reset All Baselines" to establish new baselines based on current market conditions</li>
+        <li>Weekly range percentage shows how volatile each token's spread is relative to its current value</li>
+        <li>Higher weekly range % indicates tokens that experience larger spread fluctuations</li>
+        <li>Tokens with high volatility benefit from more responsive parameter adjustments (lower thresholds)</li>
+        <li>Tokens with low volatility can use higher thresholds to avoid unnecessary parameter changes</li>
     </ul>
     </div>
     """, unsafe_allow_html=True)
@@ -754,7 +546,7 @@ def main():
         # Create recommendations dataframe
         recommendations_data = []
         
-        # Uncomment to enable debug mode
+        # Debug mode toggle
         debug_mode = False
         if debug_mode:
             debug_container = st.expander("Debug Information", expanded=False)
@@ -905,25 +697,13 @@ def main():
                 # Add legend for weekly range formatting
                 st.markdown("""
                 <div style="font-size: 0.85em; margin-top: 10px;">
-                <strong>Weekly Range Legend:</strong>
+                <strong>Weekly Range % Legend:</strong> Shows how large the weekly fluctuation range is compared to current spread
                 <ul style="list-style-type: none; padding-left: 10px; margin-top: 5px;">
-                    <li><span class="high-range" style="padding: 2px 5px;">Yellow Background</span>: Current spread is near the high or low of the weekly range (20% from extremes)</li>
-                    <li><span class="extreme-range" style="padding: 2px 5px;">Red Background</span>: Current spread is outside the weekly range (extreme value)</li>
+                    <li><span style="color:#1E88E5;font-weight:bold">Blue (< 25%)</span>: Very stable - small weekly fluctuations</li>
+                    <li><span style="color:#43A047;font-weight:bold">Green (25-50%)</span>: Moderately stable - normal fluctuations</li>
+                    <li><span style="color:#FFA726;font-weight:bold">Orange (50-100%)</span>: Volatile - large fluctuations</li>
+                    <li><span style="color:#E53935;font-weight:bold">Red (> 100%)</span>: Highly volatile - extreme fluctuations</li>
                 </ul>
-                </div>
-                """, unsafe_allow_html=True)
-
-                # Add explanation for Weekly Range % column
-                st.markdown("""
-                <div style="font-size: 0.85em; margin-top: 10px;">
-                <strong>Weekly Range % Legend:</strong>
-                <ul style="list-style-type: none; padding-left: 10px; margin-top: 5px;">
-                    <li><span style="color:#1E88E5;font-weight:bold">Blue (< 25%)</span>: Very stable - small weekly fluctuations relative to current spread</li>
-                    <li><span style="color:#43A047;font-weight:bold">Green (25-50%)</span>: Moderately stable - normal weekly fluctuations</li>
-                    <li><span style="color:#FFA726;font-weight:bold">Orange (50-100%)</span>: Volatile - large weekly fluctuations</li>
-                    <li><span style="color:#E53935;font-weight:bold">Red (> 100%)</span>: Highly volatile - extreme weekly fluctuations</li>
-                </ul>
-                <p>The "Weekly Range %" shows how large the weekly fluctuation range is relative to the current spread. A higher percentage indicates the token experiences larger spread changes, making it more suitable for parameter adjustments.</p>
                 </div>
                 """, unsafe_allow_html=True)
             
@@ -973,31 +753,6 @@ def main():
                     
                     changed_display_df = pd.DataFrame(changed_display)
                     st.write(changed_display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
-                    
-                    # Add legend for weekly range formatting
-                    st.markdown("""
-                    <div style="font-size: 0.85em; margin-top: 10px;">
-                    <strong>Weekly Range Legend:</strong>
-                    <ul style="list-style-type: none; padding-left: 10px; margin-top: 5px;">
-                        <li><span class="high-range" style="padding: 2px 5px;">Yellow Background</span>: Current spread is near the high or low of the weekly range (20% from extremes)</li>
-                        <li><span class="extreme-range" style="padding: 2px 5px;">Red Background</span>: Current spread is outside the weekly range (extreme value)</li>
-                    </ul>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                    # Add explanation for Weekly Range % column
-                    st.markdown("""
-                    <div style="font-size: 0.85em; margin-top: 10px;">
-                    <strong>Weekly Range % Legend:</strong>
-                    <ul style="list-style-type: none; padding-left: 10px; margin-top: 5px;">
-                        <li><span style="color:#1E88E5;font-weight:bold">Blue (< 25%)</span>: Very stable - small weekly fluctuations relative to current spread</li>
-                        <li><span style="color:#43A047;font-weight:bold">Green (25-50%)</span>: Moderately stable - normal weekly fluctuations</li>
-                        <li><span style="color:#FFA726;font-weight:bold">Orange (50-100%)</span>: Volatile - large weekly fluctuations</li>
-                        <li><span style="color:#E53935;font-weight:bold">Red (> 100%)</span>: Highly volatile - extreme weekly fluctuations</li>
-                    </ul>
-                    <p>The "Weekly Range %" shows how large the weekly fluctuation range is relative to the current spread. A higher percentage indicates the token experiences larger spread changes, making it more suitable for parameter adjustments.</p>
-                    </div>
-                    """, unsafe_allow_html=True)
                 else:
                     st.info("No significant parameter changes recommended at this time.")
             
@@ -1007,7 +762,7 @@ def main():
                 # Filter for major tokens
                 major_df = rec_df[rec_df['token_type'] == 'Major']
                 
-                # Create display data for major tokens
+                # Display similar to All Pairs tab but filtered for Major tokens
                 major_display = []
                 for _, row in major_df.iterrows():
                     current_buffer_formatted = format_percent(row['current_buffer_rate'])
@@ -1016,14 +771,11 @@ def main():
                     current_pos_formatted = format_number(row['current_position_multiplier'])
                     rec_pos_formatted = format_with_change_indicator(row['current_position_multiplier'], row['recommended_position_multiplier'])
                     
-                    # Format the weekly range
+                    # Format weekly range
                     if row['weekly_low'] is not None and row['weekly_high'] is not None:
                         weekly_range = format_spread_range(row['weekly_low'], row['weekly_high'], row['current_spread'], row['baseline_spread'])
-                        # Calculate the weekly range as a percentage of current spread
                         weekly_range_pct = format_range_as_percent_of_current(
-                            row['weekly_low'], 
-                            row['weekly_high'], 
-                            row['current_spread']
+                            row['weekly_low'], row['weekly_high'], row['current_spread']
                         )
                     else:
                         weekly_range = "N/A"
@@ -1044,31 +796,6 @@ def main():
                 
                 major_display_df = pd.DataFrame(major_display)
                 st.write(major_display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
-                
-                # Add legend for weekly range formatting
-                st.markdown("""
-                <div style="font-size: 0.85em; margin-top: 10px;">
-                <strong>Weekly Range Legend:</strong>
-                <ul style="list-style-type: none; padding-left: 10px; margin-top: 5px;">
-                    <li><span class="high-range" style="padding: 2px 5px;">Yellow Background</span>: Current spread is near the high or low of the weekly range (20% from extremes)</li>
-                    <li><span class="extreme-range" style="padding: 2px 5px;">Red Background</span>: Current spread is outside the weekly range (extreme value)</li>
-                </ul>
-                </div>
-                """, unsafe_allow_html=True)
-
-                # Add explanation for Weekly Range % column
-                st.markdown("""
-                <div style="font-size: 0.85em; margin-top: 10px;">
-                <strong>Weekly Range % Legend:</strong>
-                <ul style="list-style-type: none; padding-left: 10px; margin-top: 5px;">
-                    <li><span style="color:#1E88E5;font-weight:bold">Blue (< 25%)</span>: Very stable - small weekly fluctuations relative to current spread</li>
-                    <li><span style="color:#43A047;font-weight:bold">Green (25-50%)</span>: Moderately stable - normal weekly fluctuations</li>
-                    <li><span style="color:#FFA726;font-weight:bold">Orange (50-100%)</span>: Volatile - large weekly fluctuations</li>
-                    <li><span style="color:#E53935;font-weight:bold">Red (> 100%)</span>: Highly volatile - extreme weekly fluctuations</li>
-                </ul>
-                <p>The "Weekly Range %" shows how large the weekly fluctuation range is relative to the current spread. A higher percentage indicates the token experiences larger spread changes, making it more suitable for parameter adjustments.</p>
-                </div>
-                """, unsafe_allow_html=True)
             
             with tabs[3]:  # Altcoin Tokens
                 st.markdown("### Altcoin Tokens Only")
@@ -1076,7 +803,7 @@ def main():
                 # Filter for altcoin tokens
                 altcoin_df = rec_df[rec_df['token_type'] == 'Altcoin']
                 
-                # Create display data for altcoin tokens
+                # Display similar to Major Tokens tab but for Altcoins
                 altcoin_display = []
                 for _, row in altcoin_df.iterrows():
                     current_buffer_formatted = format_percent(row['current_buffer_rate'])
@@ -1085,14 +812,11 @@ def main():
                     current_pos_formatted = format_number(row['current_position_multiplier'])
                     rec_pos_formatted = format_with_change_indicator(row['current_position_multiplier'], row['recommended_position_multiplier'])
                     
-                    # Format the weekly range
+                    # Format weekly range
                     if row['weekly_low'] is not None and row['weekly_high'] is not None:
                         weekly_range = format_spread_range(row['weekly_low'], row['weekly_high'], row['current_spread'], row['baseline_spread'])
-                        # Calculate the weekly range as a percentage of current spread
                         weekly_range_pct = format_range_as_percent_of_current(
-                            row['weekly_low'], 
-                            row['weekly_high'], 
-                            row['current_spread']
+                            row['weekly_low'], row['weekly_high'], row['current_spread']
                         )
                     else:
                         weekly_range = "N/A"
@@ -1113,31 +837,6 @@ def main():
                 
                 altcoin_display_df = pd.DataFrame(altcoin_display)
                 st.write(altcoin_display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
-                
-                # Add legend for weekly range formatting
-                st.markdown("""
-                <div style="font-size: 0.85em; margin-top: 10px;">
-                <strong>Weekly Range Legend:</strong>
-                <ul style="list-style-type: none; padding-left: 10px; margin-top: 5px;">
-                    <li><span class="high-range" style="padding: 2px 5px;">Yellow Background</span>: Current spread is near the high or low of the weekly range (20% from extremes)</li>
-                    <li><span class="extreme-range" style="padding: 2px 5px;">Red Background</span>: Current spread is outside the weekly range (extreme value)</li>
-                </ul>
-                </div>
-                """, unsafe_allow_html=True)
-
-                # Add explanation for Weekly Range % column
-                st.markdown("""
-                <div style="font-size: 0.85em; margin-top: 10px;">
-                <strong>Weekly Range % Legend:</strong>
-                <ul style="list-style-type: none; padding-left: 10px; margin-top: 5px;">
-                    <li><span style="color:#1E88E5;font-weight:bold">Blue (< 25%)</span>: Very stable - small weekly fluctuations relative to current spread</li>
-                    <li><span style="color:#43A047;font-weight:bold">Green (25-50%)</span>: Moderately stable - normal weekly fluctuations</li>
-                    <li><span style="color:#FFA726;font-weight:bold">Orange (50-100%)</span>: Volatile - large weekly fluctuations</li>
-                    <li><span style="color:#E53935;font-weight:bold">Red (> 100%)</span>: Highly volatile - extreme weekly fluctuations</li>
-                </ul>
-                <p>The "Weekly Range %" shows how large the weekly fluctuation range is relative to the current spread. A higher percentage indicates the token experiences larger spread changes, making it more suitable for parameter adjustments.</p>
-                </div>
-                """, unsafe_allow_html=True)
             
             # Add visualizations
             st.markdown("### Spread and Parameter Visualizations")
@@ -1147,374 +846,340 @@ def main():
             
             with col1:
                 # Create a scatter plot with current spread vs weekly range
-                # Only include rows with valid weekly range data
-                range_df = rec_df.dropna(subset=['weekly_low', 'weekly_high'])
-                
-                if not range_df.empty:
-                    # Calculate percentile within range for each pair
-                    range_df['percentile'] = range_df.apply(
-                        lambda row: ((row['current_spread'] - row['weekly_low']) / 
-                                    (row['weekly_high'] - row['weekly_low'])) * 100 
-                                    if row['weekly_high'] > row['weekly_low'] else 50, 
-                        axis=1
-                    )
+                try:
+                    # Only include rows with valid weekly range data
+                    range_df = rec_df.dropna(subset=['weekly_low', 'weekly_high'])
                     
-                    # Clamp percentiles to 0-100 range for display
-                    range_df['display_percentile'] = range_df['percentile'].clip(0, 100)
-                    
-                    # For points outside the range, add an "outside" flag
-                    range_df['outside_range'] = ((range_df['current_spread'] < range_df['weekly_low']) | 
-                                               (range_df['current_spread'] > range_df['weekly_high']))
-                    
-                    # Create color coding for percentile
-                    range_df['color_code'] = pd.cut(
-                        range_df['display_percentile'],
-                        bins=[0, 20, 40, 60, 80, 100],
-                        labels=['Very Low', 'Low', 'Normal', 'High', 'Very High']
-                    )
-                    
-                    # Add a spot size based on change ratio
-                    range_df['spot_size'] = (abs(range_df['spread_change_ratio'] - 1) * 20 + 5).clip(5, 15)
-                    
-                    # Create scatter plot
-                    fig1 = px.scatter(
-                        range_df,
-                        x='pair_name',
-                        y='percentile',
-                        color='color_code',
-                        size='spot_size',
-                        hover_name='pair_name',
-                        hover_data={
-                            'pair_name': False,
-                            'percentile': ':.1f',
-                            'current_spread': ':.2f',
-                            'weekly_low': ':.2f',
-                            'weekly_high': ':.2f',
-                            'spot_size': False
-                        },
-                        labels={
-                            'percentile': 'Position in Weekly Range (%)',
-                            'pair_name': 'Trading Pair',
-                            'color_code': 'Range Position'
-                        },
-                        title="Current Spread Position in Weekly Range",
-                        color_discrete_map={
-                            'Very Low': '#1565C0',   # Dark blue
-                            'Low': '#42A5F5',        # Light blue
-                            'Normal': '#66BB6A',     # Green
-                            'High': '#FFA726',       # Orange
-                            'Very High': '#E53935'   # Red
-                        }
-                    )
-                    
-                    # Add reference lines
-                    fig1.add_shape(
-                        type="line",
-                        x0=-0.5,
-                        x1=len(range_df['pair_name'].unique()) - 0.5,
-                        y0=0,
-                        y1=0,
-                        line=dict(color="rgba(50, 50, 50, 0.2)", width=1, dash="dot")
-                    )
-                    
-                    fig1.add_shape(
-                        type="line",
-                        x0=-0.5,
-                        x1=len(range_df['pair_name'].unique()) - 0.5,
-                        y0=100,
-                        y1=100,
-                        line=dict(color="rgba(50, 50, 50, 0.2)", width=1, dash="dot")
-                    )
-                    
-                    # Add a band for the "normal" range (20-80%)
-                    fig1.add_shape(
-                        type="rect",
-                        x0=-0.5,
-                        x1=len(range_df['pair_name'].unique()) - 0.5,
-                        y0=20,
-                        y1=80,
-                        fillcolor="rgba(0, 200, 0, 0.1)",
-                        line=dict(width=0),
-                        layer="below"
-                    )
-                    
-                    # Update layout
-                    fig1.update_layout(
-                        yaxis_range=[-10, 110],  # Add margin for points outside range
-                        xaxis_tickangle=-45,
-                        height=500
-                    )
-                    
-                    # Annotate exterior points with markers
-                    for idx, row in range_df[range_df['outside_range']].iterrows():
-                        fig1.add_annotation(
-                            x=row['pair_name'],
-                            y=row['display_percentile'],
-                            text="⚠️",
-                            showarrow=False,
-                            font=dict(size=16)
+                    if not range_df.empty:
+                        # Calculate percentile within range for each pair
+                        range_df['percentile'] = range_df.apply(
+                            lambda row: ((row['current_spread'] - row['weekly_low']) / 
+                                        (row['weekly_high'] - row['weekly_low'])) * 100 
+                                        if row['weekly_high'] > row['weekly_low'] else 50, 
+                            axis=1
                         )
-                    
-                    st.plotly_chart(fig1, use_container_width=True)
-                    
-                    # Add explanatory text
-                    st.markdown("""
-                    **Understanding the Weekly Range Chart:**
-                    - **0%**: At or below the lowest spread seen this week
-                    - **50%**: Middle of the weekly range
-                    - **100%**: At or above the highest spread seen this week
-                    - **⚠️ Marker**: Indicates spread is currently outside the weekly range
-                    - **Dot Size**: Larger dots indicate greater deviation from baseline
-                    """)
-                else:
-                    st.info("No weekly range data available for visualization")
+                        
+                        # Clamp percentiles to 0-100 range for display
+                        range_df['display_percentile'] = range_df['percentile'].clip(0, 100)
+                        
+                        # For points outside the range, add an "outside" flag
+                        range_df['outside_range'] = ((range_df['current_spread'] < range_df['weekly_low']) | 
+                                                   (range_df['current_spread'] > range_df['weekly_high']))
+                        
+                        # Create color coding for percentile as strings to avoid groupby issues
+                        range_df['color_code'] = pd.cut(
+                            range_df['display_percentile'],
+                            bins=[0, 20, 40, 60, 80, 100],
+                            labels=['Very Low', 'Low', 'Normal', 'High', 'Very High'],
+                            include_lowest=True
+                        ).astype(str)
+                        
+                        # Add a spot size based on change ratio
+                        range_df['spot_size'] = (abs(range_df['spread_change_ratio'] - 1) * 20 + 5).clip(5, 15)
+                        
+                        # Create scatter plot
+                        fig1 = px.scatter(
+                            range_df,
+                            x='pair_name',
+                            y='display_percentile',
+                            color='color_code',
+                            size='spot_size',
+                            hover_name='pair_name',
+                            hover_data={
+                                'pair_name': False,
+                                'display_percentile': ':.1f',
+                                'current_spread': ':.2f',
+                                'weekly_low': ':.2f',
+                                'weekly_high': ':.2f',
+                                'spot_size': False
+                            },
+                            labels={
+                                'display_percentile': 'Position in Weekly Range (%)',
+                                'pair_name': 'Trading Pair',
+                                'color_code': 'Range Position'
+                            },
+                            title="Current Spread Position in Weekly Range",
+                            color_discrete_map={
+                                'Very Low': '#1565C0',
+                                'Low': '#42A5F5',
+                                'Normal': '#66BB6A',
+                                'High': '#FFA726',
+                                'Very High': '#E53935'
+                            }
+                        )
+                        
+                        # Add reference lines and bands
+                        fig1.add_shape(
+                            type="line", x0=-0.5, x1=len(range_df['pair_name'].unique()) - 0.5,
+                            y0=0, y1=0, line=dict(color="rgba(50, 50, 50, 0.2)", width=1, dash="dot")
+                        )
+                        
+                        fig1.add_shape(
+                            type="line", x0=-0.5, x1=len(range_df['pair_name'].unique()) - 0.5,
+                            y0=100, y1=100, line=dict(color="rgba(50, 50, 50, 0.2)", width=1, dash="dot")
+                        )
+                        
+                        fig1.add_shape(
+                            type="rect", x0=-0.5, x1=len(range_df['pair_name'].unique()) - 0.5,
+                            y0=20, y1=80, fillcolor="rgba(0, 200, 0, 0.1)", line=dict(width=0), layer="below"
+                        )
+                        
+                        # Update layout
+                        fig1.update_layout(
+                            yaxis_range=[-10, 110],
+                            xaxis_tickangle=-45,
+                            height=500
+                        )
+                        
+                        # Annotate exterior points with markers
+                        outside_range_df = range_df[range_df['outside_range']]
+                        if not outside_range_df.empty:
+                            for _, row in outside_range_df.iterrows():
+                                fig1.add_annotation(
+                                    x=row['pair_name'],
+                                    y=row['display_percentile'],
+                                    text="⚠️",
+                                    showarrow=False,
+                                    font=dict(size=16)
+                                )
+                        
+                        st.plotly_chart(fig1, use_container_width=True)
+                    else:
+                        st.info("No weekly range data available for visualization")
+                except Exception as e:
+                    st.error(f"Error creating the weekly range chart: {str(e)}")
             
             with col2:
                 # Create a scatter plot showing current buffer rate vs recommended
-                fig2 = px.scatter(
-                    rec_df,
-                    x='current_buffer_rate',
-                    y='recommended_buffer_rate',
-                    color='token_type',
-                    hover_name='pair_name',
-                    labels={
-                        'current_buffer_rate': 'Current Buffer Rate',
-                        'recommended_buffer_rate': 'Recommended Buffer Rate',
-                        'token_type': 'Token Type'
-                    },
-                    title="Current vs Recommended Buffer Rates"
-                )
-                
-                # Add diagonal reference line (no change)
-                max_val = max(rec_df['current_buffer_rate'].max(), rec_df['recommended_buffer_rate'].max())
-                fig2.add_trace(go.Scatter(
-                    x=[0, max_val],
-                    y=[0, max_val],
-                    mode='lines',
-                    line=dict(color='red', dash='dash'),
-                    name='No Change'
-                ))
-                
-                fig2.update_layout(
-                    xaxis_title="Current Buffer Rate",
-                    yaxis_title="Recommended Buffer Rate",
-                    height=500
-                )
-                
-                st.plotly_chart(fig2, use_container_width=True)
+                try:
+                    fig2 = px.scatter(
+                        rec_df,
+                        x='current_buffer_rate',
+                        y='recommended_buffer_rate',
+                        color='token_type',
+                        hover_name='pair_name',
+                        labels={
+                            'current_buffer_rate': 'Current Buffer Rate',
+                            'recommended_buffer_rate': 'Recommended Buffer Rate',
+                            'token_type': 'Token Type'
+                        },
+                        title="Current vs Recommended Buffer Rates"
+                    )
+                    
+                    # Add diagonal reference line
+                    max_val = max(rec_df['current_buffer_rate'].max(), rec_df['recommended_buffer_rate'].max())
+                    fig2.add_trace(go.Scatter(
+                        x=[0, max_val],
+                        y=[0, max_val],
+                        mode='lines',
+                        line=dict(color='red', dash='dash'),
+                        name='No Change'
+                    ))
+                    
+                    fig2.update_layout(
+                        xaxis_title="Current Buffer Rate",
+                        yaxis_title="Recommended Buffer Rate",
+                        height=500
+                    )
+                    
+                    st.plotly_chart(fig2, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Error creating buffer rate chart: {str(e)}")
             
             # Add a visualization for weekly range percentage distribution
             st.markdown("### Weekly Range Analysis")
             
             # Create a histogram of weekly range percentages
-            if 'weekly_range' in rec_df.columns and 'current_spread' in rec_df.columns:
-                # Calculate weekly range as percentage of current spread
-                range_percent_df = rec_df.copy()
-                range_percent_df['weekly_range_pct'] = range_percent_df.apply(
-                    lambda row: (row['weekly_range'] / row['current_spread']) * 100 if pd.notnull(row['weekly_range']) and row['current_spread'] > 0 else np.nan,
-                    axis=1
-                )
-                
-                # Drop rows with missing data
-                range_percent_df = range_percent_df.dropna(subset=['weekly_range_pct'])
-                
-                if not range_percent_df.empty:
-                    # Create histogram
-                    fig3 = px.histogram(
-                        range_percent_df,
-                        x='weekly_range_pct',
-                        color='token_type',
-                        nbins=20,
-                        title="Distribution of Weekly Range as Percentage of Current Spread",
-                        labels={
-                            'weekly_range_pct': 'Weekly Range (% of Current Spread)',
-                            'token_type': 'Token Type'
-                        },
-                        color_discrete_map={
-                            'Major': '#1E88E5',
-                            'Altcoin': '#FFA726'
-                        }
+            try:
+                if 'weekly_range' in rec_df.columns and 'current_spread' in rec_df.columns:
+                    # Calculate weekly range as percentage of current spread
+                    range_percent_df = rec_df.copy()
+                    range_percent_df['weekly_range_pct'] = range_percent_df.apply(
+                        lambda row: (row['weekly_range'] / row['current_spread']) * 100 if pd.notnull(row['weekly_range']) and row['current_spread'] > 0 else np.nan,
+                        axis=1
                     )
                     
-                    # Add vertical reference lines for volatility thresholds
-                    fig3.add_vline(x=25, line_dash="dash", line_color="#1E88E5", annotation_text="Very Stable (25%)")
-                    fig3.add_vline(x=50, line_dash="dash", line_color="#43A047", annotation_text="Moderately Stable (50%)")
-                    fig3.add_vline(x=100, line_dash="dash", line_color="#FFA726", annotation_text="Volatile (100%)")
+                    # Drop rows with missing data
+                    range_percent_df = range_percent_df.dropna(subset=['weekly_range_pct'])
                     
-                    # Update layout
-                    fig3.update_layout(
-                        xaxis_title="Weekly Range as % of Current Spread",
-                        yaxis_title="Number of Tokens",
-                        height=400,
-                        bargap=0.1
-                    )
-                    
-                    st.plotly_chart(fig3, use_container_width=True)
-                    # Add explanatory text about what this visualization shows
-                    st.markdown("""
-                    **Understanding Weekly Range Percentage:**
-                    
-                    This chart shows the distribution of tokens based on how much their spreads vary throughout the week compared to their current spread.
-                    
-                    - **Very Stable (< 25%)**: Tokens with weekly spread variations less than 25% of their current spread. These are the most stable tokens, with minimal fluctuations. Parameter adjustments can be more conservative for these tokens.
-                    
-                    - **Moderately Stable (25-50%)**: Tokens with normal weekly spread variations. These tokens have expected levels of volatility, and standard parameter adjustment policies work well.
-                    
-                    - **Volatile (50-100%)**: Tokens that experience significant spread variations over the week. Parameter adjustments should be more responsive for these tokens, with higher sensitivity values.
-                    
-                    - **Highly Volatile (> 100%)**: Tokens where the weekly range exceeds the current spread. These are the most volatile tokens and may require special attention, custom parameter settings, or more frequent adjustments.
-                    """)
-                    
-                    # Create a scatter plot comparing weekly range % vs spread change %
-                    fig4 = px.scatter(
-                        range_percent_df,
-                        x='weekly_range_pct',
-                        y=range_percent_df['spread_change_ratio'].apply(lambda x: abs(x - 1) * 100),  # Convert to % difference
-                        color='token_type',
-                        hover_name='pair_name',
-                        size='current_spread',
-                        title="Correlation Between Weekly Range and Spread Change",
-                        labels={
-                            'weekly_range_pct': 'Weekly Range (% of Current Spread)',
-                            'y': 'Current Spread Change from Baseline (%)',
-                            'token_type': 'Token Type'
-                        },
-                        color_discrete_map={
-                            'Major': '#1E88E5',
-                            'Altcoin': '#FFA726'
-                        }
-                    )
-                    
-                    # Update layout
-                    fig4.update_layout(
-                        xaxis_title="Weekly Range as % of Current Spread",
-                        yaxis_title="Spread Change from Baseline (%)",
-                        height=500
-                    )
-                    
-                    # Add reference grid for different zones
-                    fig4.add_shape(
-                        type="rect",
-                        x0=0, x1=50,
-                        y0=0, y1=5,
-                        fillcolor="rgba(0, 255, 0, 0.1)",
-                        line=dict(width=0),
-                        layer="below",
-                        name="Stable Zone"
-                    )
-                    
-                    fig4.add_shape(
-                        type="rect",
-                        x0=50, x1=100,
-                        y0=5, y1=10,
-                        fillcolor="rgba(255, 255, 0, 0.1)",
-                        line=dict(width=0),
-                        layer="below",
-                        name="Moderate Zone"
-                    )
-                    
-                    fig4.add_shape(
-                        type="rect",
-                        x0=100, x1=200,
-                        y0=10, y1=100,
-                        fillcolor="rgba(255, 165, 0, 0.1)",
-                        line=dict(width=0),
-                        layer="below",
-                        name="Volatile Zone"
-                    )
-                    
-                    # Add threshold lines
-                    fig4.add_hline(y=change_threshold*100, line_dash="dash", line_color="red", 
-                                  annotation_text=f"Change Threshold ({change_threshold*100}%)")
-                    
-                    st.plotly_chart(fig4, use_container_width=True)
-                    
-                    # Explanatory text for the correlation chart
-                    st.markdown("""
-                    **Understanding the Correlation Chart:**
-                    
-                    This chart helps identify which tokens are most suitable for parameter adjustments by comparing:
-                    
-                    - **X-axis**: Weekly range size (volatility indicator)
-                    - **Y-axis**: Current deviation from baseline spread (trigger for adjustment)
-                    - **Dot size**: Proportional to current spread value
-                    
-                    The red dashed line shows your current change threshold setting. Tokens above this line will receive parameter adjustment recommendations.
-                    
-                    **Ideal adjustment candidates are tokens that:**
-                    1. Have significant weekly volatility (farther right)
-                    2. Currently show substantial deviation from baseline (higher up)
-                    3. Have meaningful spread values (larger dots)
-                    
-                    Consider lowering the change threshold for very volatile tokens (right side) to make the system more responsive to their spread changes.
-                    """)
+                    if not range_percent_df.empty:
+                        # Create histogram
+                        fig3 = px.histogram(
+                            range_percent_df,
+                            x='weekly_range_pct',
+                            color='token_type',
+                            nbins=20,
+                            title="Distribution of Weekly Range as Percentage of Current Spread",
+                            labels={'weekly_range_pct': 'Weekly Range (% of Current Spread)', 'token_type': 'Token Type'},
+                            color_discrete_map={'Major': '#1E88E5', 'Altcoin': '#FFA726'}
+                        )
+                        
+                        # Add vertical reference lines for volatility thresholds
+                        fig3.add_vline(x=25, line_dash="dash", line_color="#1E88E5", annotation_text="Very Stable (25%)")
+                        fig3.add_vline(x=50, line_dash="dash", line_color="#43A047", annotation_text="Moderately Stable (50%)")
+                        fig3.add_vline(x=100, line_dash="dash", line_color="#FFA726", annotation_text="Volatile (100%)")
+                        
+                        # Update layout
+                        fig3.update_layout(
+                            xaxis_title="Weekly Range as % of Current Spread",
+                            yaxis_title="Number of Tokens",
+                            height=400,
+                            bargap=0.1
+                        )
+                        
+                        st.plotly_chart(fig3, use_container_width=True)
+                        
+                        # Create a scatter plot comparing weekly range % vs spread change %
+                        fig4 = px.scatter(
+                            range_percent_df,
+                            x='weekly_range_pct',
+                            y=range_percent_df['spread_change_ratio'].apply(lambda x: abs(x - 1) * 100),  # Convert to % difference
+                            color='token_type',
+                            hover_name='pair_name',
+                            size='current_spread',
+                            title="Correlation Between Weekly Range and Spread Change",
+                            labels={
+                                'weekly_range_pct': 'Weekly Range (% of Current Spread)',
+                                'y': 'Current Spread Change from Baseline (%)',
+                                'token_type': 'Token Type'
+                            },
+                            color_discrete_map={'Major': '#1E88E5', 'Altcoin': '#FFA726'}
+                        )
+                        
+                        # Update layout
+                        fig4.update_layout(
+                            xaxis_title="Weekly Range as % of Current Spread",
+                            yaxis_title="Spread Change from Baseline (%)",
+                            height=500
+                        )
+                        
+                        # Add reference grid for different zones
+                        fig4.add_shape(type="rect", x0=0, x1=50, y0=0, y1=5, fillcolor="rgba(0, 255, 0, 0.1)", line=dict(width=0), layer="below")
+                        fig4.add_shape(type="rect", x0=50, x1=100, y0=5, y1=10, fillcolor="rgba(255, 255, 0, 0.1)", line=dict(width=0), layer="below")
+                        fig4.add_shape(type="rect", x0=100, x1=200, y0=10, y1=100, fillcolor="rgba(255, 165, 0, 0.1)", line=dict(width=0), layer="below")
+                        
+                        # Add threshold line
+                        fig4.add_hline(y=change_threshold*100, line_dash="dash", line_color="red", 
+                                      annotation_text=f"Change Threshold ({change_threshold*100}%)")
+                        
+                        st.plotly_chart(fig4, use_container_width=True)
+                        
+                        # Recommendations title
+                        st.markdown("### Recommended Change Thresholds by Token Volatility")
+                        
+                        # Group tokens by volatility category
+                        volatility_categories = [
+                            {'name': 'Very Stable', 'min': 0, 'max': 25, 'rec_threshold': 0.1, 'color': '#1E88E5'},
+                            {'name': 'Moderately Stable', 'min': 25, 'max': 50, 'rec_threshold': 0.05, 'color': '#43A047'},
+                            {'name': 'Volatile', 'min': 50, 'max': 100, 'rec_threshold': 0.03, 'color': '#FFA726'},
+                            {'name': 'Highly Volatile', 'min': 100, 'max': float('inf'), 'rec_threshold': 0.01, 'color': '#E53935'}
+                        ]
+                        
+                        # Create a DataFrame to store token category and recommended threshold
+                        threshold_recs = []
+                        
+                        for _, row in range_percent_df.iterrows():
+                            # Find which category this token belongs to
+                            for category in volatility_categories:
+                                if category['min'] <= row['weekly_range_pct'] < category['max']:
+                                    recommended_threshold = category['rec_threshold']
+                                    volatility_category = category['name']
+                                    color = category['color']
+                                    break
+                            else:
+                                # Default fallback (should not happen)
+                                recommended_threshold = 0.05
+                                volatility_category = 'Unknown'
+                                color = '#9E9E9E'
+                            
+                            # Add to recommendations
+                            threshold_recs.append({
+                                'Pair': row['pair_name'],
+                                'Type': row['token_type'],
+                                'Weekly Range %': f"{row['weekly_range_pct']:.2f}%",
+                                'Volatility Category': volatility_category,
+                                'Recommended Threshold': f"{recommended_threshold*100:.1f}%",
+                                'Current Threshold': f"{change_threshold*100:.1f}%",
+                                'Color': color
+                            })
+                        
+                        # Create DataFrame and sort by volatility
+                        threshold_df = pd.DataFrame(threshold_recs)
+                        volatility_order = {'Very Stable': 0, 'Moderately Stable': 1, 'Volatile': 2, 'Highly Volatile': 3}
+                        threshold_df['sort_order'] = threshold_df['Volatility Category'].map(volatility_order)
+                        threshold_df = threshold_df.sort_values(['sort_order', 'Pair'])
+                        
+                        # Create HTML table with colored cells
+                        html_rows = []
+                        html_rows.append("<table style='width:100%; border-collapse:collapse;'>")
+                        html_rows.append("<tr style='background-color:#f2f2f2;'>")
+                        html_rows.append("<th style='text-align:left; padding:8px;'>Pair</th>")
+                        html_rows.append("<th style='text-align:center; padding:8px;'>Type</th>")
+                        html_rows.append("<th style='text-align:center; padding:8px;'>Weekly Range %</th>")
+                        html_rows.append("<th style='text-align:center; padding:8px;'>Volatility Category</th>")
+                        html_rows.append("<th style='text-align:center; padding:8px;'>Recommended Threshold</th>")
+                        html_rows.append("<th style='text-align:center; padding:8px;'>Current Threshold</th>")
+                        html_rows.append("</tr>")
+                        
+                        for _, row in threshold_df.iterrows():
+                            html_rows.append("<tr>")
+                            html_rows.append(f"<td style='text-align:left; padding:8px;'>{row['Pair']}</td>")
+                            html_rows.append(f"<td style='text-align:center; padding:8px;'>{row['Type']}</td>")
+                            html_rows.append(f"<td style='text-align:center; padding:8px;'>{row['Weekly Range %']}</td>")
+                            html_rows.append(f"<td style='text-align:center; padding:8px; background-color:{row['Color']}; color:white;'>{row['Volatility Category']}</td>")
+                            html_rows.append(f"<td style='text-align:center; padding:8px;'>{row['Recommended Threshold']}</td>")
+                            html_rows.append(f"<td style='text-align:center; padding:8px;'>{row['Current Threshold']}</td>")
+                            html_rows.append("</tr>")
+                        
+                        html_rows.append("</table>")
+                        html_table = "".join(html_rows)
+                        
+                        st.markdown(html_table, unsafe_allow_html=True)
+                        
+                        # Create summary statistics
+                        volatility_counts = threshold_df['Volatility Category'].value_counts().reset_index()
+                        volatility_counts.columns = ['Category', 'Count']
+                        volatility_counts['Color'] = volatility_counts['Category'].map({
+                            'Very Stable': '#1E88E5', 'Moderately Stable': '#43A047',
+                            'Volatile': '#FFA726', 'Highly Volatile': '#E53935'
+                        })
+                        volatility_counts['sort_order'] = volatility_counts['Category'].map(volatility_order)
+                        volatility_counts = volatility_counts.sort_values('sort_order')
+                        
+                        # Create bar chart of volatility distribution
+                        fig6 = px.bar(
+                            volatility_counts,
+                            x='Count',
+                            y='Category',
+                            orientation='h',
+                            title="Distribution of Tokens by Volatility Category",
+                            color='Category',
+                            color_discrete_map={
+                                'Very Stable': '#1E88E5', 'Moderately Stable': '#43A047',
+                                'Volatile': '#FFA726', 'Highly Volatile': '#E53935'
+                            }
+                        )
+                        
+                        # Update layout
+                        fig6.update_layout(
+                            xaxis_title="Number of Tokens",
+                            yaxis_title="Volatility Category",
+                            yaxis_categoryorder='array',
+                            yaxis_categoryarray=['Highly Volatile', 'Volatile', 'Moderately Stable', 'Very Stable'],
+                            height=300,
+                            showlegend=False
+                        )
+                        
+                        # Add value labels
+                        fig6.update_traces(texttemplate='%{x}', textposition='outside')
+                        
+                        st.plotly_chart(fig6, use_container_width=True)
+                    else:
+                        st.info("Insufficient data for weekly range percentage analysis")
                 else:
-                    st.info("Insufficient data for weekly range percentage analysis")
-            
-            # Add a visualization for spread distribution
-            st.markdown("### Spread Distribution Analysis")
-            
-            # Create a box plot of current spreads vs baselines by token type
-            box_df = rec_df.copy()
-            
-            # Create long-format data for boxplot
-            box_data = []
-            for _, row in box_df.iterrows():
-                # Current spread
-                box_data.append({
-                    'Pair': row['pair_name'],
-                    'Token Type': row['token_type'],
-                    'Spread Type': 'Current',
-                    'Spread Value': row['current_spread']
-                })
-                # Baseline spread
-                box_data.append({
-                    'Pair': row['pair_name'],
-                    'Token Type': row['token_type'],
-                    'Spread Type': 'Baseline', 
-                    'Spread Value': row['baseline_spread']
-                })
-                # Weekly low (if available)
-                if pd.notnull(row['weekly_low']):
-                    box_data.append({
-                        'Pair': row['pair_name'],
-                        'Token Type': row['token_type'],
-                        'Spread Type': 'Weekly Low',
-                        'Spread Value': row['weekly_low']
-                    })
-                # Weekly high (if available)
-                if pd.notnull(row['weekly_high']):
-                    box_data.append({
-                        'Pair': row['pair_name'],
-                        'Token Type': row['token_type'],
-                        'Spread Type': 'Weekly High',
-                        'Spread Value': row['weekly_high']
-                    })
-            
-            box_plot_df = pd.DataFrame(box_data)
-            
-            if not box_plot_df.empty:
-                fig5 = px.box(
-                    box_plot_df,
-                    x='Token Type',
-                    y='Spread Value',
-                    color='Spread Type',
-                    title="Spread Distribution by Token Type",
-                    labels={
-                        'Spread Value': f'Spread ({scale_label})',
-                        'Token Type': 'Token Type',
-                        'Spread Type': 'Spread Type'
-                    },
-                    color_discrete_map={
-                        'Current': '#FF9800',
-                        'Baseline': '#2196F3',
-                        'Weekly Low': '#4CAF50',
-                        'Weekly High': '#F44336'
-                    }
-                )
-                
-                fig5.update_layout(height=500)
-                st.plotly_chart(fig5, use_container_width=True)
+                    st.info("Weekly range data not available. Check data quality or refresh the data.")
+            except Exception as e:
+                st.error(f"Error in weekly range analysis: {str(e)}")
             
             # Handle the "Apply Recommendations" button
             if apply_button:
@@ -1555,272 +1220,6 @@ def main():
                     st.cache_data.clear()
                 else:
                     st.info("No significant parameter changes to apply")
-            
-            # Add explanatory content
-            with st.expander("How Parameter Optimization Works"):
-                st.markdown("""
-                ### How Parameter Optimization Works
-                
-                #### Key Concepts
-                
-                1. **Buffer Rate**: Used in calculating trigger prices for busts and stop losses:
-                   ```
-                   P_trigger = P_close * (1 + trade_sign*bust_buffer)
-                   ```
-                  - Higher buffer rate means more distance to liquidation
-                  - This provides greater protection during volatile periods
-                
-                2. **Position Multiplier**: Used in market impact calculations:
-                   ```
-                   P_close(T) = P(t) + ((1 - base_rate) / (1 + 1/abs((P(T)/P(t) - 1)*rate_multiplier)^rate_exponent + bet_amount*bet_multiplier/(10^6*abs(P(T)/P(t) - 1)*position_multiplier)))*(P(T) - P(t))
-                   ```
-                  - Lower position multiplier increases market impact
-                  - This reduces PnL for large winning positions
-                
-                #### Optimization Logic
-                
-                - **When Market Spreads Increase**:
-                  - Buffer rate increases (more protection against volatility)
-                  - Position multiplier decreases (more impact on large positions)
-                  - Result: Better protection for the exchange during volatile periods
-                
-                - **When Market Spreads Decrease**:
-                  - Buffer rate decreases (less protection needed)
-                  - Position multiplier increases (less impact on positions)
-                  - Result: Better user experience during stable periods
-                
-                #### Parameter Controls
-                
-                - **Buffer Sensitivity**: Controls how strongly buffer rates react to spread changes
-                  - Higher values make the system more aggressive in adjusting buffer rates
-                
-                - **Position Sensitivity**: Controls how strongly position multipliers react to spread changes
-                  - Higher values make the system more aggressive in adjusting position multipliers
-                
-                - **Change Threshold**: Minimum spread difference required before recommending changes
-                  - Lower values make the system more responsive to smaller market changes
-                
-                #### Weekly Range Context
-                
-                The weekly range data provides important market context:
-                
-                - **Weekly Low**: Lowest spread observed over the past 7 days
-                - **Weekly High**: Highest spread observed over the past 7 days
-                - **Range**: Difference between high and low (shows volatility)
-                - **Weekly Range %**: How large the weekly range is relative to current spread
-                  - Shows typical volatility level for this token
-                  - Higher percentages indicate tokens that experience larger spread changes
-                  - These tokens typically benefit more from dynamic parameter adjustments
-                
-                - **Position in Range**: Where the current spread sits in the weekly range
-                  - Near bottom (0-20%): Unusually tight spreads, might widen soon
-                  - Middle (20-80%): Normal market conditions
-                  - Near top (80-100%): Unusually wide spreads, might tighten soon
-                  - Outside range: Extreme market conditions, needs special attention
-                
-                #### Safety Constraints
-                
-                - **Buffer Rate Limit**: Never exceeds `0.9/max_leverage` to avoid immediate liquidations
-                - **Position Multiplier Bounds**: Between 100,000 and 10,000,000
-                
-                The system automatically maintains these optimizations while keeping all parameters within safe bounds.
-                """)
-                
-            # Add new expander specifically about Weekly Range Percentage
-            with st.expander("Understanding Weekly Range Percentage"):
-                st.markdown("""
-                ### Understanding Weekly Range Percentage
-                
-                The **Weekly Range Percentage** is a key metric that shows how much a token's spread typically varies throughout the week relative to its current spread. This helps determine which tokens are most suitable for dynamic parameter adjustments.
-                
-                #### How It's Calculated
-                
-                ```
-                Weekly Range % = (Weekly High - Weekly Low) / Current Spread × 100%
-                ```
-                
-                This calculation tells you what percentage of the current spread is represented by the token's typical weekly fluctuation range.
-                
-                #### Interpreting the Values
-                
-                - **< 25% (Blue)**: Very stable tokens
-                  - The spread barely changes throughout the week
-                  - These tokens may not need frequent parameter adjustments
-                  - Consider using higher change thresholds (e.g., 10%)
-                
-                - **25-50% (Green)**: Moderately stable tokens
-                  - Normal level of spread fluctuation
-                  - Standard parameter adjustment strategies work well
-                  - The default 5% change threshold is appropriate
-                  
-                - **50-100% (Orange)**: Volatile tokens
-                  - Significant spread fluctuations are common
-                  - These tokens benefit from more responsive parameter adjustments
-                  - Consider using lower change thresholds (e.g., 2-3%)
-                  
-                - **> 100% (Red)**: Highly volatile tokens
-                  - Extreme spread fluctuations
-                  - These tokens need very responsive parameter management
-                  - Consider using very low change thresholds (e.g., 1%)
-                  - May benefit from more frequent baseline resets
-                
-                #### Why This Matters
-                
-                The weekly range percentage helps you:
-                
-                1. **Identify Volatility Levels**: Understand which tokens experience large spread variations
-                
-                2. **Customize Thresholds**: Set appropriate change thresholds for different token categories
-                
-                3. **Predict Parameter Stability**: Estimate how frequently parameters will need adjustment
-                
-                4. **Prioritize Monitoring**: Focus attention on the most volatile tokens
-                
-                The ideal change threshold for a token is related to its weekly range percentage. As a general rule:
-                
-                ```
-                Recommended Change Threshold ≈ (Weekly Range %) ÷ 10
-                ```
-                
-                For example, a token with a 50% weekly range might work well with a 5% change threshold.
-                """)
-                
-            # Add new visualization for recommended change thresholds
-            st.markdown("### Recommended Change Thresholds by Token Volatility")
-            
-            # Filter for tokens with valid weekly range percentage data
-            if 'weekly_range_pct' in locals() and not range_percent_df.empty:
-                # Group tokens by volatility category
-                volatility_categories = [
-                    {'name': 'Very Stable', 'min': 0, 'max': 25, 'rec_threshold': 0.01, 'color': '#1E88E5'},
-                    {'name': 'Moderately Stable', 'min': 25, 'max': 50, 'rec_threshold': 0.05, 'color': '#43A047'},
-                    {'name': 'Volatile', 'min': 50, 'max': 100, 'rec_threshold': 0.03, 'color': '#FFA726'},
-                    {'name': 'Highly Volatile', 'min': 100, 'max': float('inf'), 'rec_threshold': 0.01, 'color': '#E53935'}
-                ]
-                
-                # Create a DataFrame to store token category and recommended threshold
-                threshold_recs = []
-                
-                for _, row in range_percent_df.iterrows():
-                    # Find which category this token belongs to
-                    for category in volatility_categories:
-                        if category['min'] <= row['weekly_range_pct'] < category['max']:
-                            recommended_threshold = category['rec_threshold']
-                            volatility_category = category['name']
-                            color = category['color']
-                            break
-                    else:
-                        # Default fallback (should not happen)
-                        recommended_threshold = 0.05
-                        volatility_category = 'Unknown'
-                        color = '#9E9E9E'
-                    
-                    # Add to recommendations
-                    threshold_recs.append({
-                        'Pair': row['pair_name'],
-                        'Type': row['token_type'],
-                        'Weekly Range %': f"{row['weekly_range_pct']:.2f}%",
-                        'Volatility Category': volatility_category,
-                        'Recommended Threshold': f"{recommended_threshold*100:.1f}%",
-                        'Current Threshold': f"{change_threshold*100:.1f}%",
-                        'Color': color
-                    })
-                
-                # Create DataFrame and sort by volatility
-                threshold_df = pd.DataFrame(threshold_recs)
-                volatility_order = {'Very Stable': 0, 'Moderately Stable': 1, 'Volatile': 2, 'Highly Volatile': 3}
-                threshold_df['sort_order'] = threshold_df['Volatility Category'].map(volatility_order)
-                threshold_df = threshold_df.sort_values(['sort_order', 'Pair'])
-                
-                # Display recommendations table
-                # Format the HTML table with colored cells for volatility category
-                html_rows = []
-                html_rows.append("<table style='width:100%; border-collapse:collapse;'>")
-                html_rows.append("<tr style='background-color:#f2f2f2;'>")
-                html_rows.append("<th style='text-align:left; padding:8px;'>Pair</th>")
-                html_rows.append("<th style='text-align:center; padding:8px;'>Type</th>")
-                html_rows.append("<th style='text-align:center; padding:8px;'>Weekly Range %</th>")
-                html_rows.append("<th style='text-align:center; padding:8px;'>Volatility Category</th>")
-                html_rows.append("<th style='text-align:center; padding:8px;'>Recommended Threshold</th>")
-                html_rows.append("<th style='text-align:center; padding:8px;'>Current Threshold</th>")
-                html_rows.append("</tr>")
-                
-                for _, row in threshold_df.iterrows():
-                    html_rows.append("<tr>")
-                    html_rows.append(f"<td style='text-align:left; padding:8px;'>{row['Pair']}</td>")
-                    html_rows.append(f"<td style='text-align:center; padding:8px;'>{row['Type']}</td>")
-                    html_rows.append(f"<td style='text-align:center; padding:8px;'>{row['Weekly Range %']}</td>")
-                    html_rows.append(f"<td style='text-align:center; padding:8px; background-color:{row['Color']}; color:white;'>{row['Volatility Category']}</td>")
-                    html_rows.append(f"<td style='text-align:center; padding:8px;'>{row['Recommended Threshold']}</td>")
-                    html_rows.append(f"<td style='text-align:center; padding:8px;'>{row['Current Threshold']}</td>")
-                    html_rows.append("</tr>")
-                
-                html_rows.append("</table>")
-                html_table = "".join(html_rows)
-                
-                st.markdown(html_table, unsafe_allow_html=True)
-                
-                # Create stacked bar chart summarizing the volatility distribution
-                volatility_counts = threshold_df['Volatility Category'].value_counts().reset_index()
-                volatility_counts.columns = ['Category', 'Count']
-                
-                # Add color column
-                volatility_counts['Color'] = volatility_counts['Category'].map({
-                    'Very Stable': '#1E88E5',
-                    'Moderately Stable': '#43A047',
-                    'Volatile': '#FFA726',
-                    'Highly Volatile': '#E53935'
-                })
-                
-                # Sort in the correct order
-                volatility_counts['sort_order'] = volatility_counts['Category'].map(volatility_order)
-                volatility_counts = volatility_counts.sort_values('sort_order')
-                
-                # Create bar chart
-                fig6 = px.bar(
-                    volatility_counts,
-                    x='Count',
-                    y='Category',
-                    orientation='h',
-                    title="Distribution of Tokens by Volatility Category",
-                    color='Category',
-                    color_discrete_map={
-                        'Very Stable': '#1E88E5',
-                        'Moderately Stable': '#43A047',
-                        'Volatile': '#FFA726',
-                        'Highly Volatile': '#E53935'
-                    }
-                )
-                
-                # Update layout
-                fig6.update_layout(
-                    xaxis_title="Number of Tokens",
-                    yaxis_title="Volatility Category",
-                    yaxis_categoryorder='array',
-                    yaxis_categoryarray=['Highly Volatile', 'Volatile', 'Moderately Stable', 'Very Stable'],
-                    height=300,
-                    showlegend=False
-                )
-                
-                # Add value labels
-                fig6.update_traces(texttemplate='%{x}', textposition='outside')
-                
-                st.plotly_chart(fig6, use_container_width=True)
-                
-                # Add conclusion and settings recommendation
-                st.markdown("""
-                ### Recommendations Based on Token Volatility
-                
-                Based on the volatility analysis above, consider these threshold settings:
-                
-                1. For tokens with **high volatility** (orange and red categories), consider using a **lower change threshold** (1-3%) to make the system more responsive to spread changes.
-                
-                2. For tokens with **low volatility** (blue and green categories), the current threshold of 5% is appropriate or could even be increased to avoid unnecessary parameter adjustments.
-                
-                You can adjust the change threshold in the sidebar to find the optimal balance between responsiveness and stability.
-                """)
-            else:
-                st.info("Insufficient data for threshold recommendations")
         else:
             st.warning("Unable to generate recommendations. Check data quality.")
     else:
