@@ -72,6 +72,13 @@ st.markdown("""
         margin: 10px 0;
         border: 1px solid #ffeeba;
     }
+    /* Parameter controls section */
+    .parameter-controls {
+        background-color: #e9ecef;
+        padding: 15px;
+        border-radius: 5px;
+        margin: 15px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -299,7 +306,7 @@ def get_non_surf_average_spread(spread_data, pair_name, fee_level='avg_fee1'):
         return avg_value
     return None
 
-def calculate_recommended_params(current_buffer_rate, current_position_multiplier, current_spread, baseline_spread, max_leverage):
+def calculate_recommended_params(current_buffer_rate, current_position_multiplier, current_spread, baseline_spread, max_leverage, buffer_sensitivity, position_sensitivity, significant_change_threshold):
     """
     Calculate recommended buffer rate and position multiplier based on spread changes
     
@@ -309,6 +316,9 @@ def calculate_recommended_params(current_buffer_rate, current_position_multiplie
         current_spread: Current non-Surf average spread
         baseline_spread: Baseline non-Surf average spread to compare against
         max_leverage: Maximum leverage allowed for this trading pair
+        buffer_sensitivity: How sensitive buffer rate is to spread changes
+        position_sensitivity: How sensitive position multiplier is to spread changes
+        significant_change_threshold: Minimum % change required to trigger adjustments
         
     Returns:
         Tuple of (recommended_buffer_rate, recommended_position_multiplier)
@@ -320,14 +330,8 @@ def calculate_recommended_params(current_buffer_rate, current_position_multiplie
     spread_change_ratio = current_spread / baseline_spread
     
     # Only make changes if the spread has changed significantly
-    significant_change_threshold = 0.05  # 5% change required before parameter adjustments
-    
     if abs(spread_change_ratio - 1.0) < significant_change_threshold:
         return current_buffer_rate, current_position_multiplier
-    
-    # Sensitivity parameters
-    buffer_sensitivity = 0.5  # How sensitive buffer rate is to spread changes
-    position_sensitivity = 0.5  # How sensitive position multiplier is to spread changes
     
     # Calculate recommended buffer rate (direct relationship with spread)
     # Higher spread -> higher buffer rate
@@ -497,6 +501,52 @@ def main():
     # Always select all tokens
     selected_tokens = all_tokens
     
+    # Add parameter sensitivity controls to sidebar
+    st.sidebar.header("Parameter Settings")
+    
+    # Initialize session state for parameter values if not already set
+    if 'buffer_sensitivity' not in st.session_state:
+        st.session_state['buffer_sensitivity'] = 0.5
+    if 'position_sensitivity' not in st.session_state:
+        st.session_state['position_sensitivity'] = 0.5
+    if 'change_threshold' not in st.session_state:
+        st.session_state['change_threshold'] = 0.05
+    
+    # Dropdown for buffer rate sensitivity
+    buffer_sensitivity = st.sidebar.selectbox(
+        "Buffer Rate Sensitivity",
+        options=[0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0],
+        format_func=lambda x: f"{x} - {'Low' if x < 0.5 else 'Medium' if x < 1.0 else 'High'} Sensitivity",
+        index=2,  # Default to 0.5
+        key="buffer_sensitivity"
+    )
+    
+    # Dropdown for position multiplier sensitivity 
+    position_sensitivity = st.sidebar.selectbox(
+        "Position Multiplier Sensitivity",
+        options=[0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0],
+        format_func=lambda x: f"{x} - {'Low' if x < 0.5 else 'Medium' if x < 1.0 else 'High'} Sensitivity",
+        index=2,  # Default to 0.5
+        key="position_sensitivity"
+    )
+    
+    # Dropdown for significant change threshold
+    change_threshold = st.sidebar.selectbox(
+        "Significant Change Threshold",
+        options=[0.001, 0.005, 0.01, 0.02, 0.05, 0.1],
+        format_func=lambda x: f"{x*100}% - {'Very Low' if x < 0.01 else 'Low' if x < 0.05 else 'Medium' if x < 0.1 else 'High'} Threshold",
+        index=4,  # Default to 0.05 (5%)
+        key="change_threshold"
+    )
+    
+    # Show current parameter settings
+    st.sidebar.markdown(f"""
+    **Current Settings:**
+    - Buffer Sensitivity: **{buffer_sensitivity}**
+    - Position Sensitivity: **{position_sensitivity}**
+    - Change Threshold: **{change_threshold*100}%**
+    """)
+    
     # Add a "Apply Recommendations" button
     apply_button = st.sidebar.button("Apply All Recommendations", use_container_width=True, 
                                  help="Apply all recommended parameter values to the system")
@@ -510,6 +560,20 @@ def main():
     
     # Get spread data
     daily_avg_data = fetch_daily_spread_averages(selected_tokens)
+    
+    # Display the parameter settings in the main area
+    st.markdown("""
+    <div class="parameter-controls">
+        <h3>Parameter Settings</h3>
+        <p>These settings control how the system responds to market spread changes:</p>
+        <ul>
+            <li><strong>Buffer Sensitivity:</strong> How strongly buffer rates respond to spread changes (higher = more responsive)</li>
+            <li><strong>Position Sensitivity:</strong> How strongly position multipliers respond to spread changes (higher = more responsive)</li>
+            <li><strong>Change Threshold:</strong> Minimum spread change needed before parameters are adjusted (lower = more frequent updates)</li>
+        </ul>
+        <p>Adjust these settings in the sidebar to fine-tune the recommendations.</p>
+    </div>
+    """, unsafe_allow_html=True)
     
     # Check if we have baseline data
     baseline_spreads_df = get_baseline_spreads()
@@ -563,6 +627,11 @@ def main():
         # Create recommendations dataframe
         recommendations_data = []
         
+        # Uncomment to enable debug mode
+        debug_mode = False
+        if debug_mode:
+            debug_container = st.expander("Debug Information", expanded=False)
+        
         for _, param_row in current_params_df.iterrows():
             pair_name = param_row['pair_name']
             current_buffer_rate = param_row['buffer_rate']
@@ -581,12 +650,25 @@ def main():
             
             # Calculate recommended parameters
             if current_spread is not None and baseline_spread is not None:
+                # Calculate spread change ratio for display
+                spread_change_ratio = current_spread / baseline_spread
+                
+                # Show debug information if enabled
+                if debug_mode:
+                    with debug_container:
+                        st.write(f"**{pair_name}**: Current Spread: {current_spread:.8f}, Baseline: {baseline_spread:.8f}")
+                        st.write(f"Spread Ratio: {spread_change_ratio:.4f}, Threshold: {abs(spread_change_ratio - 1.0):.4f} vs {change_threshold:.4f}")
+                
+                # Calculate recommendations using the dynamic parameters
                 rec_buffer, rec_position = calculate_recommended_params(
                     current_buffer_rate, 
                     current_position_multiplier,
                     current_spread,
                     baseline_spread,
-                    max_leverage
+                    max_leverage,
+                    buffer_sensitivity,
+                    position_sensitivity,
+                    change_threshold
                 )
                 
                 # Format the message
@@ -610,6 +692,7 @@ def main():
                     'current_spread': current_spread * scale_factor,
                     'baseline_spread': baseline_spread * scale_factor,
                     'spread_change': spread_note,
+                    'spread_change_ratio': spread_change_ratio,  # For sorting
                     'current_buffer_rate': current_buffer_rate,
                     'recommended_buffer_rate': rec_buffer,
                     'current_position_multiplier': current_position_multiplier,
@@ -764,7 +847,10 @@ def main():
             
             with col1:
                 # Create a bar chart comparing current vs baseline spreads
-                top_changed_pairs = rec_df.sort_values('significant_change', ascending=False).head(10)
+                # Sort by absolute spread change percentage
+                top_changed_pairs = rec_df.copy()
+                top_changed_pairs['abs_spread_change'] = abs(top_changed_pairs['spread_change_ratio'] - 1)
+                top_changed_pairs = top_changed_pairs.sort_values('abs_spread_change', ascending=False).head(10)
                 
                 fig1 = go.Figure()
                 fig1.add_trace(go.Bar(
@@ -896,11 +982,21 @@ def main():
                   - Position multiplier increases (less impact on positions)
                   - Result: Better user experience during stable periods
                 
+                #### Parameter Controls
+                
+                - **Buffer Sensitivity**: Controls how strongly buffer rates react to spread changes
+                  - Higher values make the system more aggressive in adjusting buffer rates
+                
+                - **Position Sensitivity**: Controls how strongly position multipliers react to spread changes
+                  - Higher values make the system more aggressive in adjusting position multipliers
+                
+                - **Change Threshold**: Minimum spread difference required before recommending changes
+                  - Lower values make the system more responsive to smaller market changes
+                
                 #### Safety Constraints
                 
                 - **Buffer Rate Limit**: Never exceeds `0.9/max_leverage` to avoid immediate liquidations
                 - **Position Multiplier Bounds**: Between 100,000 and 10,000,000
-                - **Significant Change Threshold**: Parameters only update if spread changes by at least 5%
                 
                 The system automatically maintains these optimizations while keeping all parameters within safe bounds.
                 """)
