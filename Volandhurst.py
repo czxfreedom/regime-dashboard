@@ -4,8 +4,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from sqlalchemy import create_engine
 from datetime import datetime, timedelta
+import psycopg2
 import pytz
 
 st.set_page_config(
@@ -16,12 +16,33 @@ st.set_page_config(
 
 # --- DB CONFIG ---
 try:
-    db_config = st.secrets["database"]
-    db_uri = (
-        f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
-        f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+    # You can use st.secrets in production, or hardcode for testing
+    try:
+        db_config = st.secrets["database"]
+        db_params = {
+            'host': db_config['host'],
+            'port': db_config['port'],
+            'database': db_config['database'],
+            'user': db_config['user'],
+            'password': db_config['password']
+        }
+    except:
+        # Fallback to hardcoded credentials if secrets aren't available
+        db_params = {
+            'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
+            'port': 5432,
+            'database': 'replication_report',
+            'user': 'public_replication',
+            'password': '866^FKC4hllk'
+        }
+    
+    conn = psycopg2.connect(
+        host=db_params['host'],
+        port=db_params['port'],
+        database=db_params['database'],
+        user=db_params['user'],
+        password=db_params['password']
     )
-    engine = create_engine(db_uri)
 except Exception as e:
     st.error(f"Error connecting to the database: {e}")
     st.stop()
@@ -46,19 +67,123 @@ st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 # Set extreme volatility threshold
 extreme_vol_threshold = 1.0  # 100% annualized volatility
 
+# Function to get partition tables based on date range
+def get_partition_tables(conn, start_date, end_date):
+    """
+    Get list of partition tables that need to be queried based on date range.
+    Returns a list of table names (oracle_price_log_partition_YYYYMMDD)
+    """
+    # Convert to datetime objects if they're strings
+    if isinstance(start_date, str):
+        start_date = pd.to_datetime(start_date)
+    if isinstance(end_date, str) and end_date:
+        end_date = pd.to_datetime(end_date)
+    elif end_date is None:
+        end_date = datetime.now()
+        
+    # Ensure timezone is removed
+    start_date = start_date.replace(tzinfo=None)
+    end_date = end_date.replace(tzinfo=None)
+        
+    # Generate list of dates between start and end
+    current_date = start_date
+    dates = []
+    
+    while current_date <= end_date:
+        dates.append(current_date.strftime("%Y%m%d"))
+        current_date += timedelta(days=1)
+    
+    # Create table names from dates
+    table_names = [f"oracle_price_log_partition_{date}" for date in dates]
+    
+    # Verify which tables actually exist in the database
+    cursor = conn.cursor()
+    existing_tables = []
+    
+    for table in table_names:
+        # Check if table exists
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = %s
+            );
+        """, (table,))
+        
+        if cursor.fetchone()[0]:
+            existing_tables.append(table)
+    
+    cursor.close()
+    
+    if not existing_tables:
+        st.warning(f"No partition tables found for the date range {start_date.date()} to {end_date.date()}")
+    
+    return existing_tables
+
+# Function to build query across partition tables
+def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
+    """
+    Build a complete UNION query for multiple partition tables.
+    This creates a complete, valid SQL query with correct WHERE clauses.
+    """
+    if not tables:
+        return ""
+        
+    union_parts = []
+    
+    for table in tables:
+        # Query for Surf data (source_type = 0)
+        query = f"""
+        SELECT 
+            pair_name,
+            created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp,
+            final_price
+        FROM 
+            public.{table}
+        WHERE 
+            created_at >= '{start_time}'::timestamp - INTERVAL '8 hour'
+            AND created_at <= '{end_time}'::timestamp - INTERVAL '8 hour'
+            AND source_type = 0
+            AND pair_name = '{pair_name}'
+        """
+        
+        union_parts.append(query)
+    
+    # Join with UNION and add ORDER BY at the end
+    complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp"
+    return complete_query
+
 # Fetch all available tokens from DB
 @st.cache_data(show_spinner="Fetching tokens...")
 def fetch_all_tokens():
-    query = "SELECT DISTINCT pair_name FROM public.oracle_price_log ORDER BY pair_name"
+    # Calculate time range for the last 24 hours
+    end_time = now_sg.strftime("%Y-%m-%d %H:%M:%S")
+    start_time = (now_sg - timedelta(days=lookback_days)).strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Get partition tables for this period
+    partition_tables = get_partition_tables(conn, start_time, end_time)
+    
+    if not partition_tables:
+        st.error("No partition tables found for the last 24 hours.")
+        return []
+    
+    # Get distinct tokens from the first partition table (for efficiency)
+    # You could query all tables if needed, but that might be slow
+    cursor = conn.cursor()
     try:
-        df = pd.read_sql(query, engine)
-        if df.empty:
-            st.error("No tokens found in the database.")
-            return []
-        return df['pair_name'].tolist()
+        cursor.execute(f"""
+        SELECT DISTINCT pair_name 
+        FROM public.{partition_tables[0]}
+        WHERE source_type = 0
+        ORDER BY pair_name
+        """)
+        tokens = [row[0] for row in cursor.fetchall()]
+        return tokens
     except Exception as e:
         st.error(f"Error fetching tokens: {e}")
         return ["BTC", "ETH", "SOL", "DOGE", "PEPE", "AI16Z"]  # Default fallback
+    finally:
+        cursor.close()
 
 all_tokens = fetch_all_tokens()
 
@@ -173,22 +298,28 @@ def fetch_and_calculate_volatility(token):
     now_sg = now_utc.astimezone(singapore_timezone)
     start_time_sg = now_sg - timedelta(days=lookback_days)
     
-    # Convert back to UTC for database query
-    start_time_utc = start_time_sg.astimezone(pytz.utc)
-    end_time_utc = now_sg.astimezone(pytz.utc)
+    # Convert for database query (keep as Singapore time strings as the query will handle timezone)
+    start_time = start_time_sg.strftime("%Y-%m-%d %H:%M:%S")
+    end_time = now_sg.strftime("%Y-%m-%d %H:%M:%S")
 
-    query = f"""
-    SELECT 
-        created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp, 
-        final_price, 
-        pair_name
-    FROM public.oracle_price_log
-    WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
-    AND pair_name = '{token}';
-    """
+    # Get relevant partition tables
+    partition_tables = get_partition_tables(conn, start_time_sg, now_sg)
+    
+    if not partition_tables:
+        print(f"[{token}] No partition tables found for the specified date range")
+        return None
+        
+    # Build query using partition tables
+    query = build_query_for_partition_tables(
+        partition_tables,
+        pair_name=token,
+        start_time=start_time,
+        end_time=end_time
+    )
+    
     try:
-        print(f"[{token}] Executing query: {query}")
-        df = pd.read_sql(query, engine)
+        print(f"[{token}] Executing query across {len(partition_tables)} partition tables")
+        df = pd.read_sql_query(query, conn)
         print(f"[{token}] Query executed. DataFrame shape: {df.shape}")
 
         if df.empty:
