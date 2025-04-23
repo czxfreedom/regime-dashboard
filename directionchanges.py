@@ -8,6 +8,10 @@ import plotly.express as px
 from datetime import datetime, timedelta
 import psycopg2
 import pytz
+import warnings
+
+# Suppress warnings
+warnings.filterwarnings('ignore')
 
 st.set_page_config(
     page_title="Direction Changes Analysis",
@@ -116,6 +120,37 @@ def get_partition_tables(conn, start_date, end_date):
     
     return existing_tables
 
+# Function to check if a partition table has data for a specific time period
+def check_table_data_coverage(conn, table, start_time, end_time):
+    """
+    Check if a partition table has data for the specified time period.
+    Returns a tuple of (earliest_time, latest_time, record_count)
+    """
+    cursor = conn.cursor()
+    
+    try:
+        # Query to get data coverage
+        cursor.execute(f"""
+            SELECT 
+                MIN(created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') AS earliest_time,
+                MAX(created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') AS latest_time,
+                COUNT(*) AS record_count
+            FROM 
+                public.{table}
+            WHERE 
+                source_type = 0
+                AND created_at >= '{start_time}'::timestamp - INTERVAL '8 hour'
+                AND created_at <= '{end_time}'::timestamp - INTERVAL '8 hour'
+        """)
+        
+        result = cursor.fetchone()
+        return result
+    except Exception as e:
+        print(f"Error checking data coverage for {table}: {e}")
+        return (None, None, 0)
+    finally:
+        cursor.close()
+
 # Function to build query across partition tables
 def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
     """
@@ -163,13 +198,15 @@ def fetch_all_tokens():
         st.error("No partition tables found for the last 24 hours.")
         return []
     
-    # Get distinct tokens from the first partition table (for efficiency)
-    # You could query all tables if needed, but that might be slow
+    # Use the most recent partition table to get the token list
+    latest_table = sorted(partition_tables)[-1]
+    
+    # Get distinct tokens from the most recent partition table
     cursor = conn.cursor()
     try:
         cursor.execute(f"""
         SELECT DISTINCT pair_name 
-        FROM public.{partition_tables[0]}
+        FROM public.{latest_table}
         WHERE source_type = 0
         ORDER BY pair_name
         """)
@@ -309,7 +346,7 @@ def analyze_price_runs(df):
 
     return result
 
-# Fetch price data and calculate direction changes
+# Enhanced fetch and calculate function to handle midnight transition
 @st.cache_data(ttl=600, show_spinner="Calculating direction changes...")
 def fetch_and_calculate_direction_changes(token):
     # Get current time in Singapore timezone
@@ -321,23 +358,88 @@ def fetch_and_calculate_direction_changes(token):
     start_time = start_time_sg.strftime("%Y-%m-%d %H:%M:%S")
     end_time = now_sg.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Get relevant partition tables
-    partition_tables = get_partition_tables(conn, start_time_sg, now_sg)
+    # Split the query into two parts: before and after midnight
+    midnight_sg = now_sg.replace(hour=0, minute=0, second=0, microsecond=0)
+    midnight_cutoff = midnight_sg.strftime("%Y-%m-%d %H:%M:%S")
     
-    if not partition_tables:
+    # Get tables for yesterday and today
+    yesterday = now_sg.date() - timedelta(days=1)
+    yesterday_str = yesterday.strftime("%Y%m%d")
+    today_str = now_sg.date().strftime("%Y%m%d")
+    
+    yesterday_table = f"oracle_price_log_partition_{yesterday_str}"
+    today_table = f"oracle_price_log_partition_{today_str}"
+    
+    # Check which tables exist
+    cursor = conn.cursor()
+    yesterday_exists = False
+    today_exists = False
+    
+    cursor.execute("""
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_schema = 'public' 
+            AND table_name = %s
+        );
+    """, (yesterday_table,))
+    yesterday_exists = cursor.fetchone()[0]
+    
+    cursor.execute("""
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_schema = 'public' 
+            AND table_name = %s
+        );
+    """, (today_table,))
+    today_exists = cursor.fetchone()[0]
+    
+    cursor.close()
+    
+    # Full list of tables to query
+    tables_to_query = []
+    if yesterday_exists:
+        tables_to_query.append(yesterday_table)
+    if today_exists:
+        tables_to_query.append(today_table)
+    
+    if not tables_to_query:
         print(f"[{token}] No partition tables found for the specified date range")
         return None
-        
+    
+    # Check data coverage in each table
+    if yesterday_exists:
+        yesterday_coverage = check_table_data_coverage(
+            conn, 
+            yesterday_table, 
+            start_time if start_time_sg < midnight_sg else midnight_cutoff, 
+            midnight_cutoff
+        )
+    else:
+        yesterday_coverage = (None, None, 0)
+    
+    if today_exists:
+        today_coverage = check_table_data_coverage(
+            conn, 
+            today_table, 
+            midnight_cutoff, 
+            end_time
+        )
+    else:
+        today_coverage = (None, None, 0)
+    
+    print(f"[{token}] Yesterday coverage: {yesterday_coverage}")
+    print(f"[{token}] Today coverage: {today_coverage}")
+    
     # Build query using partition tables
     query = build_query_for_partition_tables(
-        partition_tables,
+        tables_to_query,
         pair_name=token,
         start_time=start_time,
         end_time=end_time
     )
     
     try:
-        print(f"[{token}] Executing query across {len(partition_tables)} partition tables")
+        print(f"[{token}] Executing query across {len(tables_to_query)} partition tables")
         df = pd.read_sql_query(query, conn)
         print(f"[{token}] Query executed. DataFrame shape: {df.shape}")
 
@@ -367,8 +469,12 @@ def fetch_and_calculate_direction_changes(token):
         # Create a DataFrame with the results
         changes_df = direction_changes.to_frame(name='direction_changes')
         changes_df['original_datetime'] = changes_df.index
-        # Modify this line in your code
-        changes_df['time_label'] = changes_df.index.strftime('%Y-%m-%d %H:%M')  # Include date to make labels unique
+        
+        # Create a DateTime column in string format for display
+        changes_df['datetime_str'] = changes_df.index.strftime('%Y-%m-%d %H:%M')
+        
+        # Create time_label for display in the table (just HH:MM format)
+        changes_df['time_label'] = changes_df.index.strftime('%H:%M')
         
         # Calculate the 24-hour average
         changes_df['avg_24h_changes'] = changes_df['direction_changes'].mean()
@@ -441,11 +547,47 @@ for i, token in enumerate(selected_tokens):
 progress_bar.progress(1.0)
 status_text.text(f"Processed {len(token_results)}/{len(selected_tokens)} tokens successfully")
 
+# If we found any results, display the data coverage info
+if token_results:
+    # Get the earliest and latest timestamps across all results to show the actual data coverage
+    all_timestamps = []
+    for token, df in token_results.items():
+        if not df.empty and 'original_datetime' in df.columns:
+            all_timestamps.extend(df['original_datetime'].tolist())
+    
+    if all_timestamps:
+        earliest_data = min(all_timestamps)
+        latest_data = max(all_timestamps)
+        
+        # Display the data coverage info
+        data_range_col1, data_range_col2 = st.columns(2)
+        with data_range_col1:
+            st.info(f"Data coverage: From {earliest_data.strftime('%Y-%m-%d %H:%M')} to {latest_data.strftime('%Y-%m-%d %H:%M')} (Singapore Time)")
+        
+        with data_range_col2:
+            # Show a warning if the latest data is more than 2 hours old
+            time_since_latest = now_sg - latest_data
+            hours_since_latest = time_since_latest.total_seconds() / 3600
+            
+            if hours_since_latest > 2:
+                st.warning(f"⚠️ Latest data is {hours_since_latest:.1f} hours old")
+            else:
+                st.success(f"✅ Data is up to date (last update: {latest_data.strftime('%H:%M')})")
+
 # Create table for display
 if token_results:
     # Create table data
     table_data = {}
+    dates_for_labels = {}
+    
     for token, df in token_results.items():
+        # First, store the date for each time label
+        for idx, row in df.iterrows():
+            time_label = row['time_label']
+            datetime_str = row['datetime_str']
+            dates_for_labels[time_label] = datetime_str.split(' ')[0]  # Extract the date part
+            
+        # Then create the series with time_label as index
         changes_series = df.set_index('time_label')['direction_changes']
         table_data[token] = changes_series
     
@@ -462,6 +604,18 @@ if token_results:
     
     # Reindex with the ordered times
     changes_table = changes_table.reindex(ordered_times)
+    
+    # Create a new index with date-time for display
+    display_index = []
+    for time_label in changes_table.index:
+        if time_label in dates_for_labels:
+            display_index.append(f"{dates_for_labels[time_label]} {time_label}")
+        else:
+            # If we don't have a date for this time label, use just the time
+            display_index.append(time_label)
+    
+    # Set the new display index
+    changes_table.index = display_index
     
     # Function to color cells based on number of direction changes
     def color_cells(val):
@@ -729,165 +883,6 @@ if token_results:
                 st.markdown("*No tokens in this category*")
     else:
         st.warning("No direction changes data available for the selected tokens.")
-        
-    # Add some simple visualizations for directional bias
-    st.subheader("Directional Bias Analysis")
-    
-    # Collect directional bias data
-    directional_data = []
-    for token, df in token_results.items():
-        if not df.empty and 'uptime_pct' in df.columns:
-            uptime = df['uptime_pct'].iloc[0]
-            downtime = df['downtime_pct'].iloc[0]
-            flattime = df['flattime_pct'].iloc[0]
-            
-            # Calculate uptrend vs downtrend ratio
-            if downtime > 0:
-                trend_ratio = uptime / downtime
-            else:
-                trend_ratio = float('inf')
-                
-            directional_data.append({
-                'Token': token,
-                'Uptime %': round(uptime, 1),
-                'Downtime %': round(downtime, 1),
-                'Flattime %': round(flattime, 1),
-                'Up/Down Ratio': round(trend_ratio, 2) if trend_ratio != float('inf') else float('inf')
-            })
-    
-    if directional_data:
-        # Create directional bias dataframe
-        dir_df = pd.DataFrame(directional_data)
-        
-        # Sort by Up/Down Ratio
-        dir_df = dir_df.sort_values(by='Up/Down Ratio', ascending=False)
-        
-        # Display the dataframe
-        st.dataframe(dir_df, height=300, use_container_width=True)
-        
-        # Create visualization of up vs down time
-        if len(dir_df) > 0:
-            # Prepare data for stacked bar chart
-            plot_data = []
-            for _, row in dir_df.head(10).iterrows():  # Take top 10 tokens
-                plot_data.append({
-                    'Token': row['Token'],
-                    'Direction': 'Up',
-                    'Percentage': row['Uptime %']
-                })
-                plot_data.append({
-                    'Token': row['Token'],
-                    'Direction': 'Down',
-                    'Percentage': row['Downtime %']
-                })
-                plot_data.append({
-                    'Token': row['Token'],
-                    'Direction': 'Flat',
-                    'Percentage': row['Flattime %']
-                })
-            
-            plot_df = pd.DataFrame(plot_data)
-            
-            fig = px.bar(
-                plot_df,
-                x='Token',
-                y='Percentage',
-                color='Direction',
-                title='Directional Bias: Time Spent in Each Direction (Top 10 by Up/Down Ratio)',
-                color_discrete_map={'Up': 'green', 'Down': 'red', 'Flat': 'gray'},
-                barmode='stack'
-            )
-            fig.update_layout(height=500)
-            st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.warning("No directional bias data available.")
-    
-    # Analyze relationship between run length and direction changes
-    st.subheader("Run Length vs Direction Changes")
-    
-    run_vs_changes_data = []
-    for token, df in token_results.items():
-        if not df.empty and 'avg_run_length' in df.columns and 'avg_24h_changes' in df.columns:
-            run_vs_changes_data.append({
-                'Token': token,
-                'Avg Run Length': df['avg_run_length'].iloc[0],
-                'Avg Direction Changes': df['avg_24h_changes'].iloc[0]
-            })
-    
-    if run_vs_changes_data:
-        rc_df = pd.DataFrame(run_vs_changes_data)
-        
-        # Create a scatter plot
-        fig = px.scatter(
-            rc_df, 
-            x='Avg Run Length', 
-            y='Avg Direction Changes',
-            text='Token',
-            title='Relationship Between Run Length and Direction Changes',
-            labels={
-                'Avg Run Length': 'Average Run Length (consecutive price movements in same direction)',
-                'Avg Direction Changes': 'Average Direction Changes per 10min'
-            },
-            color='Avg Direction Changes',
-            color_continuous_scale='Viridis',
-            size='Avg Run Length',
-            size_max=20
-        )
-        fig.update_traces(textposition='top center')
-        fig.update_layout(height=600)
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Calculate correlation
-        corr = rc_df['Avg Run Length'].corr(rc_df['Avg Direction Changes'])
-        st.write(f"**Correlation between Run Length and Direction Changes: {corr:.3f}**")
-        st.write("""
-        **Note:** A negative correlation is expected as shorter runs typically mean more frequent direction changes.
-        """)
-    else:
-        st.warning("Insufficient data to analyze run length vs direction changes.")
-    
-    # Heat Map Analysis - shows time periods with most direction changes across all tokens
-    st.subheader("Direction Changes Heat Map (When do price directions change most?)")
-    
-    # Prepare data for the heatmap
-    if len(token_results) > 0 and len(changes_table) > 0:
-        # Calculate the average direction changes per time period across all tokens
-        avg_changes_by_time = changes_table.mean(axis=1).to_frame('avg_changes')
-        avg_changes_by_time = avg_changes_by_time.sort_index()
-        
-        # Get the hour from the index (time label)
-        # Extract the hour from the datetime index
-        avg_changes_by_time['hour'] = avg_changes_by_time.index.str.split(' ').str[1].str.split(':').str[0].astype(int)
-        
-        # Group by hour and calculate mean
-        hourly_changes = avg_changes_by_time.groupby('hour')['avg_changes'].mean().reset_index()
-        
-        # Create a bar chart
-        fig = px.bar(
-            hourly_changes,
-            x='hour',
-            y='avg_changes',
-            title='Average Direction Changes by Hour of Day (Singapore Time)',
-            labels={'hour': 'Hour of Day (24h)', 'avg_changes': 'Avg Direction Changes'},
-            color='avg_changes',
-            color_continuous_scale='Viridis'
-        )
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Add a text explanation
-        max_hour = hourly_changes.loc[hourly_changes['avg_changes'].idxmax()]
-        min_hour = hourly_changes.loc[hourly_changes['avg_changes'].idxmin()]
-        
-        st.write(f"""
-        **Analysis of Direction Changes by Time of Day:**
-        
-        - The most active hour for direction changes is **{max_hour['hour']}:00** with an average of **{max_hour['avg_changes']:.1f}** changes per 10-minute period.
-        - The least active hour is **{min_hour['hour']}:00** with an average of **{min_hour['avg_changes']:.1f}** changes per 10-minute period.
-        - This may correspond to market open/close times or periods of higher trading activity.
-        """)
-    else:
-        st.warning("Insufficient data to create the heat map analysis.")
     
     # Final Summary
     st.subheader("Executive Summary of Direction Changes Analysis")
@@ -909,13 +904,24 @@ if token_results:
         1. **{top_changing_token['Token']}** shows the highest average direction changes with **{top_changing_token['Avg Changes']}** changes per 10-minute period.
         
         2. **{lowest_changing_token['Token']}** shows the lowest average direction changes with **{lowest_changing_token['Avg Changes']}** changes per 10-minute period.
-        
-        3. Direction changes occur most frequently during the **{max_hour['hour']}:00** hour (Singapore time).
         """)
         
         if most_variable_token is not None:
             st.write(f"""
-        4. **{most_variable_token['Token']}** shows the most variable direction change behavior with a Coefficient of Variation of **{most_variable_token['CoV']}**.
+        3. **{most_variable_token['Token']}** shows the most variable direction change behavior with a Coefficient of Variation of **{most_variable_token['CoV']}**.
+            """)
+            
+        # Add data coverage information to summary
+        if all_timestamps:
+            earliest_data = min(all_timestamps)
+            latest_data = max(all_timestamps)
+            time_since_latest = now_sg - latest_data
+            hours_since_latest = time_since_latest.total_seconds() / 3600
+            
+            st.write(f"""
+        4. Data covers from **{earliest_data.strftime('%Y-%m-%d %H:%M')}** to **{latest_data.strftime('%Y-%m-%d %H:%M')}** (Singapore Time).
+        
+        5. Latest available data is **{hours_since_latest:.1f} hours** old.
             """)
     else:
         st.warning("Insufficient data to generate an executive summary.")
