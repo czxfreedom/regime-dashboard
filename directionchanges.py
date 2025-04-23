@@ -476,6 +476,9 @@ def fetch_and_calculate_direction_changes(token):
         # Create time_label for display in the table (just HH:MM format)
         changes_df['time_label'] = changes_df.index.strftime('%H:%M')
         
+        # Create a unique composite key using date and time
+        changes_df['unique_key'] = changes_df.index.strftime('%Y-%m-%d_%H:%M')
+        
         # Calculate the 24-hour average
         changes_df['avg_24h_changes'] = changes_df['direction_changes'].mean()
         
@@ -576,46 +579,43 @@ if token_results:
 
 # Create table for display
 if token_results:
-    # Create table data
+    # Create table data - USING UNIQUE KEY TO PREVENT DUPLICATE INDICES
     table_data = {}
-    dates_for_labels = {}
     
     for token, df in token_results.items():
-        # First, store the date for each time label
-        for idx, row in df.iterrows():
-            time_label = row['time_label']
-            datetime_str = row['datetime_str']
-            dates_for_labels[time_label] = datetime_str.split(' ')[0]  # Extract the date part
-            
-        # Then create the series with time_label as index
-        changes_series = df.set_index('time_label')['direction_changes']
+        # Use the unique_key as the index
+        changes_series = df.set_index('unique_key')['direction_changes']
         table_data[token] = changes_series
     
     # Create DataFrame with all tokens
     changes_table = pd.DataFrame(table_data)
     
-    # Apply the time blocks in the proper order (most recent first)
-    available_times = set(changes_table.index)
-    ordered_times = [t for t in time_block_labels if t in available_times]
+    # Now, extract the date and time from the unique_key for display
+    display_idx = []
+    time_only_idx = []
+    for idx in changes_table.index:
+        parts = idx.split('_')
+        date_part = parts[0]
+        time_part = parts[1]
+        display_idx.append(f"{date_part} {time_part}")
+        time_only_idx.append(time_part)
     
-    # If no matches are found in aligned blocks, fallback to the available times
-    if not ordered_times and available_times:
-        ordered_times = sorted(list(available_times), reverse=True)
+    # Create a mapping from unique_key to datetime for sorting
+    idx_datetime = {idx: pd.to_datetime(idx.replace('_', ' ')) for idx in changes_table.index}
     
-    # Reindex with the ordered times
-    changes_table = changes_table.reindex(ordered_times)
+    # Sort by datetime (most recent first)
+    sorted_idx = sorted(changes_table.index, key=lambda x: idx_datetime[x], reverse=True)
+    changes_table = changes_table.reindex(sorted_idx)
     
-    # Create a new index with date-time for display
-    display_index = []
-    for time_label in changes_table.index:
-        if time_label in dates_for_labels:
-            display_index.append(f"{dates_for_labels[time_label]} {time_label}")
-        else:
-            # If we don't have a date for this time label, use just the time
-            display_index.append(time_label)
+    # Update the display and time-only indices after sorting
+    display_idx = [idx.replace('_', ' ') for idx in changes_table.index]
+    time_only_idx = [idx.split('_')[1] for idx in changes_table.index]
     
-    # Set the new display index
-    changes_table.index = display_index
+    # Save the original index
+    changes_table_with_orig_idx = changes_table.copy()
+    
+    # Set the display index for presentation
+    changes_table.index = display_idx
     
     # Function to color cells based on number of direction changes
     def color_cells(val):
