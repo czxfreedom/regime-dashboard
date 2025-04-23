@@ -1,9 +1,12 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine
+import json
+from sqlalchemy import create_engine, text
 from datetime import datetime, timedelta
 import pytz
+import plotly.express as px
+import plotly.graph_objects as go
 
 # Page configuration
 st.set_page_config(
@@ -72,39 +75,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- Database Configuration ---
-def init_connection():
-    try:
-        # Try to get database config from secrets
-        db_config = st.secrets["database"]
-        db_uri = (
-            f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
-            f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-        )
-        return create_engine(db_uri)
-    except Exception as e:
-        st.sidebar.error(f"Error connecting to the database: {e}")
-        
-        # Provide manual connection option
-        st.sidebar.header("Database Connection")
-        db_user = st.sidebar.text_input("Database Username")
-        db_password = st.sidebar.text_input("Database Password", type="password")
-        db_host = st.sidebar.text_input("Database Host")
-        db_port = st.sidebar.text_input("Database Port", "5432")
-        db_name = st.sidebar.text_input("Database Name")
-        
-        if st.sidebar.button("Connect to Database"):
-            try:
-                db_uri = (
-                    f"postgresql+psycopg2://{db_user}:{db_password}"
-                    f"@{db_host}:{db_port}/{db_name}"
-                )
-                return create_engine(db_uri)
-            except Exception as e:
-                st.sidebar.error(f"Failed to connect: {e}")
-                return None
-        return None
-
 # --- Constants and Configuration ---
 # Define exchanges for spread calculation
 exchanges = ["binanceFuture", "gateFuture", "hyperliquidFuture"]
@@ -121,6 +91,21 @@ lookback_days = 1  # Default to 1 day
 # Use a fixed scale factor for consistency
 scale_factor = 10000
 scale_label = "× 10,000"
+
+# --- Database Configuration ---
+@st.cache_resource
+def init_connection():
+    try:
+        # Try to get database config from secrets
+        db_config = st.secrets["database"]
+        db_uri = (
+            f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
+            f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+        )
+        return create_engine(db_uri)
+    except Exception as e:
+        st.sidebar.error(f"Error connecting to the database: {e}")
+        return None
 
 # --- Utility Functions ---
 def is_major(token):
@@ -144,8 +129,11 @@ def parse_leverage_config(leverage_config):
         return 100  # Default max leverage if not specified
     
     try:
-        import json
-        config = json.loads(leverage_config)
+        if isinstance(leverage_config, str):
+            config = json.loads(leverage_config)
+        else:
+            config = leverage_config
+            
         if isinstance(config, list) and len(config) > 0:
             # Find the maximum leverage value in the config
             max_lev = max([item.get('leverage', 0) for item in config])
@@ -183,16 +171,22 @@ def format_with_change_indicator(old_value, new_value, is_percent=False):
         return formatted_new
 
 # --- Data Fetching Functions ---
+# Note: We're not using the engine as a cache key parameter anymore
 @st.cache_data(ttl=600)
-def fetch_all_tokens(engine):
+def fetch_all_tokens():
     """Fetch all active tokens from the database"""
-    query = """
-    SELECT DISTINCT pair_name 
-    FROM public.trade_pool_pairs
-    WHERE status = 1
-    ORDER BY pair_name
-    """
     try:
+        engine = init_connection()
+        if not engine:
+            return []
+            
+        query = """
+        SELECT DISTINCT pair_name 
+        FROM public.trade_pool_pairs
+        WHERE status = 1
+        ORDER BY pair_name
+        """
+        
         df = pd.read_sql(query, engine)
         if df.empty:
             st.error("No tokens found in the database.")
@@ -203,9 +197,13 @@ def fetch_all_tokens(engine):
         return []
 
 @st.cache_data(ttl=600)
-def fetch_daily_spread_averages(engine, tokens):
+def fetch_daily_spread_averages(tokens):
     """Fetch daily spread averages for multiple tokens (last 24 hours)"""
     try:
+        engine = init_connection()
+        if not engine:
+            return None
+            
         # Get current time in Singapore timezone
         now_utc = datetime.now(pytz.utc)
         now_sg = now_utc.astimezone(singapore_timezone)
@@ -252,29 +250,33 @@ def fetch_daily_spread_averages(engine, tokens):
         return None
 
 @st.cache_data(ttl=600)
-def fetch_current_parameters(engine):
+def fetch_current_parameters():
     """Fetch current trading parameters from the database"""
-    query = """
-    SELECT
-        pair_name,
-        buffer_rate,
-        position_multiplier,
-        max_leverage,
-        leverage_config,
-        status
-    FROM
-        public.trade_pool_pairs
-    WHERE
-        status = 1
-    ORDER BY
-        pair_name
-    """
-    
     try:
+        engine = init_connection()
+        if not engine:
+            return None
+            
+        query = """
+        SELECT
+            pair_name,
+            buffer_rate,
+            position_multiplier,
+            max_leverage,
+            leverage_config,
+            status
+        FROM
+            public.trade_pool_pairs
+        WHERE
+            status = 1
+        ORDER BY
+            pair_name
+        """
+        
         df = pd.read_sql(query, engine)
         
         # Add max_leverage column from leverage_config if it doesn't exist
-        if 'max_leverage' not in df.columns:
+        if 'max_leverage' not in df.columns or df['max_leverage'].isna().all():
             df['max_leverage'] = df['leverage_config'].apply(parse_leverage_config)
         
         return df
@@ -345,11 +347,15 @@ def calculate_recommended_params(current_buffer_rate, current_position_multiplie
     
     return recommended_buffer_rate, recommended_position_multiplier
 
-def create_baseline_spreads(engine, spread_data):
+def create_baseline_spreads(spread_data):
     """
     Create or update baseline spreads in the database
     """
     try:
+        engine = init_connection()
+        if not engine:
+            return "Database connection failed"
+            
         # Create table if it doesn't exist
         create_table_query = """
         CREATE TABLE IF NOT EXISTS spread_baselines (
@@ -359,7 +365,7 @@ def create_baseline_spreads(engine, spread_data):
         );
         """
         with engine.connect() as connection:
-            connection.execute(create_table_query)
+            connection.execute(text(create_table_query))
             connection.commit()
         
         # For each pair, calculate and save the baseline spread
@@ -384,7 +390,7 @@ def create_baseline_spreads(engine, spread_data):
                 
                 try:
                     with engine.connect() as connection:
-                        connection.execute(upsert_query)
+                        connection.execute(text(upsert_query))
                         connection.commit()
                     success_count += 1
                 except Exception as e:
@@ -396,10 +402,14 @@ def create_baseline_spreads(engine, spread_data):
         return f"Error creating baseline spreads: {e}"
 
 @st.cache_data(ttl=600)
-def get_baseline_spreads(engine):
+def get_baseline_spreads():
     """Get baseline spreads from the database"""
-    query = "SELECT pair_name, baseline_spread, updated_at FROM spread_baselines"
     try:
+        engine = init_connection()
+        if not engine:
+            return None
+            
+        query = "SELECT pair_name, baseline_spread, updated_at FROM spread_baselines"
         df = pd.read_sql(query, engine)
         if df.empty:
             return None
@@ -408,20 +418,24 @@ def get_baseline_spreads(engine):
         st.error(f"Error fetching baseline spreads: {e}")
         return None
 
-def update_trading_parameters(engine, pair_name, buffer_rate, position_multiplier):
+def update_trading_parameters(pair_name, buffer_rate, position_multiplier):
     """Update buffer_rate and position_multiplier for a trading pair"""
-    query = f"""
-    UPDATE public.trade_pool_pairs
-    SET 
-        buffer_rate = {buffer_rate},
-        position_multiplier = {position_multiplier},
-        updated_at = NOW()
-    WHERE pair_name = '{pair_name}';
-    """
-    
     try:
+        engine = init_connection()
+        if not engine:
+            return False
+            
+        query = f"""
+        UPDATE public.trade_pool_pairs
+        SET 
+            buffer_rate = {buffer_rate},
+            position_multiplier = {position_multiplier},
+            updated_at = NOW()
+        WHERE pair_name = '{pair_name}';
+        """
+        
         with engine.connect() as connection:
-            connection.execute(query)
+            connection.execute(text(query))
             connection.commit()
         return True
     except Exception as e:
@@ -435,175 +449,238 @@ def main():
     # Connect to the database
     engine = init_connection()
     if not engine:
-        st.error("Please connect to the database to continue")
+        st.error("Database connection failed. Please check connection parameters.")
+        
+        # Add manual connection form
+        with st.sidebar:
+            st.header("Database Connection")
+            db_user = st.text_input("Database Username")
+            db_password = st.text_input("Database Password", type="password")
+            db_host = st.text_input("Database Host")
+            db_port = st.text_input("Database Port", "5432")
+            db_name = st.text_input("Database Name")
+            
+            if st.button("Connect to Database"):
+                if all([db_user, db_password, db_host, db_port, db_name]):
+                    # Store connection info in session state
+                    st.session_state.db_params = {
+                        'user': db_user,
+                        'password': db_password,
+                        'host': db_host,
+                        'port': db_port,
+                        'database': db_name
+                    }
+                    st.experimental_rerun()
+                else:
+                    st.error("Please fill in all database connection fields")
+                    
         return
     
     # Success message for DB connection
     st.sidebar.success("Connected to database successfully")
     
     # Fetch all tokens and current parameters
-    all_tokens = fetch_all_tokens(engine)
-    current_params_df = fetch_current_parameters(engine)
+    all_tokens = fetch_all_tokens()
+    current_params_df = fetch_current_parameters()
     
-    if all_tokens and not current_params_df.empty:
-        # Sidebar controls
-        st.sidebar.header("Controls")
+    if not all_tokens:
+        st.error("No tokens found in the database. Please check data availability.")
+        return
         
-        # Always select all tokens
-        selected_tokens = all_tokens
-        
-        # Add a "Apply Recommendations" button
-        apply_button = st.sidebar.button("Apply All Recommendations", use_container_width=True, 
-                                     help="Apply all recommended parameter values to the system")
-        
-        # Add a "Reset Baselines" button
-        reset_button = st.sidebar.button("Reset All Baselines to Current Spreads", use_container_width=True,
-                                     help="Reset all baseline spreads to current market conditions")
-        
-        # Add a refresh button
-        refresh_button = st.sidebar.button("Refresh Data", use_container_width=True)
-        
-        # Get spread data
-        daily_avg_data = fetch_daily_spread_averages(engine, selected_tokens)
-        
-        # Check if we have baseline data
-        baseline_spreads_df = get_baseline_spreads(engine)
-        if baseline_spreads_df is None or baseline_spreads_df.empty:
-            st.warning("No baseline spreads found. Please use 'Reset All Baselines' button to establish baselines.")
-            if reset_button:
-                if daily_avg_data is not None and not daily_avg_data.empty:
-                    result = create_baseline_spreads(engine, daily_avg_data)
-                    st.success(result)
-                    # Clear cache and refresh baseline data
-                    st.cache_data.clear()
-                    baseline_spreads_df = get_baseline_spreads(engine)
-                else:
-                    st.error("No spread data available for baseline reset")
-        elif reset_button:
+    if current_params_df is None or current_params_df.empty:
+        st.error("Failed to fetch current parameters. Please check database access.")
+        return
+    
+    # Sidebar controls
+    st.sidebar.header("Controls")
+    
+    # Always select all tokens
+    selected_tokens = all_tokens
+    
+    # Add a "Apply Recommendations" button
+    apply_button = st.sidebar.button("Apply All Recommendations", use_container_width=True, 
+                                 help="Apply all recommended parameter values to the system")
+    
+    # Add a "Reset Baselines" button
+    reset_button = st.sidebar.button("Reset All Baselines to Current Spreads", use_container_width=True,
+                                 help="Reset all baseline spreads to current market conditions")
+    
+    # Add a refresh button
+    refresh_button = st.sidebar.button("Refresh Data", use_container_width=True)
+    
+    # Get spread data
+    daily_avg_data = fetch_daily_spread_averages(selected_tokens)
+    
+    # Check if we have baseline data
+    baseline_spreads_df = get_baseline_spreads()
+    if baseline_spreads_df is None or baseline_spreads_df.empty:
+        st.warning("No baseline spreads found. Please use 'Reset All Baselines' button to establish baselines.")
+        if reset_button:
             if daily_avg_data is not None and not daily_avg_data.empty:
-                result = create_baseline_spreads(engine, daily_avg_data)
+                result = create_baseline_spreads(daily_avg_data)
                 st.success(result)
                 # Clear cache and refresh baseline data
                 st.cache_data.clear()
-                baseline_spreads_df = get_baseline_spreads(engine)
+                baseline_spreads_df = get_baseline_spreads()
             else:
                 st.error("No spread data available for baseline reset")
-        
-        if refresh_button:
+    elif reset_button:
+        if daily_avg_data is not None and not daily_avg_data.empty:
+            result = create_baseline_spreads(daily_avg_data)
+            st.success(result)
+            # Clear cache and refresh baseline data
             st.cache_data.clear()
-            st.experimental_rerun()
+            baseline_spreads_df = get_baseline_spreads()
+        else:
+            st.error("No spread data available for baseline reset")
+    
+    if refresh_button:
+        st.cache_data.clear()
+        st.experimental_rerun()
+    
+    # Display explanation
+    st.markdown("""
+    <div class="info-box">
+    <b>Trading Parameters Optimization</b><br>
+    This tool helps optimize buffer rates and position multipliers based on market spread conditions.<br><br>
+    <b>How it works:</b>
+    <ul>
+        <li>We monitor non-SurfFuture spreads at 50K (majors) / 20K (altcoins) sizes as a baseline</li>
+        <li>When spreads increase above baseline, buffer rates increase and position multipliers decrease</li>
+        <li>When spreads decrease below baseline, buffer rates decrease and position multipliers increase</li>
+        <li>Parameters are kept within safe bounds based on max leverage and other constraints</li>
+    </ul>
+    <b>Actions:</b>
+    <ul>
+        <li>Use "Apply All Recommendations" to update parameters in the system</li>
+        <li>Use "Reset All Baselines" to establish new baselines based on current market conditions</li>
+    </ul>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Process data and create recommendations
+    if daily_avg_data is not None and not daily_avg_data.empty and baseline_spreads_df is not None and not baseline_spreads_df.empty:
+        # Create recommendations dataframe
+        recommendations_data = []
         
-        # Display explanation
-        st.markdown("""
-        <div class="info-box">
-        <b>Trading Parameters Optimization</b><br>
-        This tool helps optimize buffer rates and position multipliers based on market spread conditions.<br><br>
-        <b>How it works:</b>
-        <ul>
-            <li>We monitor non-SurfFuture spreads at 50K (majors) / 20K (altcoins) sizes as a baseline</li>
-            <li>When spreads increase above baseline, buffer rates increase and position multipliers decrease</li>
-            <li>When spreads decrease below baseline, buffer rates decrease and position multipliers increase</li>
-            <li>Parameters are kept within safe bounds based on max leverage and other constraints</li>
-        </ul>
-        <b>Actions:</b>
-        <ul>
-            <li>Use "Apply All Recommendations" to update parameters in the system</li>
-            <li>Use "Reset All Baselines" to establish new baselines based on current market conditions</li>
-        </ul>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Process data and create recommendations
-        if daily_avg_data is not None and not daily_avg_data.empty and baseline_spreads_df is not None and not baseline_spreads_df.empty:
-            # Create recommendations dataframe
-            recommendations_data = []
+        for _, param_row in current_params_df.iterrows():
+            pair_name = param_row['pair_name']
+            current_buffer_rate = param_row['buffer_rate']
+            current_position_multiplier = param_row['position_multiplier']
+            max_leverage = param_row['max_leverage']
             
-            for _, param_row in current_params_df.iterrows():
-                pair_name = param_row['pair_name']
-                current_buffer_rate = param_row['buffer_rate']
-                current_position_multiplier = param_row['position_multiplier']
-                max_leverage = param_row['max_leverage']
-                
-                # Get current market spread
-                depth_label, fee_level = get_depth_level(pair_name)
-                fee_column = f"avg_{fee_level}"
-                
-                current_spread = get_non_surf_average_spread(daily_avg_data, pair_name, fee_column)
-                
-                # Get baseline spread
-                baseline_row = baseline_spreads_df[baseline_spreads_df['pair_name'] == pair_name]
-                baseline_spread = baseline_row['baseline_spread'].iloc[0] if not baseline_row.empty else None
-                
-                # Calculate recommended parameters
-                if current_spread is not None and baseline_spread is not None:
-                    rec_buffer, rec_position = calculate_recommended_params(
-                        current_buffer_rate, 
-                        current_position_multiplier,
-                        current_spread,
-                        baseline_spread,
-                        max_leverage
-                    )
-                    
-                    # Format the message
-                    if current_spread > baseline_spread:
-                        spread_note = f"↑ {(current_spread/baseline_spread - 1)*100:.2f}%"
-                    elif current_spread < baseline_spread:
-                        spread_note = f"↓ {(1 - current_spread/baseline_spread)*100:.2f}%"
-                    else:
-                        spread_note = "No change"
-                    
-                    # Calculate if there is a significant change
-                    buffer_change_pct = abs((rec_buffer - current_buffer_rate) / current_buffer_rate) * 100 if current_buffer_rate > 0 else 0
-                    position_change_pct = abs((rec_position - current_position_multiplier) / current_position_multiplier) * 100 if current_position_multiplier > 0 else 0
-                    significant_change = buffer_change_pct > 1 or position_change_pct > 1
-                    
-                    recommendations_data.append({
-                        'pair_name': pair_name,
-                        'token_type': 'Major' if is_major(pair_name) else 'Altcoin',
-                        'depth_tier': depth_label,
-                        'max_leverage': max_leverage,
-                        'current_spread': current_spread * scale_factor,
-                        'baseline_spread': baseline_spread * scale_factor,
-                        'spread_change': spread_note,
-                        'current_buffer_rate': current_buffer_rate,
-                        'recommended_buffer_rate': rec_buffer,
-                        'current_position_multiplier': current_position_multiplier,
-                        'recommended_position_multiplier': rec_position,
-                        'significant_change': significant_change
-                    })
+            # Get current market spread
+            depth_label, fee_level = get_depth_level(pair_name)
+            fee_column = f"avg_{fee_level}"
             
-            if recommendations_data:
-                # Create DataFrame
-                rec_df = pd.DataFrame(recommendations_data)
+            current_spread = get_non_surf_average_spread(daily_avg_data, pair_name, fee_column)
+            
+            # Get baseline spread
+            baseline_row = baseline_spreads_df[baseline_spreads_df['pair_name'] == pair_name]
+            baseline_spread = baseline_row['baseline_spread'].iloc[0] if not baseline_row.empty else None
+            
+            # Calculate recommended parameters
+            if current_spread is not None and baseline_spread is not None:
+                rec_buffer, rec_position = calculate_recommended_params(
+                    current_buffer_rate, 
+                    current_position_multiplier,
+                    current_spread,
+                    baseline_spread,
+                    max_leverage
+                )
                 
-                # Sort by token_type and then by pair_name
-                rec_df = rec_df.sort_values(by=['token_type', 'pair_name'])
-                
-                # First show a summary
-                total_pairs = len(rec_df)
-                pairs_with_changes = len(rec_df[rec_df['significant_change']])
-                
-                if pairs_with_changes > 0:
-                    st.markdown(f"<div class='warning-message'>⚠️ {pairs_with_changes} out of {total_pairs} pairs have significant parameter changes recommended</div>", unsafe_allow_html=True)
+                # Format the message
+                if current_spread > baseline_spread:
+                    spread_note = f"↑ {(current_spread/baseline_spread - 1)*100:.2f}%"
+                elif current_spread < baseline_spread:
+                    spread_note = f"↓ {(1 - current_spread/baseline_spread)*100:.2f}%"
                 else:
-                    st.markdown(f"<div class='success-message'>✅ All parameters are within optimal ranges</div>", unsafe_allow_html=True)
+                    spread_note = "No change"
                 
-                # Create tabs for different views
-                tabs = st.tabs(["All Pairs", "Changed Parameters Only", "Major Tokens", "Altcoin Tokens"])
+                # Calculate if there is a significant change
+                buffer_change_pct = abs((rec_buffer - current_buffer_rate) / current_buffer_rate) * 100 if current_buffer_rate > 0 else 0
+                position_change_pct = abs((rec_position - current_position_multiplier) / current_position_multiplier) * 100 if current_position_multiplier > 0 else 0
+                significant_change = buffer_change_pct > 1 or position_change_pct > 1
                 
-                with tabs[0]:  # All Pairs
-                    st.markdown("### All Trading Pairs")
+                recommendations_data.append({
+                    'pair_name': pair_name,
+                    'token_type': 'Major' if is_major(pair_name) else 'Altcoin',
+                    'depth_tier': depth_label,
+                    'max_leverage': max_leverage,
+                    'current_spread': current_spread * scale_factor,
+                    'baseline_spread': baseline_spread * scale_factor,
+                    'spread_change': spread_note,
+                    'current_buffer_rate': current_buffer_rate,
+                    'recommended_buffer_rate': rec_buffer,
+                    'current_position_multiplier': current_position_multiplier,
+                    'recommended_position_multiplier': rec_position,
+                    'significant_change': significant_change
+                })
+        
+        if recommendations_data:
+            # Create DataFrame
+            rec_df = pd.DataFrame(recommendations_data)
+            
+            # Sort by token_type and then by pair_name
+            rec_df = rec_df.sort_values(by=['token_type', 'pair_name'])
+            
+            # First show a summary
+            total_pairs = len(rec_df)
+            pairs_with_changes = len(rec_df[rec_df['significant_change']])
+            
+            if pairs_with_changes > 0:
+                st.markdown(f"<div class='warning-message'>⚠️ {pairs_with_changes} out of {total_pairs} pairs have significant parameter changes recommended</div>", unsafe_allow_html=True)
+            else:
+                st.markdown(f"<div class='success-message'>✅ All parameters are within optimal ranges</div>", unsafe_allow_html=True)
+            
+            # Create tabs for different views
+            tabs = st.tabs(["All Pairs", "Changed Parameters Only", "Major Tokens", "Altcoin Tokens"])
+            
+            with tabs[0]:  # All Pairs
+                st.markdown("### All Trading Pairs")
+                
+                # Create display data
+                display_data = []
+                for _, row in rec_df.iterrows():
+                    current_buffer_formatted = format_percent(row['current_buffer_rate'])
+                    rec_buffer_formatted = format_with_change_indicator(row['current_buffer_rate'], row['recommended_buffer_rate'], is_percent=True)
                     
-                    # Create display data
-                    display_data = []
-                    for _, row in rec_df.iterrows():
+                    current_pos_formatted = format_number(row['current_position_multiplier'])
+                    rec_pos_formatted = format_with_change_indicator(row['current_position_multiplier'], row['recommended_position_multiplier'])
+                    
+                    display_data.append({
+                        'Pair': row['pair_name'],
+                        'Type': row['token_type'],
+                        'Size': row['depth_tier'],
+                        'Market Spread': f"{row['current_spread']:.2f}",
+                        'Baseline Spread': f"{row['baseline_spread']:.2f}",
+                        'Spread Change': row['spread_change'],
+                        'Current Buffer': current_buffer_formatted,
+                        'Recommended Buffer': rec_buffer_formatted,
+                        'Current Position Mult.': current_pos_formatted,
+                        'Recommended Position Mult.': rec_pos_formatted
+                    })
+                
+                display_df = pd.DataFrame(display_data)
+                st.write(display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+            
+            with tabs[1]:  # Changed Parameters Only
+                st.markdown("### Pairs with Recommended Changes")
+                
+                # Filter for significant changes
+                changed_df = rec_df[rec_df['significant_change']]
+                
+                if not changed_df.empty:
+                    # Create display data for changed parameters
+                    changed_display = []
+                    for _, row in changed_df.iterrows():
                         current_buffer_formatted = format_percent(row['current_buffer_rate'])
                         rec_buffer_formatted = format_with_change_indicator(row['current_buffer_rate'], row['recommended_buffer_rate'], is_percent=True)
                         
                         current_pos_formatted = format_number(row['current_position_multiplier'])
                         rec_pos_formatted = format_with_change_indicator(row['current_position_multiplier'], row['recommended_position_multiplier'])
                         
-                        display_data.append({
+                        changed_display.append({
                             'Pair': row['pair_name'],
                             'Type': row['token_type'],
                             'Size': row['depth_tier'],
@@ -616,188 +693,227 @@ def main():
                             'Recommended Position Mult.': rec_pos_formatted
                         })
                     
-                    display_df = pd.DataFrame(display_data)
-                    st.write(display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+                    changed_display_df = pd.DataFrame(changed_display)
+                    st.write(changed_display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+                else:
+                    st.info("No significant parameter changes recommended at this time.")
+            
+            with tabs[2]:  # Major Tokens
+                st.markdown("### Major Tokens Only")
                 
-                with tabs[1]:  # Changed Parameters Only
-                    st.markdown("### Pairs with Recommended Changes")
-                    
-                    # Filter for significant changes
-                    changed_df = rec_df[rec_df['significant_change']]
-                    
-                    if not changed_df.empty:
-                        # Create display data for changed parameters
-                        changed_display = []
-                        for _, row in changed_df.iterrows():
-                            current_buffer_formatted = format_percent(row['current_buffer_rate'])
-                            rec_buffer_formatted = format_with_change_indicator(row['current_buffer_rate'], row['recommended_buffer_rate'], is_percent=True)
-                            
-                            current_pos_formatted = format_number(row['current_position_multiplier'])
-                            rec_pos_formatted = format_with_change_indicator(row['current_position_multiplier'], row['recommended_position_multiplier'])
-                            
-                            changed_display.append({
-                                'Pair': row['pair_name'],
-                                'Type': row['token_type'],
-                                'Size': row['depth_tier'],
-                                'Market Spread': f"{row['current_spread']:.2f}",
-                                'Baseline Spread': f"{row['baseline_spread']:.2f}",
-                                'Spread Change': row['spread_change'],
-                                'Current Buffer': current_buffer_formatted,
-                                'Recommended Buffer': rec_buffer_formatted,
-                                'Current Position Mult.': current_pos_formatted,
-                                'Recommended Position Mult.': rec_pos_formatted
-                            })
-                        
-                        changed_display_df = pd.DataFrame(changed_display)
-                        st.write(changed_display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
-                    else:
-                        st.info("No significant parameter changes recommended at this time.")
+                # Filter for major tokens
+                major_df = rec_df[rec_df['token_type'] == 'Major']
                 
-                with tabs[2]:  # Major Tokens
-                    st.markdown("### Major Tokens Only")
+                # Create display data for major tokens
+                major_display = []
+                for _, row in major_df.iterrows():
+                    current_buffer_formatted = format_percent(row['current_buffer_rate'])
+                    rec_buffer_formatted = format_with_change_indicator(row['current_buffer_rate'], row['recommended_buffer_rate'], is_percent=True)
                     
-                    # Filter for major tokens
-                    major_df = rec_df[rec_df['token_type'] == 'Major']
+                    current_pos_formatted = format_number(row['current_position_multiplier'])
+                    rec_pos_formatted = format_with_change_indicator(row['current_position_multiplier'], row['recommended_position_multiplier'])
                     
-                    # Create display data for major tokens
-                    major_display = []
-                    for _, row in major_df.iterrows():
-                        current_buffer_formatted = format_percent(row['current_buffer_rate'])
-                        rec_buffer_formatted = format_with_change_indicator(row['current_buffer_rate'], row['recommended_buffer_rate'], is_percent=True)
-                        
-                        current_pos_formatted = format_number(row['current_position_multiplier'])
-                        rec_pos_formatted = format_with_change_indicator(row['current_position_multiplier'], row['recommended_position_multiplier'])
-                        
-                        major_display.append({
-                            'Pair': row['pair_name'],
-                            'Market Spread': f"{row['current_spread']:.2f}",
-                            'Baseline Spread': f"{row['baseline_spread']:.2f}",
-                            'Spread Change': row['spread_change'],
-                            'Current Buffer': current_buffer_formatted,
-                            'Recommended Buffer': rec_buffer_formatted,
-                            'Current Position Mult.': current_pos_formatted,
-                            'Recommended Position Mult.': rec_pos_formatted
-                        })
-                    
-                    major_display_df = pd.DataFrame(major_display)
-                    st.write(major_display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+                    major_display.append({
+                        'Pair': row['pair_name'],
+                        'Market Spread': f"{row['current_spread']:.2f}",
+                        'Baseline Spread': f"{row['baseline_spread']:.2f}",
+                        'Spread Change': row['spread_change'],
+                        'Current Buffer': current_buffer_formatted,
+                        'Recommended Buffer': rec_buffer_formatted,
+                        'Current Position Mult.': current_pos_formatted,
+                        'Recommended Position Mult.': rec_pos_formatted
+                    })
                 
-                with tabs[3]:  # Altcoin Tokens
-                    st.markdown("### Altcoin Tokens Only")
-                    
-                    # Filter for altcoin tokens
-                    altcoin_df = rec_df[rec_df['token_type'] == 'Altcoin']
-                    
-                    # Create display data for altcoin tokens
-                    altcoin_display = []
-                    for _, row in altcoin_df.iterrows():
-                        current_buffer_formatted = format_percent(row['current_buffer_rate'])
-                        rec_buffer_formatted = format_with_change_indicator(row['current_buffer_rate'], row['recommended_buffer_rate'], is_percent=True)
-                        
-                        current_pos_formatted = format_number(row['current_position_multiplier'])
-                        rec_pos_formatted = format_with_change_indicator(row['current_position_multiplier'], row['recommended_position_multiplier'])
-                        
-                        altcoin_display.append({
-                            'Pair': row['pair_name'],
-                            'Market Spread': f"{row['current_spread']:.2f}",
-                            'Baseline Spread': f"{row['baseline_spread']:.2f}",
-                            'Spread Change': row['spread_change'],
-                            'Current Buffer': current_buffer_formatted,
-                            'Recommended Buffer': rec_buffer_formatted,
-                            'Current Position Mult.': current_pos_formatted,
-                            'Recommended Position Mult.': rec_pos_formatted
-                        })
-                    
-                    altcoin_display_df = pd.DataFrame(altcoin_display)
-                    st.write(altcoin_display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+                major_display_df = pd.DataFrame(major_display)
+                st.write(major_display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+            
+            with tabs[3]:  # Altcoin Tokens
+                st.markdown("### Altcoin Tokens Only")
                 
-                # Handle the "Apply Recommendations" button
-                if apply_button:
-                    st.markdown("### Applying Recommendations")
+                # Filter for altcoin tokens
+                altcoin_df = rec_df[rec_df['token_type'] == 'Altcoin']
+                
+                # Create display data for altcoin tokens
+                altcoin_display = []
+                for _, row in altcoin_df.iterrows():
+                    current_buffer_formatted = format_percent(row['current_buffer_rate'])
+                    rec_buffer_formatted = format_with_change_indicator(row['current_buffer_rate'], row['recommended_buffer_rate'], is_percent=True)
                     
-                    # Filter for pairs with significant changes
-                    to_update = rec_df[rec_df['significant_change']]
+                    current_pos_formatted = format_number(row['current_position_multiplier'])
+                    rec_pos_formatted = format_with_change_indicator(row['current_position_multiplier'], row['recommended_position_multiplier'])
                     
-                    if not to_update.empty:
-                        # Create a progress bar
-                        progress_bar = st.progress(0)
+                    altcoin_display.append({
+                        'Pair': row['pair_name'],
+                        'Market Spread': f"{row['current_spread']:.2f}",
+                        'Baseline Spread': f"{row['baseline_spread']:.2f}",
+                        'Spread Change': row['spread_change'],
+                        'Current Buffer': current_buffer_formatted,
+                        'Recommended Buffer': rec_buffer_formatted,
+                        'Current Position Mult.': current_pos_formatted,
+                        'Recommended Position Mult.': rec_pos_formatted
+                    })
+                
+                altcoin_display_df = pd.DataFrame(altcoin_display)
+                st.write(altcoin_display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+            
+            # Add visualizations
+            st.markdown("### Spread and Parameter Visualizations")
+            
+            # Create summary visualizations
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Create a bar chart comparing current vs baseline spreads
+                top_changed_pairs = rec_df.sort_values('significant_change', ascending=False).head(10)
+                
+                fig1 = go.Figure()
+                fig1.add_trace(go.Bar(
+                    name='Current Spread',
+                    x=top_changed_pairs['pair_name'],
+                    y=top_changed_pairs['current_spread'],
+                    marker_color='#2196F3'
+                ))
+                fig1.add_trace(go.Bar(
+                    name='Baseline Spread',
+                    x=top_changed_pairs['pair_name'],
+                    y=top_changed_pairs['baseline_spread'],
+                    marker_color='#FF9800'
+                ))
+                
+                fig1.update_layout(
+                    title="Top Pairs: Current vs Baseline Spreads",
+                    xaxis_title="Trading Pair",
+                    yaxis_title=f"Spread ({scale_label})",
+                    barmode='group',
+                    xaxis_tickangle=-45
+                )
+                
+                st.plotly_chart(fig1, use_container_width=True)
+            
+            with col2:
+                # Create a scatter plot showing current buffer rate vs recommended
+                fig2 = px.scatter(
+                    rec_df,
+                    x='current_buffer_rate',
+                    y='recommended_buffer_rate',
+                    color='token_type',
+                    hover_name='pair_name',
+                    labels={
+                        'current_buffer_rate': 'Current Buffer Rate',
+                        'recommended_buffer_rate': 'Recommended Buffer Rate',
+                        'token_type': 'Token Type'
+                    },
+                    title="Current vs Recommended Buffer Rates"
+                )
+                
+                # Add diagonal reference line (no change)
+                max_val = max(rec_df['current_buffer_rate'].max(), rec_df['recommended_buffer_rate'].max())
+                fig2.add_trace(go.Scatter(
+                    x=[0, max_val],
+                    y=[0, max_val],
+                    mode='lines',
+                    line=dict(color='red', dash='dash'),
+                    name='No Change'
+                ))
+                
+                fig2.update_layout(
+                    xaxis_title="Current Buffer Rate",
+                    yaxis_title="Recommended Buffer Rate"
+                )
+                
+                st.plotly_chart(fig2, use_container_width=True)
+            
+            # Handle the "Apply Recommendations" button
+            if apply_button:
+                st.markdown("### Applying Recommendations")
+                
+                # Filter for pairs with significant changes
+                to_update = rec_df[rec_df['significant_change']]
+                
+                if not to_update.empty:
+                    # Create a progress bar
+                    progress_bar = st.progress(0)
+                    
+                    # Apply changes pair by pair
+                    success_count = 0
+                    error_count = 0
+                    
+                    for i, (_, row) in enumerate(to_update.iterrows()):
+                        pair_name = row['pair_name']
+                        rec_buffer = row['recommended_buffer_rate']
+                        rec_position = row['recommended_position_multiplier']
                         
-                        # Apply changes pair by pair
-                        success_count = 0
-                        error_count = 0
-                        
-                        for i, (_, row) in enumerate(to_update.iterrows()):
-                            pair_name = row['pair_name']
-                            rec_buffer = row['recommended_buffer_rate']
-                            rec_position = row['recommended_position_multiplier']
-                            
-                            # Update in the database
-                            if update_trading_parameters(engine, pair_name, rec_buffer, rec_position):
-                                success_count += 1
-                            else:
-                                error_count += 1
-                            
-                            # Update progress
-                            progress_bar.progress((i + 1) / len(to_update))
-                        
-                        # Show results
-                        if error_count == 0:
-                            st.success(f"Successfully updated parameters for {success_count} pairs")
+                        # Update in the database
+                        if update_trading_parameters(pair_name, rec_buffer, rec_position):
+                            success_count += 1
                         else:
-                            st.warning(f"Updated {success_count} pairs, but encountered {error_count} errors")
+                            error_count += 1
                         
-                        # Clear cache to refresh data
-                        st.cache_data.clear()
+                        # Update progress
+                        progress_bar.progress((i + 1) / len(to_update))
+                    
+                    # Show results
+                    if error_count == 0:
+                        st.success(f"Successfully updated parameters for {success_count} pairs")
                     else:
-                        st.info("No significant parameter changes to apply")
+                        st.warning(f"Updated {success_count} pairs, but encountered {error_count} errors")
+                    
+                    # Clear cache to refresh data
+                    st.cache_data.clear()
+                else:
+                    st.info("No significant parameter changes to apply")
+            
+            # Add explanatory content
+            with st.expander("How Parameter Optimization Works"):
+                st.markdown("""
+                ### How Parameter Optimization Works
                 
-                # Add explanatory content
-                with st.expander("How Parameter Optimization Works"):
-                    st.markdown("""
-                    ### How Parameter Optimization Works
-                    
-                    #### Key Concepts
-                    
-                    1. **Buffer Rate**: Used in calculating trigger prices for busts and stop losses:
-                       ```
-                       P_trigger = P_close * (1 + trade_sign*bust_buffer)
-                       ```
-                      - Higher buffer rate means more distance to liquidation
-                      - This provides greater protection during volatile periods
-                    
-                    2. **Position Multiplier**: Used in market impact calculations:
-                       ```
-                       P_close(T) = P(t) + ((1 - base_rate) / (1 + 1/abs((P(T)/P(t) - 1)*rate_multiplier)^rate_exponent + bet_amount*bet_multiplier/(10^6*abs(P(T)/P(t) - 1)*position_multiplier)))*(P(T) - P(t))
-                       ```
-                      - Lower position multiplier increases market impact
-                      - This reduces PnL for large winning positions
-                    
-                    #### Optimization Logic
-                    
-                    - **When Market Spreads Increase**:
-                      - Buffer rate increases (more protection against volatility)
-                      - Position multiplier decreases (more impact on large positions)
-                      - Result: Better protection for the exchange during volatile periods
-                    
-                    - **When Market Spreads Decrease**:
-                      - Buffer rate decreases (less protection needed)
-                      - Position multiplier increases (less impact on positions)
-                      - Result: Better user experience during stable periods
-                    
-                    #### Safety Constraints
-                    
-                    - **Buffer Rate Limit**: Never exceeds `0.9/max_leverage` to avoid immediate liquidations
-                    - **Position Multiplier Bounds**: Between 100,000 and 10,000,000
-                    - **Significant Change Threshold**: Parameters only update if spread changes by at least 5%
-                    
-                    The system automatically maintains these optimizations while keeping all parameters within safe bounds.
-                    """)
-            else:
-                st.warning("Unable to generate recommendations. Check data quality.")
+                #### Key Concepts
+                
+                1. **Buffer Rate**: Used in calculating trigger prices for busts and stop losses:
+                   ```
+                   P_trigger = P_close * (1 + trade_sign*bust_buffer)
+                   ```
+                  - Higher buffer rate means more distance to liquidation
+                  - This provides greater protection during volatile periods
+                
+                2. **Position Multiplier**: Used in market impact calculations:
+                   ```
+                   P_close(T) = P(t) + ((1 - base_rate) / (1 + 1/abs((P(T)/P(t) - 1)*rate_multiplier)^rate_exponent + bet_amount*bet_multiplier/(10^6*abs(P(T)/P(t) - 1)*position_multiplier)))*(P(T) - P(t))
+                   ```
+                  - Lower position multiplier increases market impact
+                  - This reduces PnL for large winning positions
+                
+                #### Optimization Logic
+                
+                - **When Market Spreads Increase**:
+                  - Buffer rate increases (more protection against volatility)
+                  - Position multiplier decreases (more impact on large positions)
+                  - Result: Better protection for the exchange during volatile periods
+                
+                - **When Market Spreads Decrease**:
+                  - Buffer rate decreases (less protection needed)
+                  - Position multiplier increases (less impact on positions)
+                  - Result: Better user experience during stable periods
+                
+                #### Safety Constraints
+                
+                - **Buffer Rate Limit**: Never exceeds `0.9/max_leverage` to avoid immediate liquidations
+                - **Position Multiplier Bounds**: Between 100,000 and 10,000,000
+                - **Significant Change Threshold**: Parameters only update if spread changes by at least 5%
+                
+                The system automatically maintains these optimizations while keeping all parameters within safe bounds.
+                """)
         else:
-            st.warning("Missing spread data or baseline data. Please ensure both are available.")
+            st.warning("Unable to generate recommendations. Check data quality.")
     else:
-        st.error("Failed to load tokens or current parameters. Please check the database connection.")
+        missing = []
+        if daily_avg_data is None or daily_avg_data.empty:
+            missing.append("spread data")
+        if baseline_spreads_df is None or baseline_spreads_df.empty:
+            missing.append("baseline data")
+            
+        st.warning(f"Missing {' and '.join(missing)}. Please ensure both are available.")
 
 if __name__ == "__main__":
     main()
