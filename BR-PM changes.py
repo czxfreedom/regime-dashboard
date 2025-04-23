@@ -54,6 +54,13 @@ st.markdown("""
         color: red;
         font-weight: bold;
     }
+    /* Highlight spread ranges */
+    .high-range {
+        background-color: rgba(255, 152, 0, 0.2);
+    }
+    .extreme-range {
+        background-color: rgba(244, 67, 54, 0.2);
+    }
     /* Success message */
     .success-message {
         background-color: #d4edda;
@@ -94,6 +101,7 @@ exchanges_display = {
 # Define time parameters
 singapore_timezone = pytz.timezone('Asia/Singapore')
 lookback_days = 1  # Default to 1 day
+weekly_lookback_days = 7  # For weekly range
 
 # Use a fixed scale factor for consistency
 scale_factor = 10000
@@ -177,6 +185,29 @@ def format_with_change_indicator(old_value, new_value, is_percent=False):
     else:
         return formatted_new
 
+def format_spread_range(low, high, current, baseline):
+    """Format the spread range with indicators for position in range"""
+    range_value = high - low
+    # Calculate percentile position of current in range
+    if range_value > 0:
+        position_pct = (current - low) / range_value * 100
+    else:
+        position_pct = 50  # Default if there's no range
+    
+    # Determine if current is near high/low
+    css_class = ""
+    if position_pct > 80:
+        css_class = "high-range"  # Near high
+    elif position_pct < 20:
+        css_class = "high-range"  # Near low
+    
+    # Check if current is outside the range (extreme value)
+    if current > high or current < low:
+        css_class = "extreme-range"
+    
+    # Format with range and indicator
+    return f"<span class='{css_class}'>{low:.2f} - {high:.2f} [{range_value:.2f}]</span>"
+
 # --- Data Fetching Functions ---
 # Note: We're not using the engine as a cache key parameter anymore
 @st.cache_data(ttl=600)
@@ -254,6 +285,81 @@ def fetch_daily_spread_averages(tokens):
             
     except Exception as e:
         st.error(f"Error fetching daily spread averages: {e}")
+        return None
+
+@st.cache_data(ttl=600)
+def fetch_weekly_spread_ranges(tokens):
+    """Fetch weekly high/low/average spread data for multiple tokens"""
+    try:
+        engine = init_connection()
+        if not engine:
+            return None
+            
+        # Get current time in Singapore timezone
+        now_utc = datetime.now(pytz.utc)
+        now_sg = now_utc.astimezone(singapore_timezone)
+        start_time_sg = now_sg - timedelta(days=weekly_lookback_days)
+        
+        # Convert back to UTC for database query
+        start_time_utc = start_time_sg.astimezone(pytz.utc)
+        end_time_utc = now_sg.astimezone(pytz.utc)
+        
+        # Create placeholders for tokens
+        tokens_str = "', '".join(tokens)
+
+        # Query to get high/low/avg spread data for all selected tokens
+        query = f"""
+        WITH spread_data AS (
+            SELECT 
+                pair_name,
+                source,
+                time_group,
+                fee1,
+                fee2,
+                fee3,
+                fee4,
+                total_fee
+            FROM 
+                oracle_exchange_fee
+            WHERE 
+                pair_name IN ('{tokens_str}')
+                AND time_group BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+                AND source IN ('binanceFuture', 'gateFuture', 'hyperliquidFuture')
+        ),
+        aggregated_data AS (
+            -- Calculate average spread for each pair, source, and time point
+            SELECT 
+                pair_name,
+                time_group,
+                AVG(fee1) as avg_spread
+            FROM 
+                spread_data
+            GROUP BY 
+                pair_name, time_group
+        )
+        -- Calculate high, low, avg for each pair
+        SELECT 
+            pair_name,
+            MIN(avg_spread) as weekly_low,
+            MAX(avg_spread) as weekly_high,
+            AVG(avg_spread) as weekly_avg
+        FROM 
+            aggregated_data
+        GROUP BY 
+            pair_name
+        ORDER BY 
+            pair_name
+        """
+        
+        df = pd.read_sql(query, engine)
+        
+        if df.empty:
+            return None
+
+        return df
+            
+    except Exception as e:
+        st.error(f"Error fetching weekly spread ranges: {e}")
         return None
 
 @st.cache_data(ttl=600)
@@ -561,6 +667,9 @@ def main():
     # Get spread data
     daily_avg_data = fetch_daily_spread_averages(selected_tokens)
     
+    # Get weekly spread range data
+    weekly_spread_data = fetch_weekly_spread_ranges(selected_tokens)
+    
     # Display the parameter settings in the main area
     st.markdown("""
     <div class="parameter-controls">
@@ -613,6 +722,7 @@ def main():
         <li>When spreads increase above baseline, buffer rates increase and position multipliers decrease</li>
         <li>When spreads decrease below baseline, buffer rates decrease and position multipliers increase</li>
         <li>Parameters are kept within safe bounds based on max leverage and other constraints</li>
+        <li>Weekly spread ranges provide context about whether current spreads are at unusual levels</li>
     </ul>
     <b>Actions:</b>
     <ul>
@@ -647,6 +757,15 @@ def main():
             # Get baseline spread
             baseline_row = baseline_spreads_df[baseline_spreads_df['pair_name'] == pair_name]
             baseline_spread = baseline_row['baseline_spread'].iloc[0] if not baseline_row.empty else None
+            
+            # Get weekly spread range data
+            weekly_row = None
+            if weekly_spread_data is not None and not weekly_spread_data.empty:
+                weekly_row = weekly_spread_data[weekly_spread_data['pair_name'] == pair_name]
+            
+            weekly_low = weekly_row['weekly_low'].iloc[0] if weekly_row is not None and not weekly_row.empty else None
+            weekly_high = weekly_row['weekly_high'].iloc[0] if weekly_row is not None and not weekly_row.empty else None
+            weekly_avg = weekly_row['weekly_avg'].iloc[0] if weekly_row is not None and not weekly_row.empty else None
             
             # Calculate recommended parameters
             if current_spread is not None and baseline_spread is not None:
@@ -691,6 +810,9 @@ def main():
                     'max_leverage': max_leverage,
                     'current_spread': current_spread * scale_factor,
                     'baseline_spread': baseline_spread * scale_factor,
+                    'weekly_low': weekly_low * scale_factor if weekly_low is not None else None,
+                    'weekly_high': weekly_high * scale_factor if weekly_high is not None else None, 
+                    'weekly_avg': weekly_avg * scale_factor if weekly_avg is not None else None,
                     'spread_change': spread_note,
                     'spread_change_ratio': spread_change_ratio,  # For sorting
                     'current_buffer_rate': current_buffer_rate,
@@ -731,12 +853,19 @@ def main():
                     current_pos_formatted = format_number(row['current_position_multiplier'])
                     rec_pos_formatted = format_with_change_indicator(row['current_position_multiplier'], row['recommended_position_multiplier'])
                     
+                    # Format the weekly range
+                    if row['weekly_low'] is not None and row['weekly_high'] is not None:
+                        weekly_range = format_spread_range(row['weekly_low'], row['weekly_high'], row['current_spread'], row['baseline_spread'])
+                    else:
+                        weekly_range = "N/A"
+                    
                     display_data.append({
                         'Pair': row['pair_name'],
                         'Type': row['token_type'],
                         'Size': row['depth_tier'],
                         'Market Spread': f"{row['current_spread']:.2f}",
                         'Baseline Spread': f"{row['baseline_spread']:.2f}",
+                        'Weekly Range': weekly_range,
                         'Spread Change': row['spread_change'],
                         'Current Buffer': current_buffer_formatted,
                         'Recommended Buffer': rec_buffer_formatted,
@@ -746,6 +875,17 @@ def main():
                 
                 display_df = pd.DataFrame(display_data)
                 st.write(display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+                
+                # Add legend for weekly range formatting
+                st.markdown("""
+                <div style="font-size: 0.85em; margin-top: 10px;">
+                <strong>Weekly Range Legend:</strong>
+                <ul style="list-style-type: none; padding-left: 10px; margin-top: 5px;">
+                    <li><span class="high-range" style="padding: 2px 5px;">Yellow Background</span>: Current spread is near the high or low of the weekly range (20% from extremes)</li>
+                    <li><span class="extreme-range" style="padding: 2px 5px;">Red Background</span>: Current spread is outside the weekly range (extreme value)</li>
+                </ul>
+                </div>
+                """, unsafe_allow_html=True)
             
             with tabs[1]:  # Changed Parameters Only
                 st.markdown("### Pairs with Recommended Changes")
@@ -763,12 +903,19 @@ def main():
                         current_pos_formatted = format_number(row['current_position_multiplier'])
                         rec_pos_formatted = format_with_change_indicator(row['current_position_multiplier'], row['recommended_position_multiplier'])
                         
+                        # Format the weekly range
+                        if row['weekly_low'] is not None and row['weekly_high'] is not None:
+                            weekly_range = format_spread_range(row['weekly_low'], row['weekly_high'], row['current_spread'], row['baseline_spread'])
+                        else:
+                            weekly_range = "N/A"
+                        
                         changed_display.append({
                             'Pair': row['pair_name'],
                             'Type': row['token_type'],
                             'Size': row['depth_tier'],
                             'Market Spread': f"{row['current_spread']:.2f}",
                             'Baseline Spread': f"{row['baseline_spread']:.2f}",
+                            'Weekly Range': weekly_range,
                             'Spread Change': row['spread_change'],
                             'Current Buffer': current_buffer_formatted,
                             'Recommended Buffer': rec_buffer_formatted,
@@ -778,6 +925,17 @@ def main():
                     
                     changed_display_df = pd.DataFrame(changed_display)
                     st.write(changed_display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+                    
+                    # Add legend for weekly range formatting
+                    st.markdown("""
+                    <div style="font-size: 0.85em; margin-top: 10px;">
+                    <strong>Weekly Range Legend:</strong>
+                    <ul style="list-style-type: none; padding-left: 10px; margin-top: 5px;">
+                        <li><span class="high-range" style="padding: 2px 5px;">Yellow Background</span>: Current spread is near the high or low of the weekly range (20% from extremes)</li>
+                        <li><span class="extreme-range" style="padding: 2px 5px;">Red Background</span>: Current spread is outside the weekly range (extreme value)</li>
+                    </ul>
+                    </div>
+                    """, unsafe_allow_html=True)
                 else:
                     st.info("No significant parameter changes recommended at this time.")
             
@@ -796,10 +954,17 @@ def main():
                     current_pos_formatted = format_number(row['current_position_multiplier'])
                     rec_pos_formatted = format_with_change_indicator(row['current_position_multiplier'], row['recommended_position_multiplier'])
                     
+                    # Format the weekly range
+                    if row['weekly_low'] is not None and row['weekly_high'] is not None:
+                        weekly_range = format_spread_range(row['weekly_low'], row['weekly_high'], row['current_spread'], row['baseline_spread'])
+                    else:
+                        weekly_range = "N/A"
+                    
                     major_display.append({
                         'Pair': row['pair_name'],
                         'Market Spread': f"{row['current_spread']:.2f}",
                         'Baseline Spread': f"{row['baseline_spread']:.2f}",
+                        'Weekly Range': weekly_range,
                         'Spread Change': row['spread_change'],
                         'Current Buffer': current_buffer_formatted,
                         'Recommended Buffer': rec_buffer_formatted,
@@ -809,6 +974,17 @@ def main():
                 
                 major_display_df = pd.DataFrame(major_display)
                 st.write(major_display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+                
+                # Add legend for weekly range formatting
+                st.markdown("""
+                <div style="font-size: 0.85em; margin-top: 10px;">
+                <strong>Weekly Range Legend:</strong>
+                <ul style="list-style-type: none; padding-left: 10px; margin-top: 5px;">
+                    <li><span class="high-range" style="padding: 2px 5px;">Yellow Background</span>: Current spread is near the high or low of the weekly range (20% from extremes)</li>
+                    <li><span class="extreme-range" style="padding: 2px 5px;">Red Background</span>: Current spread is outside the weekly range (extreme value)</li>
+                </ul>
+                </div>
+                """, unsafe_allow_html=True)
             
             with tabs[3]:  # Altcoin Tokens
                 st.markdown("### Altcoin Tokens Only")
@@ -825,10 +1001,17 @@ def main():
                     current_pos_formatted = format_number(row['current_position_multiplier'])
                     rec_pos_formatted = format_with_change_indicator(row['current_position_multiplier'], row['recommended_position_multiplier'])
                     
+                    # Format the weekly range
+                    if row['weekly_low'] is not None and row['weekly_high'] is not None:
+                        weekly_range = format_spread_range(row['weekly_low'], row['weekly_high'], row['current_spread'], row['baseline_spread'])
+                    else:
+                        weekly_range = "N/A"
+                    
                     altcoin_display.append({
                         'Pair': row['pair_name'],
                         'Market Spread': f"{row['current_spread']:.2f}",
                         'Baseline Spread': f"{row['baseline_spread']:.2f}",
+                        'Weekly Range': weekly_range,
                         'Spread Change': row['spread_change'],
                         'Current Buffer': current_buffer_formatted,
                         'Recommended Buffer': rec_buffer_formatted,
@@ -838,6 +1021,17 @@ def main():
                 
                 altcoin_display_df = pd.DataFrame(altcoin_display)
                 st.write(altcoin_display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+                
+                # Add legend for weekly range formatting
+                st.markdown("""
+                <div style="font-size: 0.85em; margin-top: 10px;">
+                <strong>Weekly Range Legend:</strong>
+                <ul style="list-style-type: none; padding-left: 10px; margin-top: 5px;">
+                    <li><span class="high-range" style="padding: 2px 5px;">Yellow Background</span>: Current spread is near the high or low of the weekly range (20% from extremes)</li>
+                    <li><span class="extreme-range" style="padding: 2px 5px;">Red Background</span>: Current spread is outside the weekly range (extreme value)</li>
+                </ul>
+                </div>
+                """, unsafe_allow_html=True)
             
             # Add visualizations
             st.markdown("### Spread and Parameter Visualizations")
@@ -846,35 +1040,128 @@ def main():
             col1, col2 = st.columns(2)
             
             with col1:
-                # Create a bar chart comparing current vs baseline spreads
-                # Sort by absolute spread change percentage
-                top_changed_pairs = rec_df.copy()
-                top_changed_pairs['abs_spread_change'] = abs(top_changed_pairs['spread_change_ratio'] - 1)
-                top_changed_pairs = top_changed_pairs.sort_values('abs_spread_change', ascending=False).head(10)
+                # Create a scatter plot with current spread vs weekly range
+                # Only include rows with valid weekly range data
+                range_df = rec_df.dropna(subset=['weekly_low', 'weekly_high'])
                 
-                fig1 = go.Figure()
-                fig1.add_trace(go.Bar(
-                    name='Current Spread',
-                    x=top_changed_pairs['pair_name'],
-                    y=top_changed_pairs['current_spread'],
-                    marker_color='#2196F3'
-                ))
-                fig1.add_trace(go.Bar(
-                    name='Baseline Spread',
-                    x=top_changed_pairs['pair_name'],
-                    y=top_changed_pairs['baseline_spread'],
-                    marker_color='#FF9800'
-                ))
-                
-                fig1.update_layout(
-                    title="Top Pairs: Current vs Baseline Spreads",
-                    xaxis_title="Trading Pair",
-                    yaxis_title=f"Spread ({scale_label})",
-                    barmode='group',
-                    xaxis_tickangle=-45
-                )
-                
-                st.plotly_chart(fig1, use_container_width=True)
+                if not range_df.empty:
+                    # Calculate percentile within range for each pair
+                    range_df['percentile'] = range_df.apply(
+                        lambda row: ((row['current_spread'] - row['weekly_low']) / 
+                                    (row['weekly_high'] - row['weekly_low'])) * 100 
+                                    if row['weekly_high'] > row['weekly_low'] else 50, 
+                        axis=1
+                    )
+                    
+                    # Clamp percentiles to 0-100 range for display
+                    range_df['display_percentile'] = range_df['percentile'].clip(0, 100)
+                    
+                    # For points outside the range, add an "outside" flag
+                    range_df['outside_range'] = ((range_df['current_spread'] < range_df['weekly_low']) | 
+                                               (range_df['current_spread'] > range_df['weekly_high']))
+                    
+                    # Create color coding for percentile
+                    range_df['color_code'] = pd.cut(
+                        range_df['display_percentile'],
+                        bins=[0, 20, 40, 60, 80, 100],
+                        labels=['Very Low', 'Low', 'Normal', 'High', 'Very High']
+                    )
+                    
+                    # Add a spot size based on change ratio
+                    range_df['spot_size'] = (abs(range_df['spread_change_ratio'] - 1) * 20 + 5).clip(5, 15)
+                    
+                    # Create scatter plot
+                    fig1 = px.scatter(
+                        range_df,
+                        x='pair_name',
+                        y='percentile',
+                        color='color_code',
+                        size='spot_size',
+                        hover_name='pair_name',
+                        hover_data={
+                            'pair_name': False,
+                            'percentile': ':.1f',
+                            'current_spread': ':.2f',
+                            'weekly_low': ':.2f',
+                            'weekly_high': ':.2f',
+                            'spot_size': False
+                        },
+                        labels={
+                            'percentile': 'Position in Weekly Range (%)',
+                            'pair_name': 'Trading Pair',
+                            'color_code': 'Range Position'
+                        },
+                        title="Current Spread Position in Weekly Range",
+                        color_discrete_map={
+                            'Very Low': '#1565C0',   # Dark blue
+                            'Low': '#42A5F5',        # Light blue
+                            'Normal': '#66BB6A',     # Green
+                            'High': '#FFA726',       # Orange
+                            'Very High': '#E53935'   # Red
+                        }
+                    )
+                    
+                    # Add reference lines
+                    fig1.add_shape(
+                        type="line",
+                        x0=-0.5,
+                        x1=len(range_df['pair_name'].unique()) - 0.5,
+                        y0=0,
+                        y1=0,
+                        line=dict(color="rgba(50, 50, 50, 0.2)", width=1, dash="dot")
+                    )
+                    
+                    fig1.add_shape(
+                        type="line",
+                        x0=-0.5,
+                        x1=len(range_df['pair_name'].unique()) - 0.5,
+                        y0=100,
+                        y1=100,
+                        line=dict(color="rgba(50, 50, 50, 0.2)", width=1, dash="dot")
+                    )
+                    
+                    # Add a band for the "normal" range (20-80%)
+                    fig1.add_shape(
+                        type="rect",
+                        x0=-0.5,
+                        x1=len(range_df['pair_name'].unique()) - 0.5,
+                        y0=20,
+                        y1=80,
+                        fillcolor="rgba(0, 200, 0, 0.1)",
+                        line=dict(width=0),
+                        layer="below"
+                    )
+                    
+                    # Update layout
+                    fig1.update_layout(
+                        yaxis_range=[-10, 110],  # Add margin for points outside range
+                        xaxis_tickangle=-45,
+                        height=500
+                    )
+                    
+                    # Annotate exterior points with markers
+                    for idx, row in range_df[range_df['outside_range']].iterrows():
+                        fig1.add_annotation(
+                            x=row['pair_name'],
+                            y=row['display_percentile'],
+                            text="⚠️",
+                            showarrow=False,
+                            font=dict(size=16)
+                        )
+                    
+                    st.plotly_chart(fig1, use_container_width=True)
+                    
+                    # Add explanatory text
+                    st.markdown("""
+                    **Understanding the Weekly Range Chart:**
+                    - **0%**: At or below the lowest spread seen this week
+                    - **50%**: Middle of the weekly range
+                    - **100%**: At or above the highest spread seen this week
+                    - **⚠️ Marker**: Indicates spread is currently outside the weekly range
+                    - **Dot Size**: Larger dots indicate greater deviation from baseline
+                    """)
+                else:
+                    st.info("No weekly range data available for visualization")
             
             with col2:
                 # Create a scatter plot showing current buffer rate vs recommended
@@ -904,10 +1191,76 @@ def main():
                 
                 fig2.update_layout(
                     xaxis_title="Current Buffer Rate",
-                    yaxis_title="Recommended Buffer Rate"
+                    yaxis_title="Recommended Buffer Rate",
+                    height=500
                 )
                 
                 st.plotly_chart(fig2, use_container_width=True)
+            
+            # Add a visualization for spread distribution
+            st.markdown("### Spread Distribution Analysis")
+            
+            # Create a box plot of current spreads vs baselines by token type
+            box_df = rec_df.copy()
+            
+            # Create long-format data for boxplot
+            box_data = []
+            for _, row in box_df.iterrows():
+                # Current spread
+                box_data.append({
+                    'Pair': row['pair_name'],
+                    'Token Type': row['token_type'],
+                    'Spread Type': 'Current',
+                    'Spread Value': row['current_spread']
+                })
+                # Baseline spread
+                box_data.append({
+                    'Pair': row['pair_name'],
+                    'Token Type': row['token_type'],
+                    'Spread Type': 'Baseline', 
+                    'Spread Value': row['baseline_spread']
+                })
+                # Weekly low (if available)
+                if pd.notnull(row['weekly_low']):
+                    box_data.append({
+                        'Pair': row['pair_name'],
+                        'Token Type': row['token_type'],
+                        'Spread Type': 'Weekly Low',
+                        'Spread Value': row['weekly_low']
+                    })
+                # Weekly high (if available)
+                if pd.notnull(row['weekly_high']):
+                    box_data.append({
+                        'Pair': row['pair_name'],
+                        'Token Type': row['token_type'],
+                        'Spread Type': 'Weekly High',
+                        'Spread Value': row['weekly_high']
+                    })
+            
+            box_plot_df = pd.DataFrame(box_data)
+            
+            if not box_plot_df.empty:
+                fig3 = px.box(
+                    box_plot_df,
+                    x='Token Type',
+                    y='Spread Value',
+                    color='Spread Type',
+                    title="Spread Distribution by Token Type",
+                    labels={
+                        'Spread Value': f'Spread ({scale_label})',
+                        'Token Type': 'Token Type',
+                        'Spread Type': 'Spread Type'
+                    },
+                    color_discrete_map={
+                        'Current': '#FF9800',
+                        'Baseline': '#2196F3',
+                        'Weekly Low': '#4CAF50',
+                        'Weekly High': '#F44336'
+                    }
+                )
+                
+                fig3.update_layout(height=500)
+                st.plotly_chart(fig3, use_container_width=True)
             
             # Handle the "Apply Recommendations" button
             if apply_button:
@@ -992,6 +1345,19 @@ def main():
                 
                 - **Change Threshold**: Minimum spread difference required before recommending changes
                   - Lower values make the system more responsive to smaller market changes
+                
+                #### Weekly Range Context
+                
+                The weekly range data provides important market context:
+                
+                - **Weekly Low**: Lowest spread observed over the past 7 days
+                - **Weekly High**: Highest spread observed over the past 7 days
+                - **Range**: Difference between high and low (shows volatility)
+                - **Position in Range**: Where the current spread sits in the weekly range
+                  - Near bottom (0-20%): Unusually tight spreads, might widen soon
+                  - Middle (20-80%): Normal market conditions
+                  - Near top (80-100%): Unusually wide spreads, might tighten soon
+                  - Outside range: Extreme market conditions, needs special attention
                 
                 #### Safety Constraints
                 
