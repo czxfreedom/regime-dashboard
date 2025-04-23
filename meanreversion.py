@@ -93,7 +93,7 @@ class MeanReversionAnalyzer:
         }
     
     def _get_partition_tables(self, conn, start_date, end_date):
-        """Get partition tables for date range"""
+        """Get partition tables for date range, ensuring we cover all needed dates"""
         if isinstance(start_date, str):
             start_date = pd.to_datetime(start_date)
         if isinstance(end_date, str) and end_date:
@@ -105,15 +105,27 @@ class MeanReversionAnalyzer:
         start_date = start_date.replace(tzinfo=None)
         end_date = end_date.replace(tzinfo=None)
             
-        current_date = start_date
+        # Generate list of dates needed (year-month-day format)
+        current_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
         dates = []
         
+        # Ensure we include the entire days needed for the analysis
         while current_date <= end_date:
             dates.append(current_date.strftime("%Y%m%d"))
             current_date += timedelta(days=1)
         
+        # If we're doing 24-hour analysis, make sure we include today AND yesterday
+        # to handle cases where the current time is early in the day
+        if (end_date - start_date).total_seconds() <= 86400:  # 24 hours in seconds
+            yesterday = (end_date - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            yesterday_str = yesterday.strftime("%Y%m%d")
+            if yesterday_str not in dates:
+                dates.append(yesterday_str)
+        
+        # Generate table names from dates
         table_names = [f"oracle_price_log_partition_{date}" for date in dates]
         
+        # Check which tables actually exist in the database
         cursor = conn.cursor()
         existing_tables = []
         
@@ -137,14 +149,14 @@ class MeanReversionAnalyzer:
         return existing_tables
 
     def _build_query_for_partition_tables(self, tables, pair_name, start_time, end_time, exchange):
-        """Build query for partition tables"""
+        """Build query for partition tables, ensuring we handle cross-midnight data correctly"""
         if not tables:
             return ""
             
         union_parts = []
         
         for table in tables:
-            # For Surf data (production)
+            # For Surf data
             if exchange == 'surf':
                 query = f"""
                 SELECT 
@@ -177,6 +189,7 @@ class MeanReversionAnalyzer:
             
             union_parts.append(query)
         
+        # Combine all queries with UNION and sort by timestamp
         complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp"
         return complete_query
 
@@ -287,6 +300,7 @@ class MeanReversionAnalyzer:
             
             if len(df_lookback) < 20:
                 # Not enough data points
+                st.warning(f"Not enough data points for {pair_name} on {exchange}: {len(df_lookback)} points")
                 return
             
             # Generate 30-minute intervals
@@ -321,9 +335,12 @@ class MeanReversionAnalyzer:
                 dc_range_ratio = direction_changes / (range_pct + 1e-10)  # Avoid division by zero
                 hurst = self.calculate_hurst_exponent(prices, min_k=3, max_k=min(len(prices)//3, 20))
                 
-                # Store calculations
+                # Store calculations with both timestamp and Singapore time for reference
+                sg_time = interval_end.replace(tzinfo=pytz.utc).astimezone(singapore_timezone)
+                
                 self.time_series_data[pair_name][exchange].append({
                     'timestamp': interval_end,
+                    'timestamp_sg': sg_time,
                     'interval_start': interval_start,
                     'interval_end': interval_end,
                     'data_points': len(prices),
@@ -338,20 +355,25 @@ class MeanReversionAnalyzer:
 
     def fetch_and_analyze(self, conn, pairs_to_analyze, hours=24):
         """Fetch data for specified pairs and analyze mean reversion metrics"""
-        end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        start_time = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+        # Calculate time range in UTC to ensure consistent time handling
+        end_time_utc = datetime.now(pytz.utc)
+        start_time_utc = end_time_utc - timedelta(hours=hours)
         
-        st.info(f"Retrieving data from {start_time} to {end_time} ({hours} hours)")
+        # Convert to strings for database queries (removing timezone info)
+        end_time_str = end_time_utc.strftime("%Y-%m-%d %H:%M:%S")
+        start_time_str = start_time_utc.strftime("%Y-%m-%d %H:%M:%S")
+        
+        st.info(f"Retrieving data from {start_time_str} to {end_time_str} (UTC) - {hours} hours")
         
         try:
             # Get partition tables for the time range
-            partition_tables = self._get_partition_tables(conn, start_time, end_time)
+            partition_tables = self._get_partition_tables(conn, start_time_utc, end_time_utc)
             
             if not partition_tables:
                 st.error("No data tables available for the selected time range.")
                 return None
             
-            st.write(f"Found {len(partition_tables)} partition tables")
+            st.write(f"Found {len(partition_tables)} partition tables: {', '.join(partition_tables)}")
             
             # Setup progress tracking
             progress_bar = st.progress(0)
@@ -371,8 +393,8 @@ class MeanReversionAnalyzer:
                     query = self._build_query_for_partition_tables(
                         partition_tables,
                         pair_name=pair,
-                        start_time=start_time,
-                        end_time=end_time,
+                        start_time=start_time_str,
+                        end_time=end_time_str,
                         exchange=exchange
                     )
                     
@@ -388,6 +410,10 @@ class MeanReversionAnalyzer:
                                 # Debug timestamp range
                                 min_time = df['timestamp'].min()
                                 max_time = df['timestamp'].max()
+                                time_span = max_time - min_time
+                                
+                                # Log the actual data timespan to help with debugging
+                                st.write(f"{exchange}_{pair}: {len(df)} data points spanning {time_span}")
                                 
                                 # Process historical data for time series analysis
                                 self.process_historical_data(df, pair, exchange, lookback_hours=hours)
@@ -422,7 +448,7 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
     if cache_key in st.session_state.pnl_data_cache:
         return st.session_state.pnl_data_cache[cache_key]
     
-    # Set up time range
+    # Set up time range in UTC to match the metrics data
     now_utc = datetime.now(pytz.utc)
     start_time_utc = now_utc - timedelta(hours=hours)
     
@@ -511,6 +537,7 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
     -- Final query
     SELECT
       t.interval_time AS "timestamp",
+      t.interval_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS "timestamp_sg",
       COALESCE(o."platform_order_pnl", 0) +
       COALESCE(f."user_fee_payments", 0) +
       COALESCE(ff."platform_funding_pnl", 0) +
@@ -537,8 +564,9 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
             st.warning(f"No PNL data found for {pair_name}")
             return None
         
-        # Convert timestamp to pandas datetime
+        # Convert timestamp columns to pandas datetime
         df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df['timestamp_sg'] = pd.to_datetime(df['timestamp_sg'])
         
         # Sort by timestamp
         df = df.sort_values('timestamp')
@@ -555,7 +583,7 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
         return None
 
 # Function to create visualization of mean reversion metrics vs PNL
-def create_metric_vs_pnl_chart(metrics_df, pnl_df, metric_name, metric_display_name, pair_name, exchange):
+def create_metric_vs_pnl_chart(metrics_df, pnl_df, metric_name, metric_display_name, pair_name, exchange, use_sg_time=True):
     """Create visualization comparing a mean reversion metric with cumulative PNL"""
     
     # Check if data is available
@@ -563,23 +591,26 @@ def create_metric_vs_pnl_chart(metrics_df, pnl_df, metric_name, metric_display_n
         return None
     
     try:
-        # Convert to pandas datetime if needed
-        if not pd.api.types.is_datetime64_any_dtype(metrics_df['timestamp']):
-            metrics_df['timestamp'] = pd.to_datetime(metrics_df['timestamp'])
+        # Choose which timestamp column to use (UTC or Singapore time)
+        x_column = 'timestamp_sg' if use_sg_time and 'timestamp_sg' in metrics_df.columns and 'timestamp_sg' in pnl_df.columns else 'timestamp'
         
-        if not pd.api.types.is_datetime64_any_dtype(pnl_df['timestamp']):
-            pnl_df['timestamp'] = pd.to_datetime(pnl_df['timestamp'])
+        # Convert to pandas datetime if needed
+        if not pd.api.types.is_datetime64_any_dtype(metrics_df[x_column]):
+            metrics_df[x_column] = pd.to_datetime(metrics_df[x_column])
+        
+        if not pd.api.types.is_datetime64_any_dtype(pnl_df[x_column]):
+            pnl_df[x_column] = pd.to_datetime(pnl_df[x_column])
         
         # Sort by timestamp
-        metrics_df = metrics_df.sort_values('timestamp')
-        pnl_df = pnl_df.sort_values('timestamp')
+        metrics_df = metrics_df.sort_values(x_column)
+        pnl_df = pnl_df.sort_values(x_column)
         
         # Create the figure
         fig = go.Figure()
         
         # Add cumulative PNL line
         fig.add_trace(go.Scatter(
-            x=pnl_df['timestamp'],
+            x=pnl_df[x_column],
             y=pnl_df['cumulative_pnl'],
             name='Cumulative PNL (USD)',
             line=dict(color='green', width=3)
@@ -587,7 +618,7 @@ def create_metric_vs_pnl_chart(metrics_df, pnl_df, metric_name, metric_display_n
         
         # Add metric line on second y-axis
         fig.add_trace(go.Scatter(
-            x=metrics_df['timestamp'],
+            x=metrics_df[x_column],
             y=metrics_df[metric_name],
             name=metric_display_name,
             line=dict(color='blue', width=2),
@@ -597,7 +628,7 @@ def create_metric_vs_pnl_chart(metrics_df, pnl_df, metric_name, metric_display_n
         # Configure layout
         fig.update_layout(
             title=f"{metric_display_name} vs Cumulative PNL: {pair_name}",
-            xaxis_title="Time",
+            xaxis_title="Time (Singapore)" if use_sg_time else "Time (UTC)",
             yaxis=dict(
                 title="Cumulative PNL (USD)",
                 titlefont=dict(color="green"),
@@ -620,8 +651,8 @@ def create_metric_vs_pnl_chart(metrics_df, pnl_df, metric_name, metric_display_n
         if metric_name == 'hurst_exponent':
             fig.add_shape(
                 type="line",
-                x0=metrics_df['timestamp'].min(),
-                x1=metrics_df['timestamp'].max(),
+                x0=metrics_df[x_column].min(),
+                x1=metrics_df[x_column].max(),
                 y0=0.5,
                 y1=0.5,
                 line=dict(
@@ -634,7 +665,7 @@ def create_metric_vs_pnl_chart(metrics_df, pnl_df, metric_name, metric_display_n
             
             # Add annotation for Hurst exponent
             fig.add_annotation(
-                x=metrics_df['timestamp'].max(),
+                x=metrics_df[x_column].max(),
                 y=0.5,
                 text="Random Walk (H=0.5)",
                 showarrow=False,
@@ -754,6 +785,10 @@ with st.sidebar:
             help="Select exchange for analysis"
         )
         
+        # Time display option
+        use_sg_time = st.checkbox("Display Singapore Time", value=True, 
+                                  help="Display times in Singapore timezone (SGT) instead of UTC")
+        
         # Show a warning if no pairs are selected
         if not pairs:
             st.warning("Please select at least one pair to analyze.")
@@ -840,6 +875,10 @@ if st.session_state.data_processed and 'analyzer' in st.session_state:
                         "Range % vs PNL"
                     ])
                     
+                    # Show data ranges to help with debugging
+                    st.write(f"Metrics data: {len(metrics_df)} points from {metrics_df['timestamp'].min()} to {metrics_df['timestamp'].max()}")
+                    st.write(f"PNL data: {len(pnl_df)} points from {pnl_df['timestamp'].min()} to {pnl_df['timestamp'].max()}")
+                    
                     with tab1:
                         # Create chart for Hurst Exponent
                         fig = create_metric_vs_pnl_chart(
@@ -848,7 +887,8 @@ if st.session_state.data_processed and 'analyzer' in st.session_state:
                             'hurst_exponent',
                             'Hurst Exponent',
                             selected_pair,
-                            exchange_filter
+                            exchange_filter,
+                            use_sg_time=use_sg_time
                         )
                         
                         if fig:
@@ -877,7 +917,8 @@ if st.session_state.data_processed and 'analyzer' in st.session_state:
                             'dc_range_ratio',
                             'Direction Changes/Range Ratio',
                             selected_pair,
-                            exchange_filter
+                            exchange_filter,
+                            use_sg_time=use_sg_time
                         )
                         
                         if fig:
@@ -906,7 +947,8 @@ if st.session_state.data_processed and 'analyzer' in st.session_state:
                             'direction_changes_30min',
                             'Direction Changes (30min)',
                             selected_pair,
-                            exchange_filter
+                            exchange_filter,
+                            use_sg_time=use_sg_time
                         )
                         
                         if fig:
@@ -935,7 +977,8 @@ if st.session_state.data_processed and 'analyzer' in st.session_state:
                             'absolute_range_pct',
                             'Range %',
                             selected_pair,
-                            exchange_filter
+                            exchange_filter,
+                            use_sg_time=use_sg_time
                         )
                         
                         if fig:
