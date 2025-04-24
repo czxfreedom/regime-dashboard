@@ -30,6 +30,10 @@ st.markdown("""
     .success-message {background-color: #d4edda; color: #155724; padding: 10px; border-radius: 5px; margin: 10px 0; border: 1px solid #c3e6cb;}
     .warning-message {background-color: #fff3cd; color: #856404; padding: 10px; border-radius: 5px; margin: 10px 0; border: 1px solid #ffeeba;}
     .parameter-controls {background-color: #e9ecef; padding: 15px; border-radius: 5px; margin: 15px 0;}
+    .rollbit-comparison {background-color: #e3f2fd; padding: 15px; border-radius: 5px; margin: 15px 0; border: 1px solid #bbdefb;}
+    .parameter-group {border-left: 4px solid #1976D2; padding-left: 10px; margin-bottom: 10px;}
+    .rollbit-param {background-color: #ffecb3; font-weight: bold;}
+    .surf-param {background-color: #c8e6c9; font-weight: bold;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -84,15 +88,25 @@ def format_percent(value):
 def format_number(value):
     return f"{int(value):,}"
 
-def format_with_change_indicator(old_value, new_value, is_percent=False):
+def format_float(value, decimals=4):
+    return f"{value:.{decimals}f}"
+
+def format_with_change_indicator(old_value, new_value, is_percent=False, decimals=2):
     if is_percent:
         formatted_old = format_percent(old_value)
         formatted_new = format_percent(new_value)
+    elif decimals != 2:
+        formatted_old = format_float(old_value, decimals)
+        formatted_new = format_float(new_value, decimals)
     else:
         formatted_old = format_number(old_value)
         formatted_new = format_number(new_value)
     
-    change_pct = ((new_value - old_value) / old_value) * 100 if old_value != 0 else 0
+    if old_value == 0:
+        change_pct = 0
+    else:
+        change_pct = ((new_value - old_value) / old_value) * 100
+    
     change_indicator = f"({change_pct:+.2f}%)"
     
     if new_value > old_value:
@@ -241,6 +255,7 @@ def fetch_current_parameters():
         query = """
         SELECT
             pair_name, buffer_rate, position_multiplier,
+            rate_multiplier, rate_exponent,
             max_leverage, leverage_config, status
         FROM public.trade_pool_pairs
         WHERE status = 1
@@ -251,9 +266,57 @@ def fetch_current_parameters():
         if 'max_leverage' not in df.columns or df['max_leverage'].isna().all():
             df['max_leverage'] = df['leverage_config'].apply(parse_leverage_config)
         
+        # Add default values for new parameters if they don't exist
+        if 'rate_multiplier' not in df.columns:
+            df['rate_multiplier'] = 6.0  # Default rate multiplier
+        if 'rate_exponent' not in df.columns:
+            df['rate_exponent'] = 2.0  # Default rate exponent
+            
         return df
     except Exception as e:
         st.error(f"Error fetching current parameters: {e}")
+        return None
+
+@st.cache_data(ttl=600)
+def fetch_rollbit_parameters():
+    try:
+        engine = init_connection()
+        if not engine:
+            return None
+            
+        query = """
+        SELECT
+            symbol as pair_name,
+            bust_buffer as buffer_rate,
+            pos_mult as position_multiplier,
+            rate_mult as rate_multiplier,
+            rate_exp as rate_exponent,
+            created_at
+        FROM
+            rollbit_pair_config
+        WHERE
+            created_at = (SELECT max(created_at) FROM rollbit_pair_config)
+        ORDER BY
+            symbol
+        """
+        
+        df = pd.read_sql(query, engine)
+        
+        # Convert any columns with different names to match SURF column names
+        if 'symbol' in df.columns:
+            df = df.rename(columns={'symbol': 'pair_name'})
+        if 'bust_buffer' in df.columns:
+            df = df.rename(columns={'bust_buffer': 'buffer_rate'})
+        if 'pos_mult' in df.columns:
+            df = df.rename(columns={'pos_mult': 'position_multiplier'})
+        if 'rate_mult' in df.columns:
+            df = df.rename(columns={'rate_mult': 'rate_multiplier'})
+        if 'rate_exp' in df.columns:
+            df = df.rename(columns={'rate_exp': 'rate_exponent'})
+            
+        return df
+    except Exception as e:
+        st.error(f"Error fetching Rollbit parameters: {e}")
         return None
 
 def get_non_surf_average_spread(spread_data, pair_name, fee_level='avg_fee1'):
@@ -267,25 +330,59 @@ def get_non_surf_average_spread(spread_data, pair_name, fee_level='avg_fee1'):
         return avg_value
     return None
 
-def calculate_recommended_params(current_buffer_rate, current_position_multiplier, current_spread, 
-                              baseline_spread, max_leverage, buffer_sensitivity, 
-                              position_sensitivity, significant_change_threshold):
-    if current_spread is None or baseline_spread is None or baseline_spread <= 0:
-        return current_buffer_rate, current_position_multiplier
+def calculate_recommended_params(current_params, current_spread, baseline_spread, 
+                                sensitivities, significant_change_threshold):
+    """Calculate recommended parameter values based on spread change ratio"""
     
+    if current_spread is None or baseline_spread is None or baseline_spread <= 0:
+        return current_params
+    
+    # Get current parameter values
+    current_buffer_rate = current_params.get('buffer_rate', 0.01)
+    current_position_multiplier = current_params.get('position_multiplier', 1000000)
+    current_rate_multiplier = current_params.get('rate_multiplier', 6.0)
+    current_rate_exponent = current_params.get('rate_exponent', 2.0)
+    max_leverage = current_params.get('max_leverage', 100)
+    
+    # Get sensitivity parameters
+    buffer_sensitivity = sensitivities.get('buffer_sensitivity', 0.5)
+    position_sensitivity = sensitivities.get('position_sensitivity', 0.5)
+    rate_multiplier_sensitivity = sensitivities.get('rate_multiplier_sensitivity', 0.5)
+    rate_exponent_sensitivity = sensitivities.get('rate_exponent_sensitivity', 0.5)
+    
+    # Calculate spread change ratio
     spread_change_ratio = current_spread / baseline_spread
     
+    # Check if the change is significant
     if abs(spread_change_ratio - 1.0) < significant_change_threshold:
-        return current_buffer_rate, current_position_multiplier
+        return current_params
     
+    # Recommended values - FIXED to make the relationship correct:
+    # 1. If spreads increase, buffer rates should increase (direct relationship)
     recommended_buffer_rate = current_buffer_rate * (spread_change_ratio ** buffer_sensitivity)
+    
+    # 2. If spreads increase, position multiplier should decrease (inverse relationship)
     recommended_position_multiplier = current_position_multiplier / (spread_change_ratio ** position_sensitivity)
     
+    # 3. If spreads increase, rate multiplier should decrease (inverse relationship)
+    recommended_rate_multiplier = current_rate_multiplier / (spread_change_ratio ** rate_multiplier_sensitivity)
+    
+    # 4. If spreads increase, rate exponent should increase (direct relationship)
+    recommended_rate_exponent = current_rate_exponent * (spread_change_ratio ** rate_exponent_sensitivity)
+    
+    # Apply bounds to keep values in reasonable ranges
     max_buffer_rate = 0.9 / max_leverage if max_leverage > 0 else 0.009
     recommended_buffer_rate = max(0.001, min(max_buffer_rate, recommended_buffer_rate))
     recommended_position_multiplier = max(100000, min(10000000, recommended_position_multiplier))
+    recommended_rate_multiplier = max(1.0, min(10.0, recommended_rate_multiplier))
+    recommended_rate_exponent = max(1.0, min(5.0, recommended_rate_exponent))
     
-    return recommended_buffer_rate, recommended_position_multiplier
+    return {
+        'buffer_rate': recommended_buffer_rate,
+        'position_multiplier': recommended_position_multiplier,
+        'rate_multiplier': recommended_rate_multiplier,
+        'rate_exponent': recommended_rate_exponent
+    }
 
 def create_baseline_spreads(spread_data):
     try:
@@ -348,18 +445,39 @@ def get_baseline_spreads():
         st.error(f"Error fetching baseline spreads: {e}")
         return None
 
-def update_trading_parameters(pair_name, buffer_rate, position_multiplier):
+def update_trading_parameters(pair_name, params):
     try:
         engine = init_connection()
         if not engine:
             return False
-            
+        
+        # Extract parameter values
+        buffer_rate = params.get('buffer_rate')
+        position_multiplier = params.get('position_multiplier')
+        rate_multiplier = params.get('rate_multiplier')
+        rate_exponent = params.get('rate_exponent')
+        
+        # Construct the SET clause based on available parameters
+        set_clauses = []
+        if buffer_rate is not None:
+            set_clauses.append(f"buffer_rate = {buffer_rate}")
+        if position_multiplier is not None:
+            set_clauses.append(f"position_multiplier = {position_multiplier}")
+        if rate_multiplier is not None:
+            set_clauses.append(f"rate_multiplier = {rate_multiplier}")
+        if rate_exponent is not None:
+            set_clauses.append(f"rate_exponent = {rate_exponent}")
+        
+        # Add updated_at timestamp
+        set_clauses.append("updated_at = NOW()")
+        
+        # Join clauses with commas
+        set_clause = ", ".join(set_clauses)
+        
+        # Construct the full query
         query = f"""
         UPDATE public.trade_pool_pairs
-        SET 
-            buffer_rate = {buffer_rate},
-            position_multiplier = {position_multiplier},
-            updated_at = NOW()
+        SET {set_clause}
         WHERE pair_name = '{pair_name}';
         """
         
@@ -409,6 +527,9 @@ def main():
     all_tokens = fetch_all_tokens()
     current_params_df = fetch_current_parameters()
     
+    # Fetch Rollbit parameters for comparison
+    rollbit_params_df = fetch_rollbit_parameters()
+    
     if not all_tokens:
         st.error("No tokens found in the database. Please check data availability.")
         return
@@ -431,6 +552,10 @@ def main():
         st.session_state['buffer_sensitivity'] = 0.5
     if 'position_sensitivity' not in st.session_state:
         st.session_state['position_sensitivity'] = 0.5
+    if 'rate_multiplier_sensitivity' not in st.session_state:
+        st.session_state['rate_multiplier_sensitivity'] = 0.5
+    if 'rate_exponent_sensitivity' not in st.session_state:
+        st.session_state['rate_exponent_sensitivity'] = 0.5
     if 'change_threshold' not in st.session_state:
         st.session_state['change_threshold'] = 0.05
     
@@ -452,6 +577,23 @@ def main():
         key="position_sensitivity"
     )
     
+    # Add new dropdowns for rate multiplier and rate exponent sensitivity
+    rate_multiplier_sensitivity = st.sidebar.selectbox(
+        "Rate Multiplier Sensitivity",
+        options=[0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0],
+        format_func=lambda x: f"{x} - {'Low' if x < 0.5 else 'Medium' if x < 1.0 else 'High'} Sensitivity",
+        index=2,  # Default to 0.5
+        key="rate_multiplier_sensitivity"
+    )
+    
+    rate_exponent_sensitivity = st.sidebar.selectbox(
+        "Rate Exponent Sensitivity",
+        options=[0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0],
+        format_func=lambda x: f"{x} - {'Low' if x < 0.5 else 'Medium' if x < 1.0 else 'High'} Sensitivity",
+        index=2,  # Default to 0.5
+        key="rate_exponent_sensitivity"
+    )
+    
     # Dropdown for significant change threshold
     change_threshold = st.sidebar.selectbox(
         "Significant Change Threshold",
@@ -466,8 +608,18 @@ def main():
     **Current Settings:**
     - Buffer Sensitivity: **{buffer_sensitivity}**
     - Position Sensitivity: **{position_sensitivity}**
+    - Rate Multiplier Sensitivity: **{rate_multiplier_sensitivity}**
+    - Rate Exponent Sensitivity: **{rate_exponent_sensitivity}**
     - Change Threshold: **{change_threshold*100}%**
     """)
+    
+    # Collect all sensitivity parameters
+    sensitivity_params = {
+        'buffer_sensitivity': buffer_sensitivity,
+        'position_sensitivity': position_sensitivity,
+        'rate_multiplier_sensitivity': rate_multiplier_sensitivity,
+        'rate_exponent_sensitivity': rate_exponent_sensitivity
+    }
     
     # Add a "Apply Recommendations" button
     apply_button = st.sidebar.button("Apply All Recommendations", use_container_width=True, 
@@ -494,6 +646,8 @@ def main():
         <ul>
             <li><strong>Buffer Sensitivity:</strong> How strongly buffer rates respond to spread changes (higher = more responsive)</li>
             <li><strong>Position Sensitivity:</strong> How strongly position multipliers respond to spread changes (higher = more responsive)</li>
+            <li><strong>Rate Multiplier Sensitivity:</strong> How strongly rate multipliers respond to spread changes (higher = more responsive)</li>
+            <li><strong>Rate Exponent Sensitivity:</strong> How strongly rate exponents respond to spread changes (higher = more responsive)</li>
             <li><strong>Change Threshold:</strong> Minimum spread change needed before parameters are adjusted (lower = more frequent updates)</li>
         </ul>
     </div>
@@ -530,13 +684,17 @@ def main():
     st.markdown("""
     <div class="info-box">
     <b>Trading Parameters Optimization</b><br>
-    This tool helps optimize buffer rates and position multipliers based on market spread conditions.<br>
+    This tool helps optimize buffer rates, position multipliers, rate multipliers, and rate exponents based on market spread conditions.<br>
+    <b>Parameter Relationships:</b>
+    <ul>
+        <li>When spreads <b>increase</b>: Buffer rates and rate exponents <b>increase</b>, position multipliers and rate multipliers <b>decrease</b></li>
+        <li>When spreads <b>decrease</b>: Buffer rates and rate exponents <b>decrease</b>, position multipliers and rate multipliers <b>increase</b></li>
+    </ul>
     <b>Key Features:</b>
     <ul>
         <li>Weekly range percentage shows how volatile each token's spread is relative to its current value</li>
         <li>Higher weekly range % indicates tokens that experience larger spread fluctuations</li>
-        <li>Tokens with high volatility benefit from more responsive parameter adjustments (lower thresholds)</li>
-        <li>Tokens with low volatility can use higher thresholds to avoid unnecessary parameter changes</li>
+        <li>Comparison with Rollbit parameters helps benchmark our settings against industry standards</li>
     </ul>
     </div>
     """, unsafe_allow_html=True)
@@ -555,6 +713,8 @@ def main():
             pair_name = param_row['pair_name']
             current_buffer_rate = param_row['buffer_rate']
             current_position_multiplier = param_row['position_multiplier']
+            current_rate_multiplier = param_row['rate_multiplier']
+            current_rate_exponent = param_row['rate_exponent']
             max_leverage = param_row['max_leverage']
             
             # Get current market spread
@@ -576,6 +736,22 @@ def main():
             weekly_high = weekly_row['weekly_high'].iloc[0] if weekly_row is not None and not weekly_row.empty else None
             weekly_avg = weekly_row['weekly_avg'].iloc[0] if weekly_row is not None and not weekly_row.empty else None
             
+            # Get Rollbit parameters if available
+            rollbit_row = None
+            if rollbit_params_df is not None and not rollbit_params_df.empty:
+                # Try exact match first
+                rollbit_row = rollbit_params_df[rollbit_params_df['pair_name'] == pair_name]
+                
+                # If no match, try without the /USDT suffix (Rollbit may use different format)
+                if rollbit_row.empty and '/' in pair_name:
+                    base_token = pair_name.split('/')[0]
+                    rollbit_row = rollbit_params_df[rollbit_params_df['pair_name'].str.contains(base_token, case=False)]
+            
+            rollbit_buffer_rate = rollbit_row['buffer_rate'].iloc[0] if rollbit_row is not None and not rollbit_row.empty else None
+            rollbit_position_multiplier = rollbit_row['position_multiplier'].iloc[0] if rollbit_row is not None and not rollbit_row.empty else None
+            rollbit_rate_multiplier = rollbit_row['rate_multiplier'].iloc[0] if rollbit_row is not None and not rollbit_row.empty else None
+            rollbit_rate_exponent = rollbit_row['rate_exponent'].iloc[0] if rollbit_row is not None and not rollbit_row.empty else None
+            
             # Calculate recommended parameters
             if current_spread is not None and baseline_spread is not None:
                 # Calculate spread change ratio for display
@@ -587,17 +763,29 @@ def main():
                         st.write(f"**{pair_name}**: Current Spread: {current_spread:.8f}, Baseline: {baseline_spread:.8f}")
                         st.write(f"Spread Ratio: {spread_change_ratio:.4f}, Threshold: {abs(spread_change_ratio - 1.0):.4f} vs {change_threshold:.4f}")
                 
+                # Current parameters dictionary
+                current_params = {
+                    'buffer_rate': current_buffer_rate,
+                    'position_multiplier': current_position_multiplier,
+                    'rate_multiplier': current_rate_multiplier,
+                    'rate_exponent': current_rate_exponent,
+                    'max_leverage': max_leverage
+                }
+                
                 # Calculate recommendations using the dynamic parameters
-                rec_buffer, rec_position = calculate_recommended_params(
-                    current_buffer_rate, 
-                    current_position_multiplier,
+                rec_params = calculate_recommended_params(
+                    current_params, 
                     current_spread,
                     baseline_spread,
-                    max_leverage,
-                    buffer_sensitivity,
-                    position_sensitivity,
+                    sensitivity_params,
                     change_threshold
                 )
+                
+                # Extract recommended values
+                rec_buffer = rec_params['buffer_rate']
+                rec_position = rec_params['position_multiplier']
+                rec_rate_multiplier = rec_params['rate_multiplier']
+                rec_rate_exponent = rec_params['rate_exponent']
                 
                 # Format the message
                 if current_spread > baseline_spread:
@@ -607,10 +795,16 @@ def main():
                 else:
                     spread_note = "No change"
                 
-                # Calculate if there is a significant change
+                # Calculate if there is a significant change in any parameter
                 buffer_change_pct = abs((rec_buffer - current_buffer_rate) / current_buffer_rate) * 100 if current_buffer_rate > 0 else 0
                 position_change_pct = abs((rec_position - current_position_multiplier) / current_position_multiplier) * 100 if current_position_multiplier > 0 else 0
-                significant_change = buffer_change_pct > 1 or position_change_pct > 1
+                rate_multiplier_change_pct = abs((rec_rate_multiplier - current_rate_multiplier) / current_rate_multiplier) * 100 if current_rate_multiplier > 0 else 0
+                rate_exponent_change_pct = abs((rec_rate_exponent - current_rate_exponent) / current_rate_exponent) * 100 if current_rate_exponent > 0 else 0
+                
+                significant_change = (buffer_change_pct > 1 or 
+                                     position_change_pct > 1 or 
+                                     rate_multiplier_change_pct > 1 or 
+                                     rate_exponent_change_pct > 1)
                 
                 recommendations_data.append({
                     'pair_name': pair_name,
@@ -625,10 +819,25 @@ def main():
                     'weekly_range': (weekly_high - weekly_low) * scale_factor if weekly_high is not None and weekly_low is not None else None,
                     'spread_change': spread_note,
                     'spread_change_ratio': spread_change_ratio,  # For sorting
+                    
+                    # Current SURF parameters
                     'current_buffer_rate': current_buffer_rate,
-                    'recommended_buffer_rate': rec_buffer,
                     'current_position_multiplier': current_position_multiplier,
+                    'current_rate_multiplier': current_rate_multiplier,
+                    'current_rate_exponent': current_rate_exponent,
+                    
+                    # Recommended parameters
+                    'recommended_buffer_rate': rec_buffer,
                     'recommended_position_multiplier': rec_position,
+                    'recommended_rate_multiplier': rec_rate_multiplier,
+                    'recommended_rate_exponent': rec_rate_exponent,
+                    
+                    # Rollbit parameters for comparison
+                    'rollbit_buffer_rate': rollbit_buffer_rate,
+                    'rollbit_position_multiplier': rollbit_position_multiplier,
+                    'rollbit_rate_multiplier': rollbit_rate_multiplier,
+                    'rollbit_rate_exponent': rollbit_rate_exponent,
+                    
                     'significant_change': significant_change
                 })
         
@@ -649,7 +858,7 @@ def main():
                 st.markdown(f"<div class='success-message'>✅ All parameters are within optimal ranges</div>", unsafe_allow_html=True)
             
             # Create tabs for different views
-            tabs = st.tabs(["All Pairs", "Changed Parameters Only", "Major Tokens", "Altcoin Tokens"])
+            tabs = st.tabs(["All Pairs", "Changed Parameters Only", "Rollbit Comparison", "Major Tokens", "Altcoin Tokens"])
             
             with tabs[0]:  # All Pairs
                 st.markdown("### All Trading Pairs")
@@ -662,6 +871,12 @@ def main():
                     
                     current_pos_formatted = format_number(row['current_position_multiplier'])
                     rec_pos_formatted = format_with_change_indicator(row['current_position_multiplier'], row['recommended_position_multiplier'])
+                    
+                    current_rate_mult_formatted = format_float(row['current_rate_multiplier'], 2)
+                    rec_rate_mult_formatted = format_with_change_indicator(row['current_rate_multiplier'], row['recommended_rate_multiplier'], is_percent=False, decimals=2)
+                    
+                    current_rate_exp_formatted = format_float(row['current_rate_exponent'], 2)
+                    rec_rate_exp_formatted = format_with_change_indicator(row['current_rate_exponent'], row['recommended_rate_exponent'], is_percent=False, decimals=2)
                     
                     # Format the weekly range
                     if row['weekly_low'] is not None and row['weekly_high'] is not None:
@@ -688,7 +903,11 @@ def main():
                         'Current Buffer': current_buffer_formatted,
                         'Recommended Buffer': rec_buffer_formatted,
                         'Current Position Mult.': current_pos_formatted,
-                        'Recommended Position Mult.': rec_pos_formatted
+                        'Recommended Position Mult.': rec_pos_formatted,
+                        'Current Rate Mult.': current_rate_mult_formatted,
+                        'Recommended Rate Mult.': rec_rate_mult_formatted,
+                        'Current Rate Exp.': current_rate_exp_formatted,
+                        'Recommended Rate Exp.': rec_rate_exp_formatted
                     })
                 
                 display_df = pd.DataFrame(display_data)
@@ -723,6 +942,12 @@ def main():
                         current_pos_formatted = format_number(row['current_position_multiplier'])
                         rec_pos_formatted = format_with_change_indicator(row['current_position_multiplier'], row['recommended_position_multiplier'])
                         
+                        current_rate_mult_formatted = format_float(row['current_rate_multiplier'], 2)
+                        rec_rate_mult_formatted = format_with_change_indicator(row['current_rate_multiplier'], row['recommended_rate_multiplier'], is_percent=False, decimals=2)
+                        
+                        current_rate_exp_formatted = format_float(row['current_rate_exponent'], 2)
+                        rec_rate_exp_formatted = format_with_change_indicator(row['current_rate_exponent'], row['recommended_rate_exponent'], is_percent=False, decimals=2)
+                        
                         # Format the weekly range
                         if row['weekly_low'] is not None and row['weekly_high'] is not None:
                             weekly_range = format_spread_range(row['weekly_low'], row['weekly_high'], row['current_spread'], row['baseline_spread'])
@@ -748,15 +973,167 @@ def main():
                             'Current Buffer': current_buffer_formatted,
                             'Recommended Buffer': rec_buffer_formatted,
                             'Current Position Mult.': current_pos_formatted,
-                            'Recommended Position Mult.': rec_pos_formatted
+                            'Recommended Position Mult.': rec_pos_formatted,
+                            'Current Rate Mult.': current_rate_mult_formatted,
+                            'Recommended Rate Mult.': rec_rate_mult_formatted,
+                            'Current Rate Exp.': current_rate_exp_formatted,
+                            'Recommended Rate Exp.': rec_rate_exp_formatted
                         })
                     
                     changed_display_df = pd.DataFrame(changed_display)
                     st.write(changed_display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
                 else:
                     st.info("No significant parameter changes recommended at this time.")
+                    
+            with tabs[2]:  # Rollbit Comparison
+                st.markdown("### Rollbit Parameter Comparison")
+                
+                # Filter for pairs with Rollbit data
+                rollbit_comparison_df = rec_df.dropna(subset=['rollbit_buffer_rate'])
+                
+                if rollbit_comparison_df.empty:
+                    st.info("No matching pairs found with Rollbit data for comparison.")
+                else:
+                    # Create a side-by-side comparison of SURF and Rollbit parameters
+                    comparison_display = []
+                    
+                    for _, row in rollbit_comparison_df.iterrows():
+                        # Format all parameters for display
+                        surf_buffer = format_percent(row['current_buffer_rate'])
+                        rollbit_buffer = format_percent(row['rollbit_buffer_rate'])
+                        
+                        surf_position = format_number(row['current_position_multiplier'])
+                        rollbit_position = format_number(row['rollbit_position_multiplier'])
+                        
+                        surf_rate_mult = format_float(row['current_rate_multiplier'], 2)
+                        rollbit_rate_mult = format_float(row['rollbit_rate_multiplier'], 2)
+                        
+                        surf_rate_exp = format_float(row['current_rate_exponent'], 2)
+                        rollbit_rate_exp = format_float(row['rollbit_rate_exponent'], 2)
+                        
+                        # Calculate ratios (SURF vs Rollbit)
+                        buffer_ratio = row['current_buffer_rate'] / row['rollbit_buffer_rate'] if row['rollbit_buffer_rate'] > 0 else 0
+                        position_ratio = row['current_position_multiplier'] / row['rollbit_position_multiplier'] if row['rollbit_position_multiplier'] > 0 else 0
+                        rate_mult_ratio = row['current_rate_multiplier'] / row['rollbit_rate_multiplier'] if row['rollbit_rate_multiplier'] > 0 else 0
+                        rate_exp_ratio = row['current_rate_exponent'] / row['rollbit_rate_exponent'] if row['rollbit_rate_exponent'] > 0 else 0
+                        
+                        comparison_display.append({
+                            'Pair': row['pair_name'],
+                            'Type': row['token_type'],
+                            'SURF Buffer': f"<span class='surf-param'>{surf_buffer}</span>",
+                            'Rollbit Buffer': f"<span class='rollbit-param'>{rollbit_buffer}</span>",
+                            'Buffer Ratio': f"{buffer_ratio:.2f}x",
+                            'SURF Position': f"<span class='surf-param'>{surf_position}</span>",
+                            'Rollbit Position': f"<span class='rollbit-param'>{rollbit_position}</span>",
+                            'Position Ratio': f"{position_ratio:.2f}x",
+                            'SURF Rate Mult': f"<span class='surf-param'>{surf_rate_mult}</span>",
+                            'Rollbit Rate Mult': f"<span class='rollbit-param'>{rollbit_rate_mult}</span>",
+                            'Rate Mult Ratio': f"{rate_mult_ratio:.2f}x",
+                            'SURF Rate Exp': f"<span class='surf-param'>{surf_rate_exp}</span>",
+                            'Rollbit Rate Exp': f"<span class='rollbit-param'>{rollbit_rate_exp}</span>",
+                            'Rate Exp Ratio': f"{rate_exp_ratio:.2f}x"
+                        })
+                    
+                    comparison_display_df = pd.DataFrame(comparison_display)
+                    st.write(comparison_display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+                    
+                    # Add explanations
+                    st.markdown("""
+                    <div class="rollbit-comparison">
+                        <h4>Understanding the Comparison</h4>
+                        <p>This tab compares SURF's current parameters with Rollbit's parameters for matching tokens:</p>
+                        <ul>
+                            <li><b>Buffer Ratio</b>: SURF buffer rate ÷ Rollbit buffer rate. Values > 1 mean SURF is more conservative.</li>
+                            <li><b>Position Ratio</b>: SURF position multiplier ÷ Rollbit position multiplier. Values > 1 mean SURF allows larger positions.</li>
+                            <li><b>Rate Multiplier Ratio</b>: SURF rate multiplier ÷ Rollbit rate multiplier. Values > 1 mean SURF has higher market impact factors.</li>
+                            <li><b>Rate Exponent Ratio</b>: SURF rate exponent ÷ Rollbit rate exponent. Values > 1 mean SURF has steeper market impact curves.</li>
+                        </ul>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Create visualizations for parameter comparisons
+                    st.markdown("### Parameter Comparison Visualizations")
+                    
+                    # Prepare data for visualization
+                    viz_data = []
+                    for _, row in rollbit_comparison_df.iterrows():
+                        viz_data.append({
+                            'Pair': row['pair_name'],
+                            'Parameter': 'Buffer Rate (%)',
+                            'SURF': row['current_buffer_rate'] * 100,
+                            'Rollbit': row['rollbit_buffer_rate'] * 100
+                        })
+                        viz_data.append({
+                            'Pair': row['pair_name'],
+                            'Parameter': 'Position Multiplier (log10)',
+                            'SURF': np.log10(row['current_position_multiplier']),
+                            'Rollbit': np.log10(row['rollbit_position_multiplier'])
+                        })
+                        viz_data.append({
+                            'Pair': row['pair_name'],
+                            'Parameter': 'Rate Multiplier',
+                            'SURF': row['current_rate_multiplier'],
+                            'Rollbit': row['rollbit_rate_multiplier']
+                        })
+                        viz_data.append({
+                            'Pair': row['pair_name'],
+                            'Parameter': 'Rate Exponent',
+                            'SURF': row['current_rate_exponent'],
+                            'Rollbit': row['rollbit_rate_exponent']
+                        })
+                    
+                    viz_df = pd.DataFrame(viz_data)
+                    
+                    # Create scatter plot for each parameter
+                    for param in ['Buffer Rate (%)', 'Position Multiplier (log10)', 'Rate Multiplier', 'Rate Exponent']:
+                        param_df = viz_df[viz_df['Parameter'] == param]
+                        
+                        # Calculate min/max for reference line
+                        if not param_df.empty:
+                            min_val = min(param_df['SURF'].min(), param_df['Rollbit'].min()) * 0.9
+                            max_val = max(param_df['SURF'].max(), param_df['Rollbit'].max()) * 1.1
+                            
+                            fig = px.scatter(
+                                param_df,
+                                x='Rollbit',
+                                y='SURF',
+                                hover_name='Pair',
+                                title=f"{param}: SURF vs Rollbit",
+                                labels={
+                                    'Rollbit': f'Rollbit {param}',
+                                    'SURF': f'SURF {param}'
+                                }
+                            )
+                            
+                            # Add reference line (y=x)
+                            fig.add_trace(go.Scatter(
+                                x=[min_val, max_val],
+                                y=[min_val, max_val],
+                                mode='lines',
+                                line=dict(color='red', dash='dash'),
+                                name='Equal Values'
+                            ))
+                            
+                            # Add explanatory text
+                            if param == 'Buffer Rate (%)':
+                                fig.add_annotation(
+                                    text="SURF higher",
+                                    x=(min_val + max_val) / 2,
+                                    y=max_val * 0.9,
+                                    showarrow=False,
+                                    font=dict(size=10)
+                                )
+                                fig.add_annotation(
+                                    text="Rollbit higher",
+                                    x=max_val * 0.9,
+                                    y=(min_val + max_val) / 2,
+                                    showarrow=False,
+                                    font=dict(size=10)
+                                )
+                            
+                            st.plotly_chart(fig, use_container_width=True)
             
-            with tabs[2]:  # Major Tokens
+            with tabs[3]:  # Major Tokens
                 st.markdown("### Major Tokens Only")
                 
                 # Filter for major tokens
@@ -770,6 +1147,12 @@ def main():
                     
                     current_pos_formatted = format_number(row['current_position_multiplier'])
                     rec_pos_formatted = format_with_change_indicator(row['current_position_multiplier'], row['recommended_position_multiplier'])
+                    
+                    current_rate_mult_formatted = format_float(row['current_rate_multiplier'], 2)
+                    rec_rate_mult_formatted = format_with_change_indicator(row['current_rate_multiplier'], row['recommended_rate_multiplier'], is_percent=False, decimals=2)
+                    
+                    current_rate_exp_formatted = format_float(row['current_rate_exponent'], 2)
+                    rec_rate_exp_formatted = format_with_change_indicator(row['current_rate_exponent'], row['recommended_rate_exponent'], is_percent=False, decimals=2)
                     
                     # Format weekly range
                     if row['weekly_low'] is not None and row['weekly_high'] is not None:
@@ -791,13 +1174,17 @@ def main():
                         'Current Buffer': current_buffer_formatted,
                         'Recommended Buffer': rec_buffer_formatted,
                         'Current Position Mult.': current_pos_formatted,
-                        'Recommended Position Mult.': rec_pos_formatted
+                        'Recommended Position Mult.': rec_pos_formatted,
+                        'Current Rate Mult.': current_rate_mult_formatted,
+                        'Recommended Rate Mult.': rec_rate_mult_formatted,
+                        'Current Rate Exp.': current_rate_exp_formatted,
+                        'Recommended Rate Exp.': rec_rate_exp_formatted
                     })
                 
                 major_display_df = pd.DataFrame(major_display)
                 st.write(major_display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
             
-            with tabs[3]:  # Altcoin Tokens
+            with tabs[4]:  # Altcoin Tokens
                 st.markdown("### Altcoin Tokens Only")
                 
                 # Filter for altcoin tokens
@@ -811,6 +1198,12 @@ def main():
                     
                     current_pos_formatted = format_number(row['current_position_multiplier'])
                     rec_pos_formatted = format_with_change_indicator(row['current_position_multiplier'], row['recommended_position_multiplier'])
+                    
+                    current_rate_mult_formatted = format_float(row['current_rate_multiplier'], 2)
+                    rec_rate_mult_formatted = format_with_change_indicator(row['current_rate_multiplier'], row['recommended_rate_multiplier'], is_percent=False, decimals=2)
+                    
+                    current_rate_exp_formatted = format_float(row['current_rate_exponent'], 2)
+                    rec_rate_exp_formatted = format_with_change_indicator(row['current_rate_exponent'], row['recommended_rate_exponent'], is_percent=False, decimals=2)
                     
                     # Format weekly range
                     if row['weekly_low'] is not None and row['weekly_high'] is not None:
@@ -832,7 +1225,11 @@ def main():
                         'Current Buffer': current_buffer_formatted,
                         'Recommended Buffer': rec_buffer_formatted,
                         'Current Position Mult.': current_pos_formatted,
-                        'Recommended Position Mult.': rec_pos_formatted
+                        'Recommended Position Mult.': rec_pos_formatted,
+                        'Current Rate Mult.': current_rate_mult_formatted,
+                        'Recommended Rate Mult.': rec_rate_mult_formatted,
+                        'Current Rate Exp.': current_rate_exp_formatted,
+                        'Recommended Rate Exp.': rec_rate_exp_formatted
                     })
                 
                 altcoin_display_df = pd.DataFrame(altcoin_display)
@@ -950,41 +1347,149 @@ def main():
                     st.error(f"Error creating the weekly range chart: {str(e)}")
             
             with col2:
-                # Create a scatter plot showing current buffer rate vs recommended
+                # Create multiple scatter plots showing parameter relationships
                 try:
-                    fig2 = px.scatter(
-                        rec_df,
-                        x='current_buffer_rate',
-                        y='recommended_buffer_rate',
-                        color='token_type',
-                        hover_name='pair_name',
-                        labels={
-                            'current_buffer_rate': 'Current Buffer Rate',
-                            'recommended_buffer_rate': 'Recommended Buffer Rate',
-                            'token_type': 'Token Type'
-                        },
-                        title="Current vs Recommended Buffer Rates"
-                    )
+                    # Create tabs for different parameter visualizations
+                    param_viz_tabs = st.tabs(["Buffer Rate", "Position Mult.", "Rate Mult.", "Rate Exp."])
                     
-                    # Add diagonal reference line
-                    max_val = max(rec_df['current_buffer_rate'].max(), rec_df['recommended_buffer_rate'].max())
-                    fig2.add_trace(go.Scatter(
-                        x=[0, max_val],
-                        y=[0, max_val],
-                        mode='lines',
-                        line=dict(color='red', dash='dash'),
-                        name='No Change'
-                    ))
+                    # Buffer Rate visualization
+                    with param_viz_tabs[0]:
+                        fig_buffer = px.scatter(
+                            rec_df,
+                            x='current_buffer_rate',
+                            y='recommended_buffer_rate',
+                            color='token_type',
+                            hover_name='pair_name',
+                            labels={
+                                'current_buffer_rate': 'Current Buffer Rate',
+                                'recommended_buffer_rate': 'Recommended Buffer Rate',
+                                'token_type': 'Token Type'
+                            },
+                            title="Current vs Recommended Buffer Rates"
+                        )
+                        
+                        # Add diagonal reference line
+                        max_val = max(rec_df['current_buffer_rate'].max(), rec_df['recommended_buffer_rate'].max())
+                        fig_buffer.add_trace(go.Scatter(
+                            x=[0, max_val],
+                            y=[0, max_val],
+                            mode='lines',
+                            line=dict(color='red', dash='dash'),
+                            name='No Change'
+                        ))
+                        
+                        fig_buffer.update_layout(
+                            xaxis_title="Current Buffer Rate",
+                            yaxis_title="Recommended Buffer Rate",
+                            height=400
+                        )
+                        
+                        st.plotly_chart(fig_buffer, use_container_width=True)
                     
-                    fig2.update_layout(
-                        xaxis_title="Current Buffer Rate",
-                        yaxis_title="Recommended Buffer Rate",
-                        height=500
-                    )
+                    # Position Multiplier visualization
+                    with param_viz_tabs[1]:
+                        fig_pos = px.scatter(
+                            rec_df,
+                            x='current_position_multiplier',
+                            y='recommended_position_multiplier',
+                            color='token_type',
+                            hover_name='pair_name',
+                            labels={
+                                'current_position_multiplier': 'Current Position Multiplier',
+                                'recommended_position_multiplier': 'Recommended Position Multiplier',
+                                'token_type': 'Token Type'
+                            },
+                            title="Current vs Recommended Position Multipliers"
+                        )
+                        
+                        # Add diagonal reference line
+                        max_val = max(rec_df['current_position_multiplier'].max(), rec_df['recommended_position_multiplier'].max())
+                        fig_pos.add_trace(go.Scatter(
+                            x=[0, max_val],
+                            y=[0, max_val],
+                            mode='lines',
+                            line=dict(color='red', dash='dash'),
+                            name='No Change'
+                        ))
+                        
+                        fig_pos.update_layout(
+                            xaxis_title="Current Position Multiplier",
+                            yaxis_title="Recommended Position Multiplier",
+                            height=400
+                        )
+                        
+                        st.plotly_chart(fig_pos, use_container_width=True)
                     
-                    st.plotly_chart(fig2, use_container_width=True)
+                    # Rate Multiplier visualization
+                    with param_viz_tabs[2]:
+                        fig_rate_mult = px.scatter(
+                            rec_df,
+                            x='current_rate_multiplier',
+                            y='recommended_rate_multiplier',
+                            color='token_type',
+                            hover_name='pair_name',
+                            labels={
+                                'current_rate_multiplier': 'Current Rate Multiplier',
+                                'recommended_rate_multiplier': 'Recommended Rate Multiplier',
+                                'token_type': 'Token Type'
+                            },
+                            title="Current vs Recommended Rate Multipliers"
+                        )
+                        
+                        # Add diagonal reference line
+                        max_val = max(rec_df['current_rate_multiplier'].max(), rec_df['recommended_rate_multiplier'].max())
+                        fig_rate_mult.add_trace(go.Scatter(
+                            x=[0, max_val],
+                            y=[0, max_val],
+                            mode='lines',
+                            line=dict(color='red', dash='dash'),
+                            name='No Change'
+                        ))
+                        
+                        fig_rate_mult.update_layout(
+                            xaxis_title="Current Rate Multiplier",
+                            yaxis_title="Recommended Rate Multiplier",
+                            height=400
+                        )
+                        
+                        st.plotly_chart(fig_rate_mult, use_container_width=True)
+                    
+                    # Rate Exponent visualization
+                    with param_viz_tabs[3]:
+                        fig_rate_exp = px.scatter(
+                            rec_df,
+                            x='current_rate_exponent',
+                            y='recommended_rate_exponent',
+                            color='token_type',
+                            hover_name='pair_name',
+                            labels={
+                                'current_rate_exponent': 'Current Rate Exponent',
+                                'recommended_rate_exponent': 'Recommended Rate Exponent',
+                                'token_type': 'Token Type'
+                            },
+                            title="Current vs Recommended Rate Exponents"
+                        )
+                        
+                        # Add diagonal reference line
+                        max_val = max(rec_df['current_rate_exponent'].max(), rec_df['recommended_rate_exponent'].max())
+                        fig_rate_exp.add_trace(go.Scatter(
+                            x=[0, max_val],
+                            y=[0, max_val],
+                            mode='lines',
+                            line=dict(color='red', dash='dash'),
+                            name='No Change'
+                        ))
+                        
+                        fig_rate_exp.update_layout(
+                            xaxis_title="Current Rate Exponent",
+                            yaxis_title="Recommended Rate Exponent",
+                            height=400
+                        )
+                        
+                        st.plotly_chart(fig_rate_exp, use_container_width=True)
+                        
                 except Exception as e:
-                    st.error(f"Error creating buffer rate chart: {str(e)}")
+                    st.error(f"Error creating parameter visualizations: {str(e)}")
             
             # Add a visualization for weekly range percentage distribution
             st.markdown("### Weekly Range Analysis")
@@ -1198,11 +1703,17 @@ def main():
                     
                     for i, (_, row) in enumerate(to_update.iterrows()):
                         pair_name = row['pair_name']
-                        rec_buffer = row['recommended_buffer_rate']
-                        rec_position = row['recommended_position_multiplier']
+                        
+                        # Create parameters dictionary
+                        params = {
+                            'buffer_rate': row['recommended_buffer_rate'],
+                            'position_multiplier': row['recommended_position_multiplier'],
+                            'rate_multiplier': row['recommended_rate_multiplier'],
+                            'rate_exponent': row['recommended_rate_exponent']
+                        }
                         
                         # Update in the database
-                        if update_trading_parameters(pair_name, rec_buffer, rec_position):
+                        if update_trading_parameters(pair_name, params):
                             success_count += 1
                         else:
                             error_count += 1
@@ -1233,3 +1744,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+                                                                                  
