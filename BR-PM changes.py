@@ -285,36 +285,23 @@ def fetch_rollbit_parameters():
             return None
             
         query = """
-        SELECT
-            symbol as pair_name,
+        SELECT 
+            pair_name,
             bust_buffer as buffer_rate,
-            pos_mult as position_multiplier,
-            rate_mult as rate_multiplier,
-            rate_exp as rate_exponent,
+            position_multiplier,
+            rate_multiplier,
+            rate_exponent,
             created_at
-        FROM
+        FROM 
             rollbit_pair_config
-        WHERE
+        WHERE 
             created_at = (SELECT max(created_at) FROM rollbit_pair_config)
-        ORDER BY
-            symbol
+        ORDER BY 
+            pair_name
         """
         
         df = pd.read_sql(query, engine)
-        
-        # Convert any columns with different names to match SURF column names
-        if 'symbol' in df.columns:
-            df = df.rename(columns={'symbol': 'pair_name'})
-        if 'bust_buffer' in df.columns:
-            df = df.rename(columns={'bust_buffer': 'buffer_rate'})
-        if 'pos_mult' in df.columns:
-            df = df.rename(columns={'pos_mult': 'position_multiplier'})
-        if 'rate_mult' in df.columns:
-            df = df.rename(columns={'rate_mult': 'rate_multiplier'})
-        if 'rate_exp' in df.columns:
-            df = df.rename(columns={'rate_exp': 'rate_exponent'})
-            
-        return df
+        return df if not df.empty else None
     except Exception as e:
         st.error(f"Error fetching Rollbit parameters: {e}")
         return None
