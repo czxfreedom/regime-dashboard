@@ -179,6 +179,16 @@ st.markdown("""
         font-size: 12px;
         color: #555;
     }
+    /* Equation display */
+    .equation {
+        font-family: 'Courier New', monospace;
+        background-color: #f5f5f5;
+        padding: 10px;
+        border-radius: 5px;
+        margin: 10px 0;
+        border-left: 3px solid #1976D2;
+        overflow-x: auto;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -326,37 +336,34 @@ def fetch_current_parameters():
 
 @st.cache_data(ttl=600)
 def fetch_rollbit_parameters():
-    """Fetch Rollbit parameters for comparison"""
+    """Fetch Rollbit parameters for comparison using the exact SQL provided"""
     try:
         engine = init_connection()
         if not engine:
             return None
             
+        # Using exactly the SQL query specified
         query = """
-        SELECT 
-            pair_name,
-            bust_buffer as buffer_rate,
-            position_multiplier,
-            rate_multiplier,
-            rate_exponent,
-            created_at
-        FROM 
-            rollbit_pair_config
-        WHERE 
-            created_at = (SELECT max(created_at) FROM rollbit_pair_config)
-        ORDER BY 
-            pair_name
+        SELECT * 
+        FROM rollbit_pair_config 
+        WHERE created_at = (SELECT max(created_at) FROM rollbit_pair_config)
         """
         
         df = pd.read_sql(query, engine)
         
-        # Fill NaN values with reasonable defaults
+        # Ensure we have the required columns and rename if needed
         if not df.empty:
+            # Ensure we have bust_buffer to use as buffer_rate
+            if 'bust_buffer' in df.columns and 'buffer_rate' not in df.columns:
+                df['buffer_rate'] = df['bust_buffer']
+            
+            # Fill NaN values with reasonable defaults
             df['rate_multiplier'] = df['rate_multiplier'].fillna(6.0)
             df['rate_exponent'] = df['rate_exponent'].fillna(2.0)
             
             # Ensure buffer_rate has no zeros (replace with NaN for "N/A" display)
-            df['buffer_rate'] = df['buffer_rate'].replace(0, np.nan)
+            if 'buffer_rate' in df.columns:
+                df['buffer_rate'] = df['buffer_rate'].replace(0, np.nan)
             
         return df if not df.empty else None
     except Exception as e:
@@ -539,7 +546,7 @@ def calculate_current_spreads(market_data):
 
 def calculate_recommended_params(current_params, current_spread, baseline_spread, weekly_data,
                               sensitivities, significant_change_threshold=0.05):
-    """Calculate recommended parameter values based on spread change ratio and weekly range with proper inverse relationships"""
+    """Calculate recommended parameter values based on spread change ratio and weekly range"""
     
     # Handle cases with missing data
     if current_spread is None or baseline_spread is None or baseline_spread <= 0:
@@ -586,29 +593,30 @@ def calculate_recommended_params(current_params, current_spread, baseline_spread
     rate_multiplier_sensitivity = sensitivities.get('rate_multiplier_sensitivity', 0.5)
     rate_exponent_sensitivity = sensitivities.get('rate_exponent_sensitivity', 0.5)
     
-    # Calculate spread change ratio
+    # Calculate spread change ratio (how current spread compares to baseline)
     spread_change_ratio = current_spread / baseline_spread
     
-    # Adjust spread_change_ratio based on where we are in the weekly range
-    # If near the top of the range, strengthen adjustments; if near bottom, weaken them
-    range_adjusted_ratio = spread_change_ratio * (0.5 + weekly_range_ratio * 0.5)
-    
     # Check if the change is significant
-    if abs(range_adjusted_ratio - 1.0) < significant_change_threshold:
+    if abs(spread_change_ratio - 1.0) < significant_change_threshold:
         return current_params
     
-    # Fixed parameter relationships:
-    # 1. If spreads increase, buffer rates should increase (direct relationship)
-    recommended_buffer_rate = current_buffer_rate * (range_adjusted_ratio ** buffer_sensitivity)
+    # ========== CORE PARAMETER ADJUSTMENT EQUATIONS ==========
     
-    # 2. If spreads increase, position multiplier should decrease (inverse relationship)
-    recommended_position_multiplier = current_position_multiplier / (range_adjusted_ratio ** position_sensitivity)
+    # 1. Buffer Rate (direct relationship):
+    # When spreads increase, buffer rate increases
+    recommended_buffer_rate = current_buffer_rate * (spread_change_ratio ** buffer_sensitivity)
     
-    # 3. If spreads increase, rate multiplier should decrease (inverse relationship)
-    recommended_rate_multiplier = current_rate_multiplier / (range_adjusted_ratio ** rate_multiplier_sensitivity)
+    # 2. Position Multiplier (inverse relationship):
+    # When spreads increase, position multiplier decreases
+    recommended_position_multiplier = current_position_multiplier / (spread_change_ratio ** position_sensitivity)
     
-    # 4. If spreads increase, rate exponent should increase (direct relationship)
-    recommended_rate_exponent = current_rate_exponent * (range_adjusted_ratio ** rate_exponent_sensitivity)
+    # 3. Rate Multiplier (inverse relationship):
+    # When spreads increase, rate multiplier decreases
+    recommended_rate_multiplier = current_rate_multiplier / (spread_change_ratio ** rate_multiplier_sensitivity)
+    
+    # 4. Rate Exponent (direct relationship):
+    # When spreads increase, rate exponent increases
+    recommended_rate_exponent = current_rate_exponent * (spread_change_ratio ** rate_exponent_sensitivity)
     
     # Apply bounds to keep values in reasonable ranges
     max_buffer_rate = 0.9 / max_leverage if max_leverage > 0 else 0.009
@@ -622,7 +630,7 @@ def calculate_recommended_params(current_params, current_spread, baseline_spread
         'position_multiplier': recommended_position_multiplier,
         'rate_multiplier': recommended_rate_multiplier,
         'rate_exponent': recommended_rate_exponent,
-        'weekly_range_ratio': weekly_range_ratio  # Return where we are in the weekly range
+        'weekly_range_ratio': weekly_range_ratio
     }
 
 def generate_recommendations(current_params_df, market_data_df, weekly_data_df, baselines_df, sensitivities):
@@ -732,22 +740,26 @@ def generate_recommendations(current_params_df, market_data_df, weekly_data_df, 
     return pd.DataFrame(recommendations)
 
 def add_rollbit_comparison(rec_df, rollbit_df):
-    """Add Rollbit parameter data to recommendations DataFrame for comparison
-       with improved handling of zero/null values"""
+    """Add Rollbit parameter data to recommendations DataFrame for comparison"""
     if rec_df is None or rollbit_df is None or rec_df.empty or rollbit_df.empty:
         return rec_df
     
     # Create mapping of Rollbit parameters
     rollbit_params = {}
     for _, row in rollbit_df.iterrows():
-        # Clean up pair name to match format in rec_df
         pair_name = row['pair_name']
         
+        # Extract the parameters, handling potential column name differences
+        buffer_rate = row.get('buffer_rate', row.get('bust_buffer', np.nan))
+        position_multiplier = row.get('position_multiplier', np.nan)
+        rate_multiplier = row.get('rate_multiplier', 6.0)
+        rate_exponent = row.get('rate_exponent', 2.0)
+        
         rollbit_params[pair_name] = {
-            'buffer_rate': row['buffer_rate'],
-            'position_multiplier': row['position_multiplier'],
-            'rate_multiplier': row['rate_multiplier'],
-            'rate_exponent': row['rate_exponent'],
+            'buffer_rate': buffer_rate,
+            'position_multiplier': position_multiplier,
+            'rate_multiplier': rate_multiplier,
+            'rate_exponent': rate_exponent,
         }
     
     # Add Rollbit parameters to recommendations DataFrame
@@ -764,11 +776,44 @@ def add_rollbit_comparison(rec_df, rollbit_df):
     return rec_df
 
 def render_rollbit_comparison(rollbit_comparison_df):
-    """Render the Rollbit comparison tab with improved formatting and error handling for NULL/zero values"""
+    """Render the Rollbit comparison tab with improved formatting and error handling"""
     
     if rollbit_comparison_df is None or rollbit_comparison_df.empty:
         st.info("No matching pairs found with Rollbit data for comparison.")
         return
+    
+    # Display the parameter adjustment equations
+    st.markdown("""
+    <div class="info-box">
+        <h4>Parameter Adjustment Equations</h4>
+        <p>These are the equations used to adjust parameters based on spread changes:</p>
+        
+        <div class="equation">
+            Buffer Rate = Current Buffer Rate × (Spread Change Ratio ^ Buffer Sensitivity)
+        </div>
+        
+        <div class="equation">
+            Position Multiplier = Current Position Multiplier ÷ (Spread Change Ratio ^ Position Sensitivity)
+        </div>
+        
+        <div class="equation">
+            Rate Multiplier = Current Rate Multiplier ÷ (Spread Change Ratio ^ Rate Multiplier Sensitivity)
+        </div>
+        
+        <div class="equation">
+            Rate Exponent = Current Rate Exponent × (Spread Change Ratio ^ Rate Exponent Sensitivity)
+        </div>
+        
+        <p>Where <b>Spread Change Ratio</b> = Current Spread ÷ Baseline Spread</p>
+        <p>These equations ensure that:</p>
+        <ul>
+            <li>When spreads increase, buffer rates increase</li>
+            <li>When spreads increase, position multipliers decrease</li>
+            <li>When spreads increase, rate multipliers decrease</li>
+            <li>When spreads increase, rate exponents increase</li>
+        </ul>
+    </div>
+    """, unsafe_allow_html=True)
     
     # Buffer Rate Table
     st.markdown("<h3>Buffer Rate Comparison</h3>", unsafe_allow_html=True)
@@ -1185,6 +1230,58 @@ def render_weekly_spread_range(pair_name, min_spread, max_spread, current_spread
     
     return html
 
+def display_parameter_equations():
+    """Display the parameter adjustment equations with explanations"""
+    st.markdown("""
+    <h3>Parameter Adjustment Equations</h3>
+    <p>
+        The following equations determine how parameters are adjusted based on changes in market spreads:
+    </p>
+    
+    <div class="equation">
+        Buffer Rate = Current Buffer Rate × (Spread Change Ratio<sup>Buffer Sensitivity</sup>)
+    </div>
+    
+    <div class="equation">
+        Position Multiplier = Current Position Multiplier ÷ (Spread Change Ratio<sup>Position Sensitivity</sup>)
+    </div>
+    
+    <div class="equation">
+        Rate Multiplier = Current Rate Multiplier ÷ (Spread Change Ratio<sup>Rate Multiplier Sensitivity</sup>)
+    </div>
+    
+    <div class="equation">
+        Rate Exponent = Current Rate Exponent × (Spread Change Ratio<sup>Rate Exponent Sensitivity</sup>)
+    </div>
+    
+    <p>Where <b>Spread Change Ratio</b> = Current Spread ÷ Baseline Spread</p>
+    
+    <h4>Effects of Spread Changes:</h4>
+    <ul>
+        <li>If spreads increase (ratio > 1):
+            <ul>
+                <li>Buffer rate increases (direct relationship)</li>
+                <li>Position multiplier decreases (inverse relationship)</li>
+                <li>Rate multiplier decreases (inverse relationship)</li>
+                <li>Rate exponent increases (direct relationship)</li>
+            </ul>
+        </li>
+        <li>If spreads decrease (ratio < 1):
+            <ul>
+                <li>Buffer rate decreases</li>
+                <li>Position multiplier increases</li>
+                <li>Rate multiplier increases</li>
+                <li>Rate exponent decreases</li>
+            </ul>
+        </li>
+    </ul>
+    
+    <p>
+        The sensitivity parameters control how aggressively each parameter responds to spread changes. 
+        Higher sensitivity values result in larger parameter adjustments for a given spread change.
+    </p>
+    """, unsafe_allow_html=True)
+
 # --- Main Application ---
 def main():
     st.markdown('<div class="header-style">Exchange Parameter Optimization Dashboard</div>', unsafe_allow_html=True)
@@ -1261,6 +1358,9 @@ def main():
         
         # Render the selected tab content
         if selected_tab == "Overview":
+            # Display the parameter adjustment equations
+            display_parameter_equations()
+            
             st.markdown("""
             <div class="info-box">
                 <h4>Dashboard Overview</h4>
@@ -1628,17 +1728,28 @@ def main():
                 st.warning("No recommendation data available. Please check database connection and try refreshing.")
                 
         elif selected_tab == "Rollbit Comparison":
+            # Display the parameter adjustment equations
+            display_parameter_equations()
+            
             # Filter for pairs with Rollbit data
             if rec_df is not None and not rec_df.empty:
                 # Create a copy to avoid any pandas warnings
                 rollbit_comparison_df = rec_df.copy()
                 
                 # Filter rows with Rollbit data
-                if 'rollbit_buffer_rate' in rollbit_comparison_df.columns:
-                    rollbit_comparison_df = rollbit_comparison_df.dropna(subset=['rollbit_buffer_rate', 'rollbit_position_multiplier'], how='all')
+                if 'rollbit_buffer_rate' in rollbit_comparison_df.columns or 'rollbit_position_multiplier' in rollbit_comparison_df.columns:
+                    # Keep rows where at least one Rollbit parameter is available
+                    columns_to_check = [col for col in ['rollbit_buffer_rate', 'rollbit_position_multiplier', 
+                                       'rollbit_rate_multiplier', 'rollbit_rate_exponent'] 
+                               if col in rollbit_comparison_df.columns]
                     
-                    # Use the rendering function
-                    render_rollbit_comparison(rollbit_comparison_df)
+                    if columns_to_check:
+                        rollbit_comparison_df = rollbit_comparison_df.dropna(subset=columns_to_check, how='all')
+                        
+                        # Use the rendering function
+                        render_rollbit_comparison(rollbit_comparison_df)
+                    else:
+                        st.warning("No Rollbit comparison columns found in the data.")
                 else:
                     st.warning("Rollbit comparison data not found in the recommendations. Make sure Rollbit data is being fetched correctly.")
             else:
@@ -1673,11 +1784,20 @@ def main():
         - **Rate Exponent**: Exponent that determines how quickly market impact increases with position size.
           - When spreads increase, rate exponent typically increases to more aggressively limit large positions.
         
+        ### Parameter Adjustment Equations
+        
+        - Buffer Rate = Current Buffer Rate × (Spread Change Ratio ^ Buffer Sensitivity)
+        - Position Multiplier = Current Position Multiplier ÷ (Spread Change Ratio ^ Position Sensitivity)
+        - Rate Multiplier = Current Rate Multiplier ÷ (Spread Change Ratio ^ Rate Multiplier Sensitivity)
+        - Rate Exponent = Current Rate Exponent × (Spread Change Ratio ^ Rate Exponent Sensitivity)
+        
+        Where Spread Change Ratio = Current Spread ÷ Baseline Spread
+        
         ### Methodology
         
         1. The dashboard compares current market spreads with stored baseline spreads
         2. Weekly spread ranges are used to contextualize how significant current spreads are
-        3. Parameter adjustments are proportional to the relative change in spread and where it falls in the weekly range
+        3. Parameter adjustments are proportional to the relative change in spread
         4. Sensitivity controls adjust how aggressively parameters respond to spread changes
         5. Rollbit parameters are shown for comparison with a major competitor
         
