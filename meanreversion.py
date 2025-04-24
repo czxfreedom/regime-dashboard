@@ -47,13 +47,16 @@ def init_db_connection():
 # Initialize connection
 conn, db_params = init_db_connection()
 
+# Define timezone constants
+UTC_TZ = pytz.UTC
+SG_TZ = pytz.timezone('Asia/Singapore')
+
 # Main title
 st.title("Crypto Mean Reversion vs Cumulative PNL Monitor")
 
 # Set up the timezone
-singapore_timezone = pytz.timezone('Asia/Singapore')
-now_utc = datetime.now(pytz.utc)
-now_sg = now_utc.astimezone(singapore_timezone)
+now_utc = datetime.now(UTC_TZ)
+now_sg = now_utc.astimezone(SG_TZ)
 st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
 # Create session state variables for caching if not already present
@@ -103,8 +106,10 @@ class MeanReversionAnalyzer:
             end_date = datetime.now()
             
         # Ensure no timezone info for the database query
-        start_date = start_date.replace(tzinfo=None)
-        end_date = end_date.replace(tzinfo=None)
+        if start_date.tzinfo:
+            start_date = start_date.replace(tzinfo=None)
+        if end_date.tzinfo:
+            end_date = end_date.replace(tzinfo=None)
             
         # Generate list of dates needed (year-month-day format)
         current_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -163,8 +168,7 @@ class MeanReversionAnalyzer:
             query = f"""
             SELECT 
                 pair_name,
-                created_at AT TIME ZONE 'UTC' AS timestamp,
-                created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp_sg,
+                created_at AS timestamp_utc,
                 final_price AS price
             FROM 
                 public.{table}
@@ -178,7 +182,7 @@ class MeanReversionAnalyzer:
             union_parts.append(query)
         
         # Combine all queries with UNION and sort by timestamp
-        complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp"
+        complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp_utc"
         return complete_query
 
     def calculate_hurst_exponent(self, prices, min_k=5, max_k=None):
@@ -276,6 +280,12 @@ class MeanReversionAnalyzer:
     def process_historical_data(self, df, pair_name, exchange, lookback_hours=24):
         """Process historical data to generate 30-minute interval metrics"""
         try:
+            # Convert timestamp_utc to proper datetime with UTC timezone
+            df['timestamp'] = pd.to_datetime(df['timestamp_utc']).dt.tz_localize(UTC_TZ)
+            
+            # Add Singapore time column
+            df['timestamp_sg'] = df['timestamp'].dt.tz_convert(SG_TZ)
+            
             # Sort by timestamp
             df = df.sort_values('timestamp')
             
@@ -326,17 +336,21 @@ class MeanReversionAnalyzer:
                 dc_range_ratio = direction_changes / (range_pct + 1e-10)  # Avoid division by zero
                 hurst = self.calculate_hurst_exponent(prices, min_k=3, max_k=min(len(prices)//3, 20))
                 
-                # Get Singapore timestamp if available, otherwise convert from UTC
-                if 'timestamp_sg' in df_interval.columns:
-                    timestamp_sg = df_interval['timestamp_sg'].iloc[-1]
-                else:
-                    timestamp_sg = interval_end.replace(tzinfo=pytz.utc).astimezone(singapore_timezone)
+                # For consistency, ensure these are timezone-aware datetimes
+                if interval_end.tzinfo is None:
+                    interval_end = interval_end.replace(tzinfo=UTC_TZ)
+                if interval_start.tzinfo is None:
+                    interval_start = interval_start.replace(tzinfo=UTC_TZ)
+                
+                # Get Singapore timestamps
+                interval_end_sg = interval_end.astimezone(SG_TZ)
+                interval_start_sg = interval_start.astimezone(SG_TZ)
                 
                 self.time_series_data[pair_name][exchange].append({
                     'timestamp': interval_end,
-                    'timestamp_sg': timestamp_sg,
+                    'timestamp_sg': interval_end_sg,
                     'interval_start': interval_start,
-                    'interval_end': interval_end,
+                    'interval_start_sg': interval_start_sg,
                     'data_points': len(prices),
                     'direction_changes_30min': direction_changes,
                     'absolute_range_pct': range_pct,
@@ -350,16 +364,16 @@ class MeanReversionAnalyzer:
     def fetch_and_analyze(self, conn, pairs_to_analyze, exchange, hours=24):
         """Fetch data for specified pairs and analyze mean reversion metrics"""
         # Calculate time range in UTC to ensure consistent time handling
-        end_time_utc = datetime.now(pytz.utc)
+        end_time_utc = datetime.now(UTC_TZ)
         start_time_utc = end_time_utc - timedelta(hours=hours)
         
         # Convert to strings for database queries (removing timezone info)
-        end_time_str = end_time_utc.strftime("%Y-%m-%d %H:%M:%S")
-        start_time_str = start_time_utc.strftime("%Y-%m-%d %H:%M:%S")
+        end_time_str = end_time_utc.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+        start_time_str = start_time_utc.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
         
         # Calculate the time range in Singapore time for display
-        end_time_sg = end_time_utc.astimezone(singapore_timezone)
-        start_time_sg = start_time_utc.astimezone(singapore_timezone)
+        end_time_sg = end_time_utc.astimezone(SG_TZ)
+        start_time_sg = start_time_utc.astimezone(SG_TZ)
         
         st.info(f"Retrieving data from {start_time_sg.strftime('%Y-%m-%d %H:%M:%S')} to {end_time_sg.strftime('%Y-%m-%d %H:%M:%S')} (SGT) - {hours} hours")
         
@@ -400,27 +414,28 @@ class MeanReversionAnalyzer:
                         df = pd.read_sql_query(query, conn)
                         
                         if len(df) > 0:
+                            # Process historical data for time series analysis
+                            self.process_historical_data(df, pair, exchange, lookback_hours=hours)
+                            
                             # Convert timestamp columns to datetime if needed
-                            df['timestamp'] = pd.to_datetime(df['timestamp'])
-                            if 'timestamp_sg' in df.columns:
-                                df['timestamp_sg'] = pd.to_datetime(df['timestamp_sg'])
+                            df['timestamp_utc'] = pd.to_datetime(df['timestamp_utc'])
+                            
+                            # Add proper timezone info
+                            df['timestamp'] = df['timestamp_utc'].dt.tz_localize(UTC_TZ)
+                            df['timestamp_sg'] = df['timestamp'].dt.tz_convert(SG_TZ)
                             
                             # Debug timestamp range
-                            min_time = df['timestamp'].min()
-                            max_time = df['timestamp'].max()
+                            min_time_utc = df['timestamp'].min()
+                            max_time_utc = df['timestamp'].max()
                             
-                            # Show Singapore time for better readability
-                            min_time_sg = min_time.replace(tzinfo=pytz.utc).astimezone(singapore_timezone)
-                            max_time_sg = max_time.replace(tzinfo=pytz.utc).astimezone(singapore_timezone)
+                            min_time_sg = df['timestamp_sg'].min()
+                            max_time_sg = df['timestamp_sg'].max()
                             
-                            time_span = max_time - min_time
+                            time_span = max_time_utc - min_time_utc
                             days_span = time_span.total_seconds() / 86400  # Convert to days
                             
                             # Log the actual data timespan to help with debugging
                             st.write(f"{exchange}_{pair}: {len(df)} data points spanning {days_span:.1f} days ({min_time_sg} to {max_time_sg})")
-                            
-                            # Process historical data for time series analysis
-                            self.process_historical_data(df, pair, exchange, lookback_hours=hours)
                             
                             # Add to results
                             results.append({
@@ -453,8 +468,12 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
         return st.session_state.pnl_data_cache[cache_key]
     
     # Set up time range in UTC to match the metrics data
-    now_utc = datetime.now(pytz.utc)
+    now_utc = datetime.now(UTC_TZ)
     start_time_utc = now_utc - timedelta(hours=hours)
+    
+    # Create strings for database query (without timezone info)
+    start_time_str = start_time_utc.replace(tzinfo=None).strftime('%Y-%m-%d %H:%M:%S')
+    end_time_str = now_utc.replace(tzinfo=None).strftime('%Y-%m-%d %H:%M:%S')
     
     # Construct the query for 30-minute intervals
     query = f"""
@@ -462,9 +481,9 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
       -- Generate 30-minute intervals for the past hours
       SELECT
         generate_series(
-          date_trunc('hour', '{start_time_utc}'::timestamp) + 
-          INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 30),
-          '{now_utc}'::timestamp,
+          date_trunc('hour', '{start_time_str}'::timestamp) + 
+          INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM '{start_time_str}'::timestamp) / 30),
+          '{end_time_str}'::timestamp,
           INTERVAL '30 minutes'
         ) AS interval_time
     ),
@@ -478,7 +497,7 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
       FROM
         "public"."trade_fill_fresh"
       WHERE
-        "created_at" BETWEEN '{start_time_utc}' AND '{now_utc}'
+        "created_at" BETWEEN '{start_time_str}' AND '{end_time_str}'
         AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
         AND "taker_way" IN (0, 1, 2, 3, 4)
       GROUP BY
@@ -495,7 +514,7 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
       FROM
         "public"."trade_fill_fresh"
       WHERE
-        "created_at" BETWEEN '{start_time_utc}' AND '{now_utc}'
+        "created_at" BETWEEN '{start_time_str}' AND '{end_time_str}'
         AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
         AND "taker_fee_mode" = 1
         AND "taker_way" IN (1, 3)
@@ -513,7 +532,7 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
       FROM
         "public"."trade_fill_fresh"
       WHERE
-        "created_at" BETWEEN '{start_time_utc}' AND '{now_utc}'
+        "created_at" BETWEEN '{start_time_str}' AND '{end_time_str}'
         AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
         AND "taker_way" = 0
       GROUP BY
@@ -530,7 +549,7 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
       FROM
         "public"."user_cashbooks"
       WHERE
-        "created_at" BETWEEN '{start_time_utc}' AND '{now_utc}'
+        "created_at" BETWEEN '{start_time_str}' AND '{end_time_str}'
         AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
         AND "remark" = '给邀请人返佣'
       GROUP BY
@@ -540,8 +559,7 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
     
     -- Final query
     SELECT
-      t.interval_time AS "timestamp",
-      t.interval_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS "timestamp_sg",
+      t.interval_time AS "timestamp_utc",
       COALESCE(o."platform_order_pnl", 0) +
       COALESCE(f."user_fee_payments", 0) +
       COALESCE(ff."platform_funding_pnl", 0) +
@@ -568,9 +586,10 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
             st.warning(f"No PNL data found for {pair_name}")
             return None
         
-        # Convert timestamp columns to pandas datetime
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df['timestamp_sg'] = pd.to_datetime(df['timestamp_sg'])
+        # Convert timestamp columns to pandas datetime with timezone info
+        df['timestamp_utc'] = pd.to_datetime(df['timestamp_utc'])
+        df['timestamp'] = df['timestamp_utc'].dt.tz_localize(UTC_TZ)
+        df['timestamp_sg'] = df['timestamp'].dt.tz_convert(SG_TZ)
         
         # Sort by timestamp
         df = df.sort_values('timestamp')
@@ -596,43 +615,73 @@ def create_metric_vs_pnl_chart(metrics_df, pnl_df, metric_name, metric_display_n
     
     try:
         # Choose which timestamp column to use (UTC or Singapore time)
-        x_column = 'timestamp_sg' if use_sg_time and 'timestamp_sg' in metrics_df.columns and 'timestamp_sg' in pnl_df.columns else 'timestamp'
+        x_column = 'timestamp_sg' if use_sg_time else 'timestamp'
         
-        # Convert to pandas datetime if needed
-        if not pd.api.types.is_datetime64_any_dtype(metrics_df[x_column]):
-            metrics_df[x_column] = pd.to_datetime(metrics_df[x_column])
+        # Ensure both dataframes have the column
+        if x_column not in metrics_df.columns or x_column not in pnl_df.columns:
+            st.warning(f"Missing {x_column} column in data. Falling back to using 'timestamp'.")
+            x_column = 'timestamp'
         
-        if not pd.api.types.is_datetime64_any_dtype(pnl_df[x_column]):
-            pnl_df[x_column] = pd.to_datetime(pnl_df[x_column])
+        # Create copies to avoid modifying originals
+        metrics_df_copy = metrics_df.copy()
+        pnl_df_copy = pnl_df.copy()
+        
+        # Ensure timestamps are compatible
+        if not pd.api.types.is_datetime64_any_dtype(metrics_df_copy[x_column]):
+            metrics_df_copy[x_column] = pd.to_datetime(metrics_df_copy[x_column])
+        
+        if not pd.api.types.is_datetime64_any_dtype(pnl_df_copy[x_column]):
+            pnl_df_copy[x_column] = pd.to_datetime(pnl_df_copy[x_column])
         
         # Sort by timestamp
-        metrics_df = metrics_df.sort_values(x_column)
-        pnl_df = pnl_df.sort_values(x_column)
+        metrics_df_copy = metrics_df_copy.sort_values(x_column)
+        pnl_df_copy = pnl_df_copy.sort_values(x_column)
+        
+        # Check time ranges
+        metrics_min_time = metrics_df_copy[x_column].min()
+        metrics_max_time = metrics_df_copy[x_column].max()
+        pnl_min_time = pnl_df_copy[x_column].min()
+        pnl_max_time = pnl_df_copy[x_column].max()
+        
+        # Add debug info
+        st.write(f"Metrics time range: {metrics_min_time} to {metrics_max_time}")
+        st.write(f"PNL time range: {pnl_min_time} to {pnl_max_time}")
+        
+        # If needed, align time ranges by resampling to common intervals
+        common_start = max(metrics_min_time, pnl_min_time)
+        common_end = min(metrics_max_time, pnl_max_time)
+        
+        # Filter both datasets to common time range
+        metrics_df_copy = metrics_df_copy[(metrics_df_copy[x_column] >= common_start) & 
+                                         (metrics_df_copy[x_column] <= common_end)]
+        pnl_df_copy = pnl_df_copy[(pnl_df_copy[x_column] >= common_start) & 
+                                  (pnl_df_copy[x_column] <= common_end)]
         
         # Create the figure
         fig = go.Figure()
         
         # Add cumulative PNL line
         fig.add_trace(go.Scatter(
-            x=pnl_df[x_column],
-            y=pnl_df['cumulative_pnl'],
+            x=pnl_df_copy[x_column],
+            y=pnl_df_copy['cumulative_pnl'],
             name='Cumulative PNL (USD)',
             line=dict(color='green', width=3)
         ))
         
         # Add metric line on second y-axis
         fig.add_trace(go.Scatter(
-            x=metrics_df[x_column],
-            y=metrics_df[metric_name],
+            x=metrics_df_copy[x_column],
+            y=metrics_df_copy[metric_name],
             name=metric_display_name,
             line=dict(color='blue', width=2),
             yaxis='y2'
         ))
         
         # Configure layout
+        timezone_label = "Singapore" if use_sg_time else "UTC"
         fig.update_layout(
             title=f"{metric_display_name} vs Cumulative PNL: {pair_name} ({exchange})",
-            xaxis_title="Time (Singapore)" if use_sg_time else "Time (UTC)",
+            xaxis_title=f"Time ({timezone_label})",
             yaxis=dict(
                 title="Cumulative PNL (USD)",
                 titlefont=dict(color="green"),
@@ -655,8 +704,8 @@ def create_metric_vs_pnl_chart(metrics_df, pnl_df, metric_name, metric_display_n
         if metric_name == 'hurst_exponent':
             fig.add_shape(
                 type="line",
-                x0=metrics_df[x_column].min(),
-                x1=metrics_df[x_column].max(),
+                x0=metrics_df_copy[x_column].min(),
+                x1=metrics_df_copy[x_column].max(),
                 y0=0.5,
                 y1=0.5,
                 line=dict(
@@ -669,7 +718,7 @@ def create_metric_vs_pnl_chart(metrics_df, pnl_df, metric_name, metric_display_n
             
             # Add annotation for Hurst exponent
             fig.add_annotation(
-                x=metrics_df[x_column].max(),
+                x=metrics_df_copy[x_column].max(),
                 y=0.5,
                 text="Random Walk (H=0.5)",
                 showarrow=False,
@@ -692,19 +741,36 @@ def calculate_metric_pnl_correlation(metrics_df, pnl_df, metric_name):
         return None
     
     try:
-        # Create common timeline with 15-minute intervals
-        start_time = min(metrics_df['timestamp'].min(), pnl_df['timestamp'].min())
-        end_time = max(metrics_df['timestamp'].max(), pnl_df['timestamp'].max())
+        # Make copies to avoid modifying originals
+        metrics_df_copy = metrics_df.copy()
+        pnl_df_copy = pnl_df.copy()
         
-        # Create resampled dataframes
-        common_index = pd.date_range(start=start_time, end=end_time, freq='15min')
+        # Ensure we're working with timezone-aware timestamps
+        if not pd.api.types.is_datetime64_tz_dtype(metrics_df_copy['timestamp']):
+            metrics_df_copy['timestamp'] = pd.to_datetime(metrics_df_copy['timestamp']).dt.tz_localize(UTC_TZ)
+            
+        if not pd.api.types.is_datetime64_tz_dtype(pnl_df_copy['timestamp']):
+            pnl_df_copy['timestamp'] = pd.to_datetime(pnl_df_copy['timestamp']).dt.tz_localize(UTC_TZ)
+        
+        # Find common time range
+        common_start = max(metrics_df_copy['timestamp'].min(), pnl_df_copy['timestamp'].min())
+        common_end = min(metrics_df_copy['timestamp'].max(), pnl_df_copy['timestamp'].max())
+        
+        # Filter data to common time range
+        metrics_df_copy = metrics_df_copy[(metrics_df_copy['timestamp'] >= common_start) & 
+                                         (metrics_df_copy['timestamp'] <= common_end)]
+        pnl_df_copy = pnl_df_copy[(pnl_df_copy['timestamp'] >= common_start) & 
+                                 (pnl_df_copy['timestamp'] <= common_end)]
+        
+        # Create common timeline with 15-minute intervals
+        common_index = pd.date_range(start=common_start, end=common_end, freq='15min', tz=UTC_TZ)
         
         # Create Series from the metrics data
-        metric_series = pd.Series(index=metrics_df['timestamp'], data=metrics_df[metric_name].values)
+        metric_series = pd.Series(index=metrics_df_copy['timestamp'], data=metrics_df_copy[metric_name].values)
         metric_resampled = metric_series.reindex(common_index, method='nearest')
         
         # Create Series from the PNL data
-        pnl_series = pd.Series(index=pnl_df['timestamp'], data=pnl_df['cumulative_pnl'].values)
+        pnl_series = pd.Series(index=pnl_df_copy['timestamp'], data=pnl_df_copy['cumulative_pnl'].values)
         pnl_resampled = pnl_series.reindex(common_index, method='nearest')
         
         # Remove NaN values
