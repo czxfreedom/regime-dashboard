@@ -65,6 +65,8 @@ if 'last_selected_pairs' not in st.session_state:
     st.session_state.last_selected_pairs = []
 if 'last_hours' not in st.session_state:
     st.session_state.last_hours = 0
+if 'last_exchange' not in st.session_state:
+    st.session_state.last_exchange = None
 if 'pnl_data_cache' not in st.session_state:
     st.session_state.pnl_data_cache = {}
 
@@ -74,7 +76,6 @@ class MeanReversionAnalyzer:
     def __init__(self):
         self.data = {}  # Main data storage
         self.time_series_data = {}  # For tracking metrics over time
-        self.exchanges = ['rollbit', 'surf']  # Exchanges to analyze
         
         # Metrics for mean reversion analysis
         self.metrics = [
@@ -155,37 +156,24 @@ class MeanReversionAnalyzer:
             
         union_parts = []
         
+        # Determine the source_type based on exchange
+        source_type = 0 if exchange == 'surf' else 1
+        
         for table in tables:
-            # For Surf data
-            if exchange == 'surf':
-                query = f"""
-                SELECT 
-                    pair_name,
-                    created_at AT TIME ZONE 'UTC' AS timestamp,
-                    final_price AS price
-                FROM 
-                    public.{table}
-                WHERE 
-                    created_at >= '{start_time}'::timestamp
-                    AND created_at <= '{end_time}'::timestamp
-                    AND source_type = 0
-                    AND pair_name = '{pair_name}'
-                """
-            else:
-                # For Rollbit data
-                query = f"""
-                SELECT 
-                    pair_name,
-                    created_at AT TIME ZONE 'UTC' AS timestamp,
-                    final_price AS price
-                FROM 
-                    public.{table}
-                WHERE 
-                    created_at >= '{start_time}'::timestamp
-                    AND created_at <= '{end_time}'::timestamp
-                    AND source_type = 1
-                    AND pair_name = '{pair_name}'
-                """
+            query = f"""
+            SELECT 
+                pair_name,
+                created_at AT TIME ZONE 'UTC' AS timestamp,
+                created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp_sg,
+                final_price AS price
+            FROM 
+                public.{table}
+            WHERE 
+                created_at >= '{start_time}'::timestamp
+                AND created_at <= '{end_time}'::timestamp
+                AND source_type = {source_type}
+                AND pair_name = '{pair_name}'
+            """
             
             union_parts.append(query)
         
@@ -311,6 +299,9 @@ class MeanReversionAnalyzer:
                 self.time_series_data[pair_name] = {}
             if exchange not in self.time_series_data[pair_name]:
                 self.time_series_data[pair_name][exchange] = []
+            else:
+                # Clear any existing data for this pair/exchange to avoid duplication
+                self.time_series_data[pair_name][exchange] = []
             
             # Process each interval
             for interval_start, interval_end in intervals:
@@ -335,12 +326,15 @@ class MeanReversionAnalyzer:
                 dc_range_ratio = direction_changes / (range_pct + 1e-10)  # Avoid division by zero
                 hurst = self.calculate_hurst_exponent(prices, min_k=3, max_k=min(len(prices)//3, 20))
                 
-                # Store calculations with both timestamp and Singapore time for reference
-                sg_time = interval_end.replace(tzinfo=pytz.utc).astimezone(singapore_timezone)
+                # Get Singapore timestamp if available, otherwise convert from UTC
+                if 'timestamp_sg' in df_interval.columns:
+                    timestamp_sg = df_interval['timestamp_sg'].iloc[-1]
+                else:
+                    timestamp_sg = interval_end.replace(tzinfo=pytz.utc).astimezone(singapore_timezone)
                 
                 self.time_series_data[pair_name][exchange].append({
                     'timestamp': interval_end,
-                    'timestamp_sg': sg_time,
+                    'timestamp_sg': timestamp_sg,
                     'interval_start': interval_start,
                     'interval_end': interval_end,
                     'data_points': len(prices),
@@ -353,7 +347,7 @@ class MeanReversionAnalyzer:
         except Exception as e:
             st.error(f"Error processing historical data for {pair_name} on {exchange}: {e}")
 
-    def fetch_and_analyze(self, conn, pairs_to_analyze, hours=24):
+    def fetch_and_analyze(self, conn, pairs_to_analyze, exchange, hours=24):
         """Fetch data for specified pairs and analyze mean reversion metrics"""
         # Calculate time range in UTC to ensure consistent time handling
         end_time_utc = datetime.now(pytz.utc)
@@ -363,7 +357,11 @@ class MeanReversionAnalyzer:
         end_time_str = end_time_utc.strftime("%Y-%m-%d %H:%M:%S")
         start_time_str = start_time_utc.strftime("%Y-%m-%d %H:%M:%S")
         
-        st.info(f"Retrieving data from {start_time_str} to {end_time_str} (UTC) - {hours} hours")
+        # Calculate the time range in Singapore time for display
+        end_time_sg = end_time_utc.astimezone(singapore_timezone)
+        start_time_sg = start_time_utc.astimezone(singapore_timezone)
+        
+        st.info(f"Retrieving data from {start_time_sg.strftime('%Y-%m-%d %H:%M:%S')} to {end_time_sg.strftime('%Y-%m-%d %H:%M:%S')} (SGT) - {hours} hours")
         
         try:
             # Get partition tables for the time range
@@ -387,48 +385,54 @@ class MeanReversionAnalyzer:
                 progress_bar.progress(progress_percentage)
                 status_text.text(f"Analyzing {pair} ({i+1}/{len(pairs_to_analyze)})")
                 
-                # Process for each exchange
-                for exchange in self.exchanges:
-                    # Build query
-                    query = self._build_query_for_partition_tables(
-                        partition_tables,
-                        pair_name=pair,
-                        start_time=start_time_str,
-                        end_time=end_time_str,
-                        exchange=exchange
-                    )
-                    
-                    if query:
-                        try:
-                            # Execute query
-                            df = pd.read_sql_query(query, conn)
+                # Build query - just for the selected exchange
+                query = self._build_query_for_partition_tables(
+                    partition_tables,
+                    pair_name=pair,
+                    start_time=start_time_str,
+                    end_time=end_time_str,
+                    exchange=exchange
+                )
+                
+                if query:
+                    try:
+                        # Execute query
+                        df = pd.read_sql_query(query, conn)
+                        
+                        if len(df) > 0:
+                            # Convert timestamp columns to datetime if needed
+                            df['timestamp'] = pd.to_datetime(df['timestamp'])
+                            if 'timestamp_sg' in df.columns:
+                                df['timestamp_sg'] = pd.to_datetime(df['timestamp_sg'])
                             
-                            if len(df) > 0:
-                                # Convert timestamp to datetime if needed
-                                df['timestamp'] = pd.to_datetime(df['timestamp'])
-                                
-                                # Debug timestamp range
-                                min_time = df['timestamp'].min()
-                                max_time = df['timestamp'].max()
-                                time_span = max_time - min_time
-                                
-                                # Log the actual data timespan to help with debugging
-                                st.write(f"{exchange}_{pair}: {len(df)} data points spanning {time_span}")
-                                
-                                # Process historical data for time series analysis
-                                self.process_historical_data(df, pair, exchange, lookback_hours=hours)
-                                
-                                # Add to results
-                                results.append({
-                                    'pair': pair,
-                                    'exchange': exchange,
-                                    'data_points': len(df),
-                                    'time_range': f"{min_time} to {max_time}"
-                                })
-                            else:
-                                st.warning(f"No data found for {exchange.upper()}_{pair}")
-                        except Exception as e:
-                            st.error(f"Database query error for {exchange.upper()}_{pair}: {e}")
+                            # Debug timestamp range
+                            min_time = df['timestamp'].min()
+                            max_time = df['timestamp'].max()
+                            
+                            # Show Singapore time for better readability
+                            min_time_sg = min_time.replace(tzinfo=pytz.utc).astimezone(singapore_timezone)
+                            max_time_sg = max_time.replace(tzinfo=pytz.utc).astimezone(singapore_timezone)
+                            
+                            time_span = max_time - min_time
+                            days_span = time_span.total_seconds() / 86400  # Convert to days
+                            
+                            # Log the actual data timespan to help with debugging
+                            st.write(f"{exchange}_{pair}: {len(df)} data points spanning {days_span:.1f} days ({min_time_sg} to {max_time_sg})")
+                            
+                            # Process historical data for time series analysis
+                            self.process_historical_data(df, pair, exchange, lookback_hours=hours)
+                            
+                            # Add to results
+                            results.append({
+                                'pair': pair,
+                                'exchange': exchange,
+                                'data_points': len(df),
+                                'time_range': f"{min_time_sg} to {max_time_sg}"
+                            })
+                        else:
+                            st.warning(f"No data found for {exchange.upper()}_{pair}")
+                    except Exception as e:
+                        st.error(f"Database query error for {exchange.upper()}_{pair}: {e}")
             
             # Complete progress
             progress_bar.progress(1.0)
@@ -627,7 +631,7 @@ def create_metric_vs_pnl_chart(metrics_df, pnl_df, metric_name, metric_display_n
         
         # Configure layout
         fig.update_layout(
-            title=f"{metric_display_name} vs Cumulative PNL: {pair_name}",
+            title=f"{metric_display_name} vs Cumulative PNL: {pair_name} ({exchange})",
             xaxis_title="Time (Singapore)" if use_sg_time else "Time (UTC)",
             yaxis=dict(
                 title="Cumulative PNL (USD)",
@@ -757,11 +761,12 @@ with st.sidebar:
             st.session_state.selected_pairs = []
             st.rerun()
     
+    st.write("Analysis Window: 24 Hours (fixed for proper cumulative PNL analysis)")
+    
     # Create the form
     with st.form("mean_reversion_form"):
         # Data retrieval window - fixed to 24 hours for proper cumulative PNL analysis
         hours = 24
-        st.write("Analysis Window: 24 Hours (fixed for proper cumulative PNL analysis)")
         
         # Create multiselect for pairs
         selected_pairs = st.multiselect(
@@ -785,9 +790,9 @@ with st.sidebar:
             help="Select exchange for analysis"
         )
         
-        # Time display option
-        use_sg_time = st.checkbox("Display Singapore Time", value=True, 
-                                  help="Display times in Singapore timezone (SGT) instead of UTC")
+        # Display Singapore Time checkbox
+        display_sg_time = st.checkbox("Display Singapore Time", value=True, 
+                                     help="Display times in Singapore timezone (SGT) instead of UTC")
         
         # Show a warning if no pairs are selected
         if not pairs:
@@ -803,7 +808,8 @@ should_run_analysis = (
     len(pairs) > 0 and 
     (not st.session_state.data_processed or 
      st.session_state.last_selected_pairs != pairs or 
-     st.session_state.last_hours != hours)
+     st.session_state.last_hours != hours or
+     st.session_state.last_exchange != exchange_filter)
 )
 
 # Run analysis if needed
@@ -816,6 +822,7 @@ if should_run_analysis:
         results = analyzer.fetch_and_analyze(
             conn=conn,
             pairs_to_analyze=pairs,
+            exchange=exchange_filter,
             hours=hours
         )
         
@@ -826,6 +833,7 @@ if should_run_analysis:
             st.session_state.data_processed = True
             st.session_state.last_selected_pairs = pairs.copy()
             st.session_state.last_hours = hours
+            st.session_state.last_exchange = exchange_filter
             
             # Clear PNL data cache when new analysis is run
             st.session_state.pnl_data_cache = {}
@@ -841,7 +849,7 @@ if st.session_state.data_processed and 'analyzer' in st.session_state:
     # Create metrics visualization with cumulative PNL
     st.header("Mean Reversion Metrics vs Cumulative PNL (24 Hours)")
     
-    # Get pairs that were analyzed
+    # Get pairs that were analyzed (for the selected exchange)
     analyzed_pairs = []
     for pair in pairs:
         if pair in analyzer.time_series_data and exchange_filter in analyzer.time_series_data[pair]:
@@ -875,10 +883,6 @@ if st.session_state.data_processed and 'analyzer' in st.session_state:
                         "Range % vs PNL"
                     ])
                     
-                    # Show data ranges to help with debugging
-                    st.write(f"Metrics data: {len(metrics_df)} points from {metrics_df['timestamp'].min()} to {metrics_df['timestamp'].max()}")
-                    st.write(f"PNL data: {len(pnl_df)} points from {pnl_df['timestamp'].min()} to {pnl_df['timestamp'].max()}")
-                    
                     with tab1:
                         # Create chart for Hurst Exponent
                         fig = create_metric_vs_pnl_chart(
@@ -888,7 +892,7 @@ if st.session_state.data_processed and 'analyzer' in st.session_state:
                             'Hurst Exponent',
                             selected_pair,
                             exchange_filter,
-                            use_sg_time=use_sg_time
+                            use_sg_time=display_sg_time
                         )
                         
                         if fig:
@@ -918,7 +922,7 @@ if st.session_state.data_processed and 'analyzer' in st.session_state:
                             'Direction Changes/Range Ratio',
                             selected_pair,
                             exchange_filter,
-                            use_sg_time=use_sg_time
+                            use_sg_time=display_sg_time
                         )
                         
                         if fig:
@@ -948,7 +952,7 @@ if st.session_state.data_processed and 'analyzer' in st.session_state:
                             'Direction Changes (30min)',
                             selected_pair,
                             exchange_filter,
-                            use_sg_time=use_sg_time
+                            use_sg_time=display_sg_time
                         )
                         
                         if fig:
@@ -978,7 +982,7 @@ if st.session_state.data_processed and 'analyzer' in st.session_state:
                             'Range %',
                             selected_pair,
                             exchange_filter,
-                            use_sg_time=use_sg_time
+                            use_sg_time=display_sg_time
                         )
                         
                         if fig:
@@ -1096,7 +1100,7 @@ if st.session_state.data_processed and 'analyzer' in st.session_state:
                         styled_df = styled_df.applymap(color_pnl, subset=['Final PNL'])
                         
                         # Show table
-                        st.subheader("Correlation Between Mean Reversion Metrics and PNL by Pair")
+                        st.subheader(f"Correlation Between Mean Reversion Metrics and PNL by Pair ({exchange_filter})")
                         st.dataframe(styled_df, height=400, use_container_width=True)
                         
                         # Create scatter plot
@@ -1112,7 +1116,7 @@ if st.session_state.data_processed and 'analyzer' in st.session_state:
                                     color='Avg DC/Range',
                                     size=abs(plot_df['Hurst-PNL Corr']).fillna(0.1) * 10 + 5,
                                     hover_name='Pair',
-                                    title='Average Hurst Exponent vs Final PNL (Color = Avg DC/Range)',
+                                    title=f'Average Hurst Exponent vs Final PNL (Color = Avg DC/Range) - {exchange_filter}',
                                     labels={
                                         'Avg Hurst': 'Average Hurst Exponent', 
                                         'Final PNL': 'Final PNL (USD)',
