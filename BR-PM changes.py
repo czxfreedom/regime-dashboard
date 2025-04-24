@@ -9,7 +9,7 @@ import pytz
 
 # Page configuration
 st.set_page_config(
-    page_title="Parameter Optimization Dashboard",
+    page_title="Exchange Parameter Optimization Dashboard",
     page_icon="📊",
     layout="wide"
 )
@@ -83,6 +83,64 @@ st.markdown("""
         text-align: left !important;
         font-family: inherit;
     }
+    /* Formula display */
+    .formula-box {
+        background-color: #f1f8e9;
+        border-radius: 5px;
+        padding: 15px;
+        margin: 15px 0;
+        border-left: 5px solid #7cb342;
+        overflow-x: auto;
+    }
+    .formula {
+        font-family: 'Courier New', monospace;
+        font-size: 14px;
+    }
+    /* Parameter card styles */
+    .param-card {
+        border: 1px solid #e0e0e0;
+        border-radius: 10px;
+        overflow: hidden;
+        margin-bottom: 20px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+    .param-card-header {
+        background-color: #1976D2;
+        color: white;
+        padding: 10px 15px;
+        font-weight: bold;
+    }
+    .param-card-body {
+        padding: 15px;
+    }
+    /* Error/warning message */
+    .error-message {
+        color: #d32f2f;
+        background-color: #ffebee;
+        padding: 10px;
+        border-radius: 5px;
+        margin: 10px 0;
+        border-left: 4px solid #d32f2f;
+    }
+    /* Navigation bar styling */
+    .nav-bar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-bottom: 20px;
+    }
+    .nav-item {
+        background-color: #f5f5f5;
+        padding: 8px 15px;
+        border-radius: 5px;
+        cursor: pointer;
+        border: 1px solid #e0e0e0;
+        transition: all 0.3s;
+    }
+    .nav-item:hover, .nav-item.active {
+        background-color: #1976D2;
+        color: white;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -105,19 +163,19 @@ def init_connection():
 # --- Utility Functions ---
 def format_percent(value):
     """Format a value as a percentage with 2 decimal places"""
-    if pd.isna(value):
+    if pd.isna(value) or value is None:
         return "N/A"
     return f"{value * 100:.2f}%"
 
 def format_number(value):
     """Format a number with comma separation"""
-    if pd.isna(value):
+    if pd.isna(value) or value is None:
         return "N/A"
     return f"{value:,.0f}"
 
 def format_float(value, decimals=2):
     """Format a float with specified decimal places"""
-    if pd.isna(value):
+    if pd.isna(value) or value is None:
         return "N/A"
     return f"{value:.{decimals}f}"
 
@@ -127,6 +185,18 @@ def is_major(token):
     for major in majors:
         if major in token:
             return True
+    return False
+
+def safe_division(a, b, default=0.0):
+    """Safely divide two numbers, handling zeros and None values"""
+    if a is None or b is None or pd.isna(a) or pd.isna(b) or b == 0:
+        return default
+    return a / b
+
+def check_null_or_zero(value):
+    """Check if a value is NULL, None, NaN, or zero"""
+    if value is None or pd.isna(value) or value == 0:
+        return True
     return False
 
 # --- Data Fetching Functions ---
@@ -155,6 +225,13 @@ def fetch_current_parameters():
         """
         
         df = pd.read_sql(query, engine)
+        
+        # Fill NaN values with reasonable defaults
+        if not df.empty:
+            df['rate_multiplier'] = df['rate_multiplier'].fillna(6.0)
+            df['rate_exponent'] = df['rate_exponent'].fillna(2.0)
+            df['max_leverage'] = df['max_leverage'].fillna(100)
+            
         return df if not df.empty else None
     except Exception as e:
         st.error(f"Error fetching current parameters: {e}")
@@ -185,6 +262,12 @@ def fetch_rollbit_parameters():
         """
         
         df = pd.read_sql(query, engine)
+        
+        # Fill NaN values with reasonable defaults
+        if not df.empty:
+            df['rate_multiplier'] = df['rate_multiplier'].fillna(6.0)
+            df['rate_exponent'] = df['rate_exponent'].fillna(2.0)
+            
         return df if not df.empty else None
     except Exception as e:
         st.error(f"Error fetching Rollbit parameters: {e}")
@@ -255,6 +338,50 @@ def fetch_spread_baselines():
         st.error(f"Error fetching spread baselines: {e}")
         return None
 
+def save_spread_baseline(pair_name, baseline_spread):
+    """Save a new spread baseline to the database"""
+    try:
+        engine = init_connection()
+        if not engine:
+            return False
+            
+        query = """
+        INSERT INTO spread_baselines (pair_name, baseline_spread, updated_at)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (pair_name) DO UPDATE 
+        SET baseline_spread = EXCLUDED.baseline_spread, 
+            updated_at = EXCLUDED.updated_at
+        """
+        
+        with engine.connect() as conn:
+            conn.execute(query, (pair_name, baseline_spread, datetime.now()))
+            conn.commit()
+            
+        return True
+    except Exception as e:
+        st.error(f"Error saving baseline spread for {pair_name}: {e}")
+        return False
+
+def reset_all_baselines(market_data_df):
+    """Reset all baselines to current market spreads"""
+    if market_data_df is None or market_data_df.empty:
+        return False
+    
+    # Calculate current spreads
+    current_spreads = calculate_current_spreads(market_data_df)
+    
+    success_count = 0
+    error_count = 0
+    
+    # Update each baseline in the database
+    for pair, spread in current_spreads.items():
+        if save_spread_baseline(pair, spread):
+            success_count += 1
+        else:
+            error_count += 1
+    
+    return success_count > 0, success_count, error_count
+
 def calculate_current_spreads(market_data):
     """Calculate current average non-SurfFuture spread for each token"""
     if market_data is None or market_data.empty:
@@ -268,18 +395,33 @@ def calculate_current_spreads(market_data):
     return current_spreads
 
 def calculate_recommended_params(current_params, current_spread, baseline_spread, 
-                               sensitivities, significant_change_threshold):
+                               sensitivities, significant_change_threshold=0.05):
     """Calculate recommended parameter values based on spread change ratio with proper inverse relationships"""
     
+    # Handle cases with missing data
     if current_spread is None or baseline_spread is None or baseline_spread <= 0:
         return current_params
     
-    # Get current parameter values
+    # Get current parameter values (with safety checks)
     current_buffer_rate = current_params.get('buffer_rate', 0.01)
+    if check_null_or_zero(current_buffer_rate):
+        current_buffer_rate = 0.01  # Default if zero or null
+        
     current_position_multiplier = current_params.get('position_multiplier', 1000000)
+    if check_null_or_zero(current_position_multiplier):
+        current_position_multiplier = 1000000  # Default if zero or null
+        
     current_rate_multiplier = current_params.get('rate_multiplier', 6.0)
+    if check_null_or_zero(current_rate_multiplier):
+        current_rate_multiplier = 6.0  # Default if zero or null
+        
     current_rate_exponent = current_params.get('rate_exponent', 2.0)
+    if check_null_or_zero(current_rate_exponent):
+        current_rate_exponent = 2.0  # Default if zero or null
+        
     max_leverage = current_params.get('max_leverage', 100)
+    if check_null_or_zero(max_leverage):
+        max_leverage = 100  # Default if zero or null
     
     # Get sensitivity parameters
     buffer_sensitivity = sensitivities.get('buffer_sensitivity', 0.5)
@@ -311,7 +453,7 @@ def calculate_recommended_params(current_params, current_spread, baseline_spread
     max_buffer_rate = 0.9 / max_leverage if max_leverage > 0 else 0.009
     recommended_buffer_rate = max(0.001, min(max_buffer_rate, recommended_buffer_rate))
     recommended_position_multiplier = max(100000, min(10000000, recommended_position_multiplier))
-    recommended_rate_multiplier = max(1.0, min(10.0, recommended_rate_multiplier))
+    recommended_rate_multiplier = max(1.0, min(15.0, recommended_rate_multiplier))
     recommended_rate_exponent = max(1.0, min(5.0, recommended_rate_exponent))
     
     return {
@@ -321,7 +463,7 @@ def calculate_recommended_params(current_params, current_spread, baseline_spread
         'rate_exponent': recommended_rate_exponent
     }
 
-def generate_recommendations(current_params_df, market_data_df, baselines_df):
+def generate_recommendations(current_params_df, market_data_df, baselines_df, sensitivities):
     """Generate parameter recommendations based on market data"""
     if current_params_df is None or market_data_df is None or baselines_df is None:
         return None
@@ -349,14 +491,6 @@ def generate_recommendations(current_params_df, market_data_df, baselines_df):
     # Create recommendations DataFrame
     recommendations = []
     
-    # Sensitivity parameters
-    sensitivities = {
-        'buffer_sensitivity': 0.5,
-        'position_sensitivity': 0.5,
-        'rate_multiplier_sensitivity': 0.5,
-        'rate_exponent_sensitivity': 0.5
-    }
-    
     significant_change_threshold = 0.05  # 5% change threshold
     
     for pair, params in current_params.items():
@@ -372,11 +506,22 @@ def generate_recommendations(current_params_df, market_data_df, baselines_df):
                 significant_change_threshold
             )
             
-            # Calculate changes with safety checks to avoid division by zero
-            buffer_change = ((recommended['buffer_rate'] - params['buffer_rate']) / max(params['buffer_rate'], 0.000001)) * 100
-            position_change = ((recommended['position_multiplier'] - params['position_multiplier']) / max(params['position_multiplier'], 1)) * 100
-            rate_mult_change = ((recommended['rate_multiplier'] - params['rate_multiplier']) / max(params['rate_multiplier'], 0.000001)) * 100
-            rate_exp_change = ((recommended['rate_exponent'] - params['rate_exponent']) / max(params['rate_exponent'], 0.000001)) * 100
+            # Calculate changes with safety checks
+            buffer_change = 0
+            if not check_null_or_zero(params['buffer_rate']):
+                buffer_change = ((recommended['buffer_rate'] - params['buffer_rate']) / params['buffer_rate']) * 100
+            
+            position_change = 0
+            if not check_null_or_zero(params['position_multiplier']):
+                position_change = ((recommended['position_multiplier'] - params['position_multiplier']) / params['position_multiplier']) * 100
+            
+            rate_mult_change = 0
+            if not check_null_or_zero(params['rate_multiplier']):
+                rate_mult_change = ((recommended['rate_multiplier'] - params['rate_multiplier']) / params['rate_multiplier']) * 100
+            
+            rate_exp_change = 0
+            if not check_null_or_zero(params['rate_exponent']):
+                rate_exp_change = ((recommended['rate_exponent'] - params['rate_exponent']) / params['rate_exponent']) * 100
             
             recommendations.append({
                 'pair_name': pair,
@@ -395,14 +540,14 @@ def generate_recommendations(current_params_df, market_data_df, baselines_df):
                 'rate_exponent_change': rate_exp_change,
                 'current_spread': current_spread,
                 'baseline_spread': baseline_spread,
-                'spread_change_ratio': current_spread / baseline_spread if baseline_spread > 0 else 1.0
+                'spread_change_ratio': safe_division(current_spread, baseline_spread, 1.0)
             })
     
     return pd.DataFrame(recommendations)
 
 def add_rollbit_comparison(rec_df, rollbit_df):
     """Add Rollbit parameter data to recommendations DataFrame for comparison"""
-    if rec_df is None or rollbit_df is None:
+    if rec_df is None or rollbit_df is None or rec_df.empty or rollbit_df.empty:
         return rec_df
     
     # Create mapping of Rollbit parameters
@@ -433,7 +578,7 @@ def add_rollbit_comparison(rec_df, rollbit_df):
 def render_rollbit_comparison(rollbit_comparison_df):
     """Render the Rollbit comparison tab with improved formatting"""
     
-    if rollbit_comparison_df.empty:
+    if rollbit_comparison_df is None or rollbit_comparison_df.empty:
         st.info("No matching pairs found with Rollbit data for comparison.")
         return
     
@@ -453,9 +598,16 @@ def render_rollbit_comparison(rollbit_comparison_df):
     """
     
     for _, row in rollbit_comparison_df.iterrows():
+        # Handle 0 or NaN values to avoid division errors
         surf_buffer = format_percent(row['current_buffer_rate'])
         rollbit_buffer = format_percent(row['rollbit_buffer_rate'])
-        buffer_ratio = f"{row['current_buffer_rate']/max(row['rollbit_buffer_rate'], 0.000001):.2f}x" if not pd.isna(row['rollbit_buffer_rate']) else "N/A"
+        
+        # Calculate ratio safely
+        if (not check_null_or_zero(row['current_buffer_rate']) and 
+            not check_null_or_zero(row['rollbit_buffer_rate'])):
+            buffer_ratio = f"{row['current_buffer_rate']/row['rollbit_buffer_rate']:.2f}x"
+        else:
+            buffer_ratio = "N/A"
         
         buffer_html += f"""
         <tr>
@@ -493,7 +645,13 @@ def render_rollbit_comparison(rollbit_comparison_df):
     for _, row in rollbit_comparison_df.iterrows():
         surf_position = format_number(row['current_position_multiplier'])
         rollbit_position = format_number(row['rollbit_position_multiplier'])
-        position_ratio = f"{row['current_position_multiplier']/max(row['rollbit_position_multiplier'], 1):.2f}x" if not pd.isna(row['rollbit_position_multiplier']) else "N/A"
+        
+        # Calculate ratio safely
+        if (not check_null_or_zero(row['current_position_multiplier']) and 
+            not check_null_or_zero(row['rollbit_position_multiplier'])):
+            position_ratio = f"{row['current_position_multiplier']/row['rollbit_position_multiplier']:.2f}x"
+        else:
+            position_ratio = "N/A"
         
         position_html += f"""
         <tr>
@@ -531,7 +689,13 @@ def render_rollbit_comparison(rollbit_comparison_df):
     for _, row in rollbit_comparison_df.iterrows():
         surf_rate_mult = format_float(row['current_rate_multiplier'], 2)
         rollbit_rate_mult = format_float(row['rollbit_rate_multiplier'], 2)
-        rate_mult_ratio = f"{row['current_rate_multiplier']/max(row['rollbit_rate_multiplier'], 0.000001):.2f}x" if not pd.isna(row['rollbit_rate_multiplier']) else "N/A"
+        
+        # Calculate ratio safely
+        if (not check_null_or_zero(row['current_rate_multiplier']) and 
+            not check_null_or_zero(row['rollbit_rate_multiplier'])):
+            rate_mult_ratio = f"{row['current_rate_multiplier']/row['rollbit_rate_multiplier']:.2f}x"
+        else:
+            rate_mult_ratio = "N/A"
         
         rate_mult_html += f"""
         <tr>
@@ -569,7 +733,13 @@ def render_rollbit_comparison(rollbit_comparison_df):
     for _, row in rollbit_comparison_df.iterrows():
         surf_rate_exp = format_float(row['current_rate_exponent'], 2)
         rollbit_rate_exp = format_float(row['rollbit_rate_exponent'], 2)
-        rate_exp_ratio = f"{row['current_rate_exponent']/max(row['rollbit_rate_exponent'], 0.000001):.2f}x" if not pd.isna(row['rollbit_rate_exponent']) else "N/A"
+        
+        # Calculate ratio safely
+        if (not check_null_or_zero(row['current_rate_exponent']) and 
+            not check_null_or_zero(row['rollbit_rate_exponent'])):
+            rate_exp_ratio = f"{row['current_rate_exponent']/row['rollbit_rate_exponent']:.2f}x"
+        else:
+            rate_exp_ratio = "N/A"
         
         rate_exp_html += f"""
         <tr>
@@ -602,8 +772,188 @@ def render_rollbit_comparison(rollbit_comparison_df):
     </div>
     """, unsafe_allow_html=True)
 
+def render_market_impact_formula():
+    """Display the market impact formula with explanation"""
+    st.markdown("""
+    <h3>Market Impact Formula</h3>
+    <p>
+        When users trade on our exchange, large orders impact the closing price for winning trades. 
+        This formula replicates the market impact of large taking orders in a consistent and predictable way.
+    </p>
+    
+    <div class="formula-box">
+        <div class="formula">
+            P_close(T) = P(t) + ((1 - base_rate) / (1 + 1/abs((P(T)/P(t) - 1)*rate_multiplier)^rate_exponent + bet_amount*bet_multiplier/(10^6*abs(P(T)/P(t) - 1)*position_multiplier)))*(P(T) - P(t))
+        </div>
+    </div>
+    
+    <h4>Parameter Effects:</h4>
+    <ul>
+        <li><b>Buffer Rate</b>: Controls the safety margin for positions. Higher values reduce leverage but increase stability.</li>
+        <li><b>Position Multiplier</b>: Controls maximum position size. Higher values allow larger positions with less impact.</li>
+        <li><b>Rate Multiplier</b>: Controls market impact sensitivity. Lower values increase the market impact.</li>
+        <li><b>Rate Exponent</b>: Controls how steeply market impact increases with size. Higher values mean more aggressive scaling.</li>
+    </ul>
+    
+    <p>
+        These parameters work together to create a fair and sustainable fee model that accurately represents market conditions.
+    </p>
+    """, unsafe_allow_html=True)
+
+def render_parameter_simulation():
+    """Render interactive parameter simulation"""
+    st.markdown("<h3>Parameter Impact Simulation</h3>", unsafe_allow_html=True)
+    
+    st.markdown("""
+    <p>This simulator helps visualize how parameter changes affect market impact and closing prices for trades.</p>
+    """, unsafe_allow_html=True)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Parameter inputs
+        buffer_rate = st.slider("Buffer Rate (%)", min_value=0.1, max_value=5.0, value=1.0, step=0.1) / 100
+        position_multiplier = st.slider("Position Multiplier", min_value=100000, max_value=10000000, value=1000000, step=100000)
+    
+    with col2:
+        rate_multiplier = st.slider("Rate Multiplier", min_value=1.0, max_value=15.0, value=6.0, step=0.5)
+        rate_exponent = st.slider("Rate Exponent", min_value=1.0, max_value=5.0, value=2.0, step=0.1)
+    
+    # Additional parameters for simulation
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        initial_price = st.number_input("Initial Price (P(t))", min_value=100.0, max_value=100000.0, value=50000.0, step=1000.0)
+    
+    with col2:
+        final_price = st.number_input("Final Price (P(T))", min_value=100.0, max_value=100000.0, value=55000.0, step=1000.0)
+    
+    with col3:
+        bet_amount = st.number_input("Bet Amount", min_value=100, max_value=1000000, value=10000, step=1000)
+    
+    # Fixed parameters
+    base_rate = 0.01  # 1% base rate
+    bet_multiplier = 1.0  # Default bet multiplier
+    
+    # Calculate market impact for different position sizes
+    position_sizes = [1000, 5000, 10000, 50000, 100000, 500000]
+    impacts = []
+    
+    for amount in position_sizes:
+        # Calculate price change percentage
+        price_change_pct = abs(final_price/initial_price - 1)
+        
+        # Calculate denominator parts
+        exponent_part = (1/abs(price_change_pct * rate_multiplier))**rate_exponent
+        size_part = amount * bet_multiplier / (10**6 * abs(price_change_pct) * position_multiplier)
+        
+        # Calculate market impact factor
+        impact_factor = (1 - base_rate) / (1 + exponent_part + size_part)
+        
+        # Calculate effective price and impact percentage
+        if final_price > initial_price:  # Long position
+            effective_price = initial_price + impact_factor * (final_price - initial_price)
+            raw_profit_pct = (final_price - initial_price) / initial_price * 100
+            effective_profit_pct = (effective_price - initial_price) / initial_price * 100
+            impact_pct = (raw_profit_pct - effective_profit_pct) / raw_profit_pct * 100 if raw_profit_pct != 0 else 0
+        else:  # Short position
+            effective_price = initial_price + impact_factor * (final_price - initial_price)
+            raw_profit_pct = (initial_price - final_price) / initial_price * 100
+            effective_profit_pct = (initial_price - effective_price) / initial_price * 100
+            impact_pct = (raw_profit_pct - effective_profit_pct) / raw_profit_pct * 100 if raw_profit_pct != 0 else 0
+        
+        impacts.append({
+            'Position Size': amount,
+            'Effective Price': effective_price,
+            'Market Impact': impact_pct,
+            'Raw P&L %': raw_profit_pct,
+            'Effective P&L %': effective_profit_pct
+        })
+    
+    # Convert to DataFrame for display
+    impact_df = pd.DataFrame(impacts)
+    
+    # Display results
+    st.markdown("<h4>Market Impact Simulation Results</h4>", unsafe_allow_html=True)
+    
+    # Format the DataFrame for display
+    formatted_df = pd.DataFrame({
+        'Position Size': impact_df['Position Size'].apply(lambda x: f"${x:,}"),
+        'Raw P&L %': impact_df['Raw P&L %'].apply(lambda x: f"{x:.2f}%"),
+        'Effective P&L %': impact_df['Effective P&L %'].apply(lambda x: f"{x:.2f}%"),
+        'Impact %': impact_df['Market Impact'].apply(lambda x: f"{x:.2f}%"),
+        'Effective Price': impact_df['Effective Price'].apply(lambda x: f"${x:,.2f}")
+    })
+    
+    st.dataframe(formatted_df, use_container_width=True)
+    
+    # Create visualization of market impact
+    fig = go.Figure()
+    
+    # Add bar chart for market impact percentage
+    fig.add_trace(go.Bar(
+        x=[f"${size:,}" for size in impact_df['Position Size']],
+        y=impact_df['Market Impact'],
+        name='Market Impact %',
+        marker_color='red'
+    ))
+    
+    # Add line chart for effective P&L percentage
+    fig.add_trace(go.Scatter(
+        x=[f"${size:,}" for size in impact_df['Position Size']],
+        y=impact_df['Effective P&L %'],
+        name='Effective P&L %',
+        mode='lines+markers',
+        marker=dict(size=8, color='blue'),
+        yaxis='y2'
+    ))
+    
+    # Update layout with two y-axes
+    fig.update_layout(
+        title="Market Impact vs. Position Size",
+        xaxis_title="Position Size (USD)",
+        yaxis=dict(
+            title="Market Impact %",
+            titlefont=dict(color="red"),
+            tickfont=dict(color="red")
+        ),
+        yaxis2=dict(
+            title="Effective P&L %",
+            titlefont=dict(color="blue"),
+            tickfont=dict(color="blue"),
+            overlaying="y",
+            side="right"
+        ),
+        barmode='group',
+        height=500,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Explanation of results
+    st.markdown("""
+    <div class="info-box">
+        <h4>How to Interpret Results</h4>
+        <p>This simulation shows how different position sizes affect market impact and effective P&L:</p>
+        <ul>
+            <li><b>Raw P&L %:</b> The unrealized profit percentage without market impact.</li>
+            <li><b>Effective P&L %:</b> The realized profit percentage after market impact.</li>
+            <li><b>Impact %:</b> The percentage of potential profit reduced by market impact.</li>
+            <li><b>Effective Price:</b> The actual closing price after market impact.</li>
+        </ul>
+        <p>Adjusting the parameters above will show how they influence market impact across different position sizes.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
 # --- Main Application ---
-st.markdown('<div class="header-style">Parameter Optimization Dashboard</div>', unsafe_allow_html=True)
+st.markdown('<div class="header-style">Exchange Parameter Optimization Dashboard</div>', unsafe_allow_html=True)
 
 # Sidebar controls
 st.sidebar.header("Controls")
@@ -613,12 +963,51 @@ if st.sidebar.button("Refresh Data", use_container_width=True):
     st.cache_data.clear()
     st.experimental_rerun()
 
+# Add a reset baselines button
+if st.sidebar.button("Reset Baselines to Current Spreads", use_container_width=True):
+    market_data_df = fetch_market_spread_data()
+    if market_data_df is not None and not market_data_df.empty:
+        success, count, errors = reset_all_baselines(market_data_df)
+        if success:
+            st.sidebar.success(f"Successfully reset {count} baselines")
+            # Clear cache to refresh data
+            st.cache_data.clear()
+        else:
+            st.sidebar.error(f"Failed to reset baselines. {errors} errors occurred.")
+    else:
+        st.sidebar.error("No market data available to reset baselines")
+
 # Add adjustment sensitivity controls
 st.sidebar.header("Adjustment Sensitivity")
 buffer_sensitivity = st.sidebar.slider("Buffer Rate Sensitivity", 0.1, 1.0, 0.5, 0.1)
 position_sensitivity = st.sidebar.slider("Position Multiplier Sensitivity", 0.1, 1.0, 0.5, 0.1)
 rate_multiplier_sensitivity = st.sidebar.slider("Rate Multiplier Sensitivity", 0.1, 1.0, 0.5, 0.1)
 rate_exponent_sensitivity = st.sidebar.slider("Rate Exponent Sensitivity", 0.1, 1.0, 0.5, 0.1)
+
+# Set sensitivities
+sensitivities = {
+    'buffer_sensitivity': buffer_sensitivity,
+    'position_sensitivity': position_sensitivity,
+    'rate_multiplier_sensitivity': rate_multiplier_sensitivity,
+    'rate_exponent_sensitivity': rate_exponent_sensitivity
+}
+
+# Create simple tab navigation
+tab_options = ["Overview", "Parameter Recommendations", "Rollbit Comparison", "Impact Simulation", "Formula Explanation"]
+tab_cols = st.columns(len(tab_options))
+selected_tab = None
+
+for i, tab in enumerate(tab_options):
+    with tab_cols[i]:
+        if st.button(tab, key=f"tab_{i}", use_container_width=True):
+            selected_tab = tab
+
+# Default tab if none selected
+if selected_tab is None:
+    selected_tab = "Overview"
+
+st.markdown(f"### {selected_tab}", unsafe_allow_html=True)
+st.markdown("---")
 
 # Fetch current data
 current_params_df = fetch_current_parameters()
@@ -628,28 +1017,135 @@ rollbit_df = fetch_rollbit_parameters()
 
 # Generate recommendations
 if current_params_df is not None and market_data_df is not None and baselines_df is not None:
-    # Set sensitivities based on sidebar inputs
-    sensitivities = {
-        'buffer_sensitivity': buffer_sensitivity,
-        'position_sensitivity': position_sensitivity,
-        'rate_multiplier_sensitivity': rate_multiplier_sensitivity,
-        'rate_exponent_sensitivity': rate_exponent_sensitivity
-    }
-    
     # Generate recommendations with updated sensitivities
-    rec_df = generate_recommendations(current_params_df, market_data_df, baselines_df)
+    rec_df = generate_recommendations(current_params_df, market_data_df, baselines_df, sensitivities)
     
     # Add Rollbit comparison data if available
     if rollbit_df is not None:
         rec_df = add_rollbit_comparison(rec_df, rollbit_df)
     
-    # Create tabs for different views
-    tabs = st.tabs(["Recommendations Overview", "Parameter Details", "Rollbit Comparison"])
-    
-    # Tab 1: Recommendations Overview
-    with tabs[0]:
-        st.markdown("### Parameter Recommendations Overview")
+    # Render the selected tab content
+    if selected_tab == "Overview":
+        st.markdown("""
+        <div class="info-box">
+            <h4>Dashboard Overview</h4>
+            <p>This dashboard helps optimize trading parameters based on market conditions. Key features:</p>
+            <ul>
+                <li><b>Parameter Recommendations</b>: Auto-generated recommendations based on market spread changes</li>
+                <li><b>Rollbit Comparison</b>: Compare your parameters with Rollbit's settings</li>
+                <li><b>Impact Simulation</b>: Visualize how parameters affect market impact and P&L</li>
+                <li><b>Reset Baselines</b>: Set current market spreads as new baselines (sidebar)</li>
+            </ul>
+            <p>Use the sensitivity sliders in the sidebar to control how aggressively parameters adapt to market changes.</p>
+        </div>
+        """, unsafe_allow_html=True)
         
+        # Display current status metrics
+        if rec_df is not None and not rec_df.empty:
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                total_pairs = len(rec_df)
+                st.metric("Total Trading Pairs", total_pairs)
+            
+            with col2:
+                significant_changes = len(rec_df[(abs(rec_df['buffer_change']) > 1.0) | 
+                                               (abs(rec_df['position_change']) > 1.0)])
+                st.metric("Pairs Needing Adjustment", significant_changes)
+            
+            with col3:
+                avg_spread_change = rec_df['spread_change_ratio'].mean()
+                spread_direction = "↑" if avg_spread_change > 1.0 else "↓"
+                st.metric("Avg Spread Change", f"{spread_direction} {abs(avg_spread_change-1)*100:.2f}%")
+        
+        # Show current parameters for major pairs
+        st.markdown("### Current Parameters for Major Tokens", unsafe_allow_html=True)
+        
+        if current_params_df is not None and not current_params_df.empty:
+            major_pairs = current_params_df[current_params_df['pair_name'].apply(is_major)]
+            
+            if not major_pairs.empty:
+                # Format for display
+                display_df = pd.DataFrame({
+                    'Token': major_pairs['pair_name'],
+                    'Buffer Rate': major_pairs['buffer_rate'].apply(lambda x: format_percent(x)),
+                    'Position Multiplier': major_pairs['position_multiplier'].apply(lambda x: format_number(x)),
+                    'Rate Multiplier': major_pairs['rate_multiplier'].apply(lambda x: format_float(x)),
+                    'Rate Exponent': major_pairs['rate_exponent'].apply(lambda x: format_float(x))
+                })
+                
+                st.dataframe(display_df, use_container_width=True)
+            else:
+                st.info("No major tokens configured")
+        
+        # Show baseline vs current spreads
+        st.markdown("### Market Spread Analysis", unsafe_allow_html=True)
+        
+        if baselines_df is not None and market_data_df is not None:
+            # Create spread comparison table
+            current_spreads = calculate_current_spreads(market_data_df)
+            
+            spread_data = []
+            for _, row in baselines_df.iterrows():
+                pair = row['pair_name']
+                if pair in current_spreads:
+                    spread_data.append({
+                        'Token': pair,
+                        'Type': 'Major' if is_major(pair) else 'Altcoin',
+                        'Baseline Spread': row['baseline_spread'],
+                        'Current Spread': current_spreads[pair],
+                        'Change Ratio': safe_division(current_spreads[pair], row['baseline_spread'], 1.0),
+                        'Change %': (safe_division(current_spreads[pair], row['baseline_spread'], 1.0) - 1) * 100
+                    })
+            
+            if spread_data:
+                spread_df = pd.DataFrame(spread_data)
+                spread_df = spread_df.sort_values('Change %', ascending=False)
+                
+                # Format for display
+                display_df = pd.DataFrame({
+                    'Token': spread_df['Token'],
+                    'Type': spread_df['Type'],
+                    'Baseline Spread': spread_df['Baseline Spread'].apply(lambda x: f"{x*10000:.2f}"),
+                    'Current Spread': spread_df['Current Spread'].apply(lambda x: f"{x*10000:.2f}"),
+                    'Change': spread_df['Change %'].apply(lambda x: f"{x:+.2f}%")
+                })
+                
+                st.dataframe(display_df, use_container_width=True)
+                
+                # Create visualization of spread changes
+                fig = px.bar(
+                    spread_df.head(15),  # Top 15 for readability
+                    x='Token',
+                    y='Change %',
+                    color='Type',
+                    title="Biggest Spread Changes (Baseline vs Current)",
+                    color_discrete_map={
+                        'Major': '#1976D2',
+                        'Altcoin': '#FFA000'
+                    }
+                )
+                
+                # Add reference line at 0
+                fig.add_shape(
+                    type="line",
+                    x0=-0.5, y0=0,
+                    x1=len(spread_df.head(15))-0.5, y1=0,
+                    line=dict(color="red", width=2, dash="dash")
+                )
+                
+                # Update layout
+                fig.update_layout(
+                    height=400,
+                    xaxis_tickangle=-45,
+                    yaxis_title="Spread Change %"
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No spread comparison data available")
+        
+    elif selected_tab == "Parameter Recommendations":
         if rec_df is not None and not rec_df.empty:
             # Create summary cards
             st.markdown("#### Recommended Parameter Changes")
@@ -676,20 +1172,22 @@ if current_params_df is not None and market_data_df is not None and baselines_df
             
             significant_changes = rec_df[
                 (abs(rec_df['buffer_change']) > 1.0) | 
-                (abs(rec_df['position_change']) > 1.0)
+                (abs(rec_df['position_change']) > 1.0) |
+                (abs(rec_df['rate_multiplier_change']) > 1.0) |
+                (abs(rec_df['rate_exponent_change']) > 1.0)
             ].copy()
             
             if not significant_changes.empty:
                 # Format for display
                 display_df = pd.DataFrame({
                     'Pair': significant_changes['pair_name'],
-                    'Token Type': significant_changes['token_type'],
+                    'Type': significant_changes['token_type'],
                     'Current Buffer': significant_changes['current_buffer_rate'].apply(lambda x: f"{x*100:.2f}%"),
-                    'Recommended Buffer': significant_changes['recommended_buffer_rate'].apply(lambda x: f"{x*100:.2f}%"),
-                    'Buffer Change': significant_changes['buffer_change'].apply(lambda x: f"{x:+.2f}%"),
-                    'Current Position': significant_changes['current_position_multiplier'].apply(lambda x: f"{x:,.0f}"),
-                    'Recommended Position': significant_changes['recommended_position_multiplier'].apply(lambda x: f"{x:,.0f}"),
-                    'Position Change': significant_changes['position_change'].apply(lambda x: f"{x:+.2f}%")
+                    'Rec. Buffer': significant_changes['recommended_buffer_rate'].apply(lambda x: f"{x*100:.2f}%"),
+                    'Buffer Δ': significant_changes['buffer_change'].apply(lambda x: f"{x:+.2f}%"),
+                    'Current Pos.': significant_changes['current_position_multiplier'].apply(lambda x: f"{x:,.0f}"),
+                    'Rec. Pos.': significant_changes['recommended_position_multiplier'].apply(lambda x: f"{x:,.0f}"),
+                    'Pos. Δ': significant_changes['position_change'].apply(lambda x: f"{x:+.2f}%")
                 })
                 
                 st.dataframe(display_df, use_container_width=True)
@@ -738,14 +1236,10 @@ if current_params_df is not None and market_data_df is not None and baselines_df
             )
             
             st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning("No recommendation data available")
-    
-    # Tab 2: Parameter Details
-    with tabs[1]:
-        st.markdown("### Detailed Parameter Recommendations")
-        
-        if rec_df is not None and not rec_df.empty:
+            
+            # Show detailed parameter table
+            st.markdown("#### Complete Parameter Recommendations")
+            
             # Sort by absolute buffer change (descending)
             rec_df['abs_buffer_change'] = rec_df['buffer_change'].abs()
             sorted_df = rec_df.sort_values(by='abs_buffer_change', ascending=False)
@@ -818,17 +1312,23 @@ if current_params_df is not None and market_data_df is not None and baselines_df
             
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("No parameter details available")
-    
-    # Tab 3: Rollbit Comparison
-    with tabs[2]:
-        st.markdown("### Rollbit Parameter Comparison")
-        
+            st.warning("No recommendation data available. Please check database connection and try refreshing.")
+            
+    elif selected_tab == "Rollbit Comparison":
         # Filter for pairs with Rollbit data
-        rollbit_comparison_df = rec_df.dropna(subset=['rollbit_buffer_rate'])
+        if rec_df is not None and not rec_df.empty:
+            rollbit_comparison_df = rec_df.dropna(subset=['rollbit_buffer_rate'])
+            
+            # Use the rendering function
+            render_rollbit_comparison(rollbit_comparison_df)
+        else:
+            st.warning("No data available for Rollbit comparison. Please check database connection and try refreshing.")
+            
+    elif selected_tab == "Impact Simulation":
+        render_parameter_simulation()
         
-        # Use the rendering function
-        render_rollbit_comparison(rollbit_comparison_df)
+    elif selected_tab == "Formula Explanation":
+        render_market_impact_formula()
 else:
     st.error("Failed to load required data. Please check database connection and try refreshing.")
 
@@ -860,9 +1360,21 @@ with st.expander("Understanding Parameter Optimization"):
     3. Sensitivity controls adjust how aggressively parameters respond to spread changes
     4. Rollbit parameters are shown for comparison with a major competitor
     
+    ### Market Impact Formula
+    
+    ```
+    P_close(T) = P(t) + ((1 - base_rate) / (1 + 1/abs((P(T)/P(t) - 1)*rate_multiplier)^rate_exponent + bet_amount*bet_multiplier/(10^6*abs(P(T)/P(t) - 1)*position_multiplier)))*(P(T) - P(t))
+    ```
+    
+    Where:
+    - P(t) is the opening price
+    - P(T) is the market price at close time
+    - rate_multiplier, rate_exponent, and position_multiplier are the parameters we optimize
+    
     ### Interpretation
     
     - Parameters with significant recommended changes may need manual adjustment
     - The scatter plot shows how spread changes correlate with parameter recommendations
     - Consider both market conditions and competitor settings when finalizing parameters
+    - Use the Impact Simulation to visualize exactly how your settings affect winning trade prices
     """)
