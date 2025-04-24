@@ -372,11 +372,11 @@ def generate_recommendations(current_params_df, market_data_df, baselines_df):
                 significant_change_threshold
             )
             
-            # Calculate changes
-            buffer_change = ((recommended['buffer_rate'] - params['buffer_rate']) / params['buffer_rate']) * 100
-            position_change = ((recommended['position_multiplier'] - params['position_multiplier']) / params['position_multiplier']) * 100
-            rate_mult_change = ((recommended['rate_multiplier'] - params['rate_multiplier']) / params['rate_multiplier']) * 100
-            rate_exp_change = ((recommended['rate_exponent'] - params['rate_exponent']) / params['rate_exponent']) * 100
+            # Calculate changes with safety checks to avoid division by zero
+            buffer_change = ((recommended['buffer_rate'] - params['buffer_rate']) / max(params['buffer_rate'], 0.000001)) * 100
+            position_change = ((recommended['position_multiplier'] - params['position_multiplier']) / max(params['position_multiplier'], 1)) * 100
+            rate_mult_change = ((recommended['rate_multiplier'] - params['rate_multiplier']) / max(params['rate_multiplier'], 0.000001)) * 100
+            rate_exp_change = ((recommended['rate_exponent'] - params['rate_exponent']) / max(params['rate_exponent'], 0.000001)) * 100
             
             recommendations.append({
                 'pair_name': pair,
@@ -438,6 +438,7 @@ def render_rollbit_comparison(rollbit_comparison_df):
         return
     
     # Buffer Rate Table
+    st.markdown("<h3>Buffer Rate Comparison</h3>", unsafe_allow_html=True)
     buffer_html = """
     <div class="param-group">
         <div class="param-header">Buffer Rate</div>
@@ -454,7 +455,7 @@ def render_rollbit_comparison(rollbit_comparison_df):
     for _, row in rollbit_comparison_df.iterrows():
         surf_buffer = format_percent(row['current_buffer_rate'])
         rollbit_buffer = format_percent(row['rollbit_buffer_rate'])
-        buffer_ratio = f"{row['current_buffer_rate']/row['rollbit_buffer_rate']:.2f}x" if row['rollbit_buffer_rate'] > 0 else "N/A"
+        buffer_ratio = f"{row['current_buffer_rate']/max(row['rollbit_buffer_rate'], 0.000001):.2f}x" if not pd.isna(row['rollbit_buffer_rate']) else "N/A"
         
         buffer_html += f"""
         <tr>
@@ -492,7 +493,7 @@ def render_rollbit_comparison(rollbit_comparison_df):
     for _, row in rollbit_comparison_df.iterrows():
         surf_position = format_number(row['current_position_multiplier'])
         rollbit_position = format_number(row['rollbit_position_multiplier'])
-        position_ratio = f"{row['current_position_multiplier']/row['rollbit_position_multiplier']:.2f}x" if row['rollbit_position_multiplier'] > 0 else "N/A"
+        position_ratio = f"{row['current_position_multiplier']/max(row['rollbit_position_multiplier'], 1):.2f}x" if not pd.isna(row['rollbit_position_multiplier']) else "N/A"
         
         position_html += f"""
         <tr>
@@ -530,7 +531,7 @@ def render_rollbit_comparison(rollbit_comparison_df):
     for _, row in rollbit_comparison_df.iterrows():
         surf_rate_mult = format_float(row['current_rate_multiplier'], 2)
         rollbit_rate_mult = format_float(row['rollbit_rate_multiplier'], 2)
-        rate_mult_ratio = f"{row['current_rate_multiplier']/row['rollbit_rate_multiplier']:.2f}x" if row['rollbit_rate_multiplier'] > 0 else "N/A"
+        rate_mult_ratio = f"{row['current_rate_multiplier']/max(row['rollbit_rate_multiplier'], 0.000001):.2f}x" if not pd.isna(row['rollbit_rate_multiplier']) else "N/A"
         
         rate_mult_html += f"""
         <tr>
@@ -568,7 +569,7 @@ def render_rollbit_comparison(rollbit_comparison_df):
     for _, row in rollbit_comparison_df.iterrows():
         surf_rate_exp = format_float(row['current_rate_exponent'], 2)
         rollbit_rate_exp = format_float(row['rollbit_rate_exponent'], 2)
-        rate_exp_ratio = f"{row['current_rate_exponent']/row['rollbit_rate_exponent']:.2f}x" if row['rollbit_rate_exponent'] > 0 else "N/A"
+        rate_exp_ratio = f"{row['current_rate_exponent']/max(row['rollbit_rate_exponent'], 0.000001):.2f}x" if not pd.isna(row['rollbit_rate_exponent']) else "N/A"
         
         rate_exp_html += f"""
         <tr>
