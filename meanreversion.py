@@ -155,7 +155,7 @@ class MeanReversionAnalyzer:
         return existing_tables
 
     def _build_query_for_partition_tables(self, tables, pair_name, start_time, end_time, exchange):
-        """Build query for partition tables, ensuring we handle cross-midnight data correctly"""
+        """Build query for partition tables, handling Singapore timezone conversion appropriately"""
         if not tables:
             return ""
             
@@ -165,10 +165,12 @@ class MeanReversionAnalyzer:
         source_type = 0 if exchange == 'surf' else 1
         
         for table in tables:
+            # Include both UTC and Singapore time in the query results
             query = f"""
             SELECT 
                 pair_name,
                 created_at AS timestamp_utc,
+                created_at + INTERVAL '8 hour' AS timestamp_sg,
                 final_price AS price
             FROM 
                 public.{table}
@@ -280,11 +282,17 @@ class MeanReversionAnalyzer:
     def process_historical_data(self, df, pair_name, exchange, lookback_hours=24):
         """Process historical data to generate 30-minute interval metrics"""
         try:
-            # Convert timestamp_utc to proper datetime with UTC timezone
-            df['timestamp'] = pd.to_datetime(df['timestamp_utc']).dt.tz_localize(UTC_TZ)
+            # Ensure timestamp columns have proper timezone
+            df['timestamp_utc'] = pd.to_datetime(df['timestamp_utc'])
             
-            # Add Singapore time column
-            df['timestamp_sg'] = df['timestamp'].dt.tz_convert(SG_TZ)
+            # Create UTC timestamp with timezone info
+            df['timestamp'] = df['timestamp_utc'].dt.tz_localize(UTC_TZ)
+            
+            # Create or ensure proper Singapore timestamp
+            if 'timestamp_sg' not in df.columns:
+                df['timestamp_sg'] = df['timestamp'].dt.tz_convert(SG_TZ)
+            else:
+                df['timestamp_sg'] = pd.to_datetime(df['timestamp_sg']).dt.tz_localize(SG_TZ)
             
             # Sort by timestamp
             df = df.sort_values('timestamp')
@@ -417,19 +425,16 @@ class MeanReversionAnalyzer:
                             # Process historical data for time series analysis
                             self.process_historical_data(df, pair, exchange, lookback_hours=hours)
                             
-                            # Convert timestamp columns to datetime if needed
-                            df['timestamp_utc'] = pd.to_datetime(df['timestamp_utc'])
-                            
-                            # Add proper timezone info
-                            df['timestamp'] = df['timestamp_utc'].dt.tz_localize(UTC_TZ)
-                            df['timestamp_sg'] = df['timestamp'].dt.tz_convert(SG_TZ)
-                            
                             # Debug timestamp range
-                            min_time_utc = df['timestamp'].min()
-                            max_time_utc = df['timestamp'].max()
+                            min_time_utc = df['timestamp_utc'].min()
+                            max_time_utc = df['timestamp_utc'].max()
                             
-                            min_time_sg = df['timestamp_sg'].min()
-                            max_time_sg = df['timestamp_sg'].max()
+                            # Convert to proper datetime objects with timezone info
+                            min_time_utc = pd.to_datetime(min_time_utc).tz_localize(UTC_TZ)
+                            max_time_utc = pd.to_datetime(max_time_utc).tz_localize(UTC_TZ)
+                            
+                            min_time_sg = min_time_utc.astimezone(SG_TZ)
+                            max_time_sg = max_time_utc.astimezone(SG_TZ)
                             
                             time_span = max_time_utc - min_time_utc
                             days_span = time_span.total_seconds() / 86400  # Convert to days
@@ -560,6 +565,7 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
     -- Final query
     SELECT
       t.interval_time AS "timestamp_utc",
+      t.interval_time + INTERVAL '8 hour' AS "timestamp_sg",
       COALESCE(o."platform_order_pnl", 0) +
       COALESCE(f."user_fee_payments", 0) +
       COALESCE(ff."platform_funding_pnl", 0) +
@@ -589,7 +595,11 @@ def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
         # Convert timestamp columns to pandas datetime with timezone info
         df['timestamp_utc'] = pd.to_datetime(df['timestamp_utc'])
         df['timestamp'] = df['timestamp_utc'].dt.tz_localize(UTC_TZ)
-        df['timestamp_sg'] = df['timestamp'].dt.tz_convert(SG_TZ)
+        
+        if 'timestamp_sg' in df.columns:
+            df['timestamp_sg'] = pd.to_datetime(df['timestamp_sg']).dt.tz_localize(SG_TZ)
+        else:
+            df['timestamp_sg'] = df['timestamp'].dt.tz_convert(SG_TZ)
         
         # Sort by timestamp
         df = df.sort_values('timestamp')
@@ -614,28 +624,45 @@ def create_metric_vs_pnl_chart(metrics_df, pnl_df, metric_name, metric_display_n
         return None
     
     try:
+        # Make copies to avoid modifying originals
+        metrics_df_copy = metrics_df.copy()
+        pnl_df_copy = pnl_df.copy()
+        
         # Choose which timestamp column to use (UTC or Singapore time)
         x_column = 'timestamp_sg' if use_sg_time else 'timestamp'
         
         # Ensure both dataframes have the column
-        if x_column not in metrics_df.columns or x_column not in pnl_df.columns:
+        if x_column not in metrics_df_copy.columns or x_column not in pnl_df_copy.columns:
             st.warning(f"Missing {x_column} column in data. Falling back to using 'timestamp'.")
             x_column = 'timestamp'
         
-        # Create copies to avoid modifying originals
-        metrics_df_copy = metrics_df.copy()
-        pnl_df_copy = pnl_df.copy()
-        
-        # Ensure timestamps are compatible
-        if not pd.api.types.is_datetime64_any_dtype(metrics_df_copy[x_column]):
-            metrics_df_copy[x_column] = pd.to_datetime(metrics_df_copy[x_column])
-        
-        if not pd.api.types.is_datetime64_any_dtype(pnl_df_copy[x_column]):
-            pnl_df_copy[x_column] = pd.to_datetime(pnl_df_copy[x_column])
+        # Ensure timestamps have proper timezone info
+        for df in [metrics_df_copy, pnl_df_copy]:
+            if x_column in df.columns:
+                # Convert to datetime if not already
+                if not pd.api.types.is_datetime64_any_dtype(df[x_column]):
+                    df[x_column] = pd.to_datetime(df[x_column])
+                
+                # Ensure proper timezone
+                if df[x_column].dt.tz is None:
+                    if use_sg_time:
+                        df[x_column] = df[x_column].dt.tz_localize(SG_TZ)
+                    else:
+                        df[x_column] = df[x_column].dt.tz_localize(UTC_TZ)
         
         # Sort by timestamp
         metrics_df_copy = metrics_df_copy.sort_values(x_column)
         pnl_df_copy = pnl_df_copy.sort_values(x_column)
+        
+        # Find common time range
+        common_start = max(metrics_df_copy[x_column].min(), pnl_df_copy[x_column].min())
+        common_end = min(metrics_df_copy[x_column].max(), pnl_df_copy[x_column].max())
+        
+        # Filter to common time range
+        metrics_df_copy = metrics_df_copy[(metrics_df_copy[x_column] >= common_start) & 
+                                         (metrics_df_copy[x_column] <= common_end)]
+        pnl_df_copy = pnl_df_copy[(pnl_df_copy[x_column] >= common_start) & 
+                                  (pnl_df_copy[x_column] <= common_end)]
         
         # Check time ranges
         metrics_min_time = metrics_df_copy[x_column].min()
@@ -646,16 +673,6 @@ def create_metric_vs_pnl_chart(metrics_df, pnl_df, metric_name, metric_display_n
         # Add debug info
         st.write(f"Metrics time range: {metrics_min_time} to {metrics_max_time}")
         st.write(f"PNL time range: {pnl_min_time} to {pnl_max_time}")
-        
-        # If needed, align time ranges by resampling to common intervals
-        common_start = max(metrics_min_time, pnl_min_time)
-        common_end = min(metrics_max_time, pnl_max_time)
-        
-        # Filter both datasets to common time range
-        metrics_df_copy = metrics_df_copy[(metrics_df_copy[x_column] >= common_start) & 
-                                         (metrics_df_copy[x_column] <= common_end)]
-        pnl_df_copy = pnl_df_copy[(pnl_df_copy[x_column] >= common_start) & 
-                                  (pnl_df_copy[x_column] <= common_end)]
         
         # Create the figure
         fig = go.Figure()
@@ -745,12 +762,12 @@ def calculate_metric_pnl_correlation(metrics_df, pnl_df, metric_name):
         metrics_df_copy = metrics_df.copy()
         pnl_df_copy = pnl_df.copy()
         
-        # Ensure we're working with timezone-aware timestamps
-        if not pd.api.types.is_datetime64_tz_dtype(metrics_df_copy['timestamp']):
-            metrics_df_copy['timestamp'] = pd.to_datetime(metrics_df_copy['timestamp']).dt.tz_localize(UTC_TZ)
+        # Ensure timestamps have proper timezone info
+        if 'timestamp' in metrics_df_copy.columns and metrics_df_copy['timestamp'].dt.tz is None:
+            metrics_df_copy['timestamp'] = metrics_df_copy['timestamp'].dt.tz_localize(UTC_TZ)
             
-        if not pd.api.types.is_datetime64_tz_dtype(pnl_df_copy['timestamp']):
-            pnl_df_copy['timestamp'] = pd.to_datetime(pnl_df_copy['timestamp']).dt.tz_localize(UTC_TZ)
+        if 'timestamp' in pnl_df_copy.columns and pnl_df_copy['timestamp'].dt.tz is None:
+            pnl_df_copy['timestamp'] = pnl_df_copy['timestamp'].dt.tz_localize(UTC_TZ)
         
         # Find common time range
         common_start = max(metrics_df_copy['timestamp'].min(), pnl_df_copy['timestamp'].min())
