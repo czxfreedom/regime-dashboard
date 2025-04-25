@@ -83,8 +83,8 @@ def get_db_connection():
         return None
 
 # --- APP TITLE AND DESCRIPTION ---
-st.title("5-Minute Choppiness Analysis")
-st.subheader("Last 6 Hours - Real-time Monitoring")
+st.title("5-Minute Choppiness Analysis: Surf vs Rollbit")
+st.subheader("Last 6 Hours Comparison")
 
 # Get the current time in Singapore timezone
 sg_timezone = pytz.timezone('Asia/Singapore')
@@ -138,7 +138,7 @@ def get_partition_tables(start_date, end_date):
         st.error(f"Error getting partition tables: {e}")
         return []
 
-def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
+def build_query_for_partition_tables(tables, pair_name, start_time, end_time, exchange):
     """Build an optimized query combining multiple partition tables"""
     if not tables:
         return ""
@@ -146,6 +146,9 @@ def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
     union_parts = []
     
     for table in tables:
+        # Choose source type based on exchange
+        source_type = 0 if exchange == 'surf' else 1  # surf=0, rollbit=1
+        
         # Optimized query with proper time zone handling
         query = f"""
         SELECT 
@@ -157,7 +160,7 @@ def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
         WHERE 
             created_at >= '{start_time}'::timestamp - INTERVAL '8 hour'
             AND created_at <= '{end_time}'::timestamp - INTERVAL '8 hour'
-            AND source_type = 0
+            AND source_type = {source_type}
             AND pair_name = '{pair_name}'
         """
         
@@ -167,9 +170,9 @@ def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
     complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp_sg"
     return complete_query
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def fetch_price_data(pair_name, hours=6):
-    """Fetch price data for a given pair over the last N hours"""
+@st.cache_data(ttl=600)  # Cache for 10 minutes, only refresh when explicitly requested
+def fetch_price_data(pair_name, hours=6, exchange='surf'):
+    """Fetch price data for a given pair and exchange over the last N hours"""
     try:
         conn = get_db_connection()
         if not conn:
@@ -192,14 +195,12 @@ def fetch_price_data(pair_name, hours=6):
             return None
         
         # Build and execute query
-        query = build_query_for_partition_tables(tables, pair_name, start_time_str, end_time_str)
+        query = build_query_for_partition_tables(tables, pair_name, start_time_str, end_time_str, exchange)
         
         if not query:
             return None
             
-        start_time = time.time()
         df = pd.read_sql_query(query, conn)
-        query_time = time.time() - start_time
         
         if df.empty:
             return None
@@ -215,12 +216,15 @@ def fetch_price_data(pair_name, hours=6):
         return df
         
     except Exception as e:
-        st.error(f"Error fetching data for {pair_name}: {e}")
+        st.error(f"Error fetching {exchange} data for {pair_name}: {e}")
         return None
 
 def calculate_choppiness(price_series, window=20):
     """Calculate choppiness exactly as in the DepthAnalyzer code"""
     try:
+        if price_series.empty:
+            return pd.Series()
+            
         # Calculate absolute price changes
         diff = price_series.diff().abs()
         
@@ -244,7 +248,7 @@ def calculate_choppiness(price_series, window=20):
         
     except Exception as e:
         st.error(f"Error calculating choppiness: {e}")
-        return None
+        return pd.Series()
 
 def calculate_5min_choppiness(df):
     """Calculate choppiness for 5-minute intervals"""
@@ -275,31 +279,38 @@ def calculate_5min_choppiness(df):
 
 # --- PARALLEL DATA FETCHING ---
 def fetch_data_for_multiple_pairs(pairs, hours=6):
-    """Fetch data for multiple pairs in parallel for better performance"""
-    results = {}
+    """Fetch data for multiple pairs and both exchanges in parallel for better performance"""
+    results = {'surf': {}, 'rollbit': {}}
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     if not pairs:
         return results
     
-    status_text.text(f"Fetching data for {len(pairs)} pairs...")
+    status_text.text(f"Fetching data for {len(pairs)} pairs from Surf and Rollbit...")
+    
+    # Create tasks list - one for each pair and exchange combination
+    tasks = []
+    for pair in pairs:
+        tasks.append(('surf', pair))
+        tasks.append(('rollbit', pair))
     
     # Use ThreadPoolExecutor for parallel fetching
     with ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_pair = {executor.submit(fetch_price_data, pair, hours): pair for pair in pairs}
+        future_to_task = {executor.submit(fetch_price_data, pair, hours, exchange): (exchange, pair) 
+                          for exchange, pair in tasks}
         
-        for i, future in enumerate(as_completed(future_to_pair)):
-            pair = future_to_pair[future]
-            progress = (i + 1) / len(pairs)
-            progress_bar.progress(progress, text=f"Processing {pair} ({i+1}/{len(pairs)})")
+        for i, future in enumerate(as_completed(future_to_task)):
+            exchange, pair = future_to_task[future]
+            progress = (i + 1) / len(tasks)
+            progress_bar.progress(progress, text=f"Processing {exchange.upper()}: {pair} ({i+1}/{len(tasks)})")
             
             try:
                 df = future.result()
                 if df is not None and not df.empty:
-                    results[pair] = df
+                    results[exchange][pair] = df
             except Exception as e:
-                st.error(f"Error processing {pair}: {e}")
+                st.error(f"Error processing {exchange.upper()}: {pair}: {e}")
     
     progress_bar.empty()
     status_text.empty()
@@ -308,14 +319,21 @@ def fetch_data_for_multiple_pairs(pairs, hours=6):
 
 def calculate_choppiness_for_all_pairs(pair_data):
     """Calculate choppiness for all pairs with data"""
-    choppiness_results = {}
+    choppiness_results = {'surf': {}, 'rollbit': {}}
     
-    for pair, df in pair_data.items():
-        choppiness_df = calculate_5min_choppiness(df)
-        if choppiness_df is not None and not choppiness_df.empty:
-            choppiness_results[pair] = choppiness_df
+    for exchange in ['surf', 'rollbit']:
+        for pair, df in pair_data[exchange].items():
+            choppiness_df = calculate_5min_choppiness(df)
+            if choppiness_df is not None and not choppiness_df.empty:
+                choppiness_results[exchange][pair] = choppiness_df
     
     return choppiness_results
+
+# --- INITIALIZE SESSION STATE FOR RESULTS ---
+if 'choppiness_results' not in st.session_state:
+    st.session_state.choppiness_results = None
+if 'last_update_time' not in st.session_state:
+    st.session_state.last_update_time = None
 
 # --- UI CONTROLS ---
 col1, col2, col3 = st.columns([3, 1, 1])
@@ -341,246 +359,367 @@ with col2:
     )
 
 with col3:
-    # Add a refresh button
-    if st.button("Refresh Data", use_container_width=True):
-        st.cache_data.clear()
-        st.experimental_rerun()
+    # Add a refresh button - ONLY refresh when this is clicked
+    refresh_pressed = st.button("Refresh Data", use_container_width=True)
 
 if not selected_tokens:
     st.warning("Please select at least one token")
     st.stop()
 
-# --- DATA PROCESSING ---
-# Fetch data for selected pairs
-pair_data = fetch_data_for_multiple_pairs(selected_tokens, hours_to_analyze)
-
-if not pair_data:
-    st.error("No data available for the selected pairs and time period.")
-    st.stop()
-
-# Calculate choppiness
-choppiness_results = calculate_choppiness_for_all_pairs(pair_data)
-
-if not choppiness_results:
-    st.error("Could not calculate choppiness for any of the selected pairs.")
-    st.stop()
+# --- DATA PROCESSING - ONLY WHEN REFRESH IS CLICKED ---
+if refresh_pressed:
+    # Clear the cache to force a refresh
+    st.cache_data.clear()
+    
+    # Fetch data for selected pairs
+    pair_data = fetch_data_for_multiple_pairs(selected_tokens, hours_to_analyze)
+    
+    if not pair_data['surf'] and not pair_data['rollbit']:
+        st.error("No data available for the selected pairs and time period.")
+        st.stop()
+    
+    # Calculate choppiness
+    choppiness_results = calculate_choppiness_for_all_pairs(pair_data)
+    
+    # Store in session state
+    st.session_state.choppiness_results = choppiness_results
+    st.session_state.last_update_time = now_sg
+    
+    # Force a rerun to display the updated data
+    st.experimental_rerun()
 
 # --- VISUALIZATIONS ---
-st.subheader(f"Choppiness Analysis (5-min intervals, Last {hours_to_analyze} Hours)")
+if st.session_state.choppiness_results:
+    choppiness_results = st.session_state.choppiness_results
+    last_update_time = st.session_state.last_update_time
+    
+    # Show last update time
+    st.info(f"Last data refresh: {last_update_time.strftime('%Y-%m-%d %H:%M:%S')} (SGT)")
+    
+    # Check if we have any data to display
+    if not any(choppiness_results[exchange] for exchange in ['surf', 'rollbit']):
+        st.error("Could not calculate choppiness for any of the selected pairs.")
+        st.stop()
 
-# Create tabs for different visualization options
-viz_tabs = st.tabs(["Line Charts", "Heatmap", "Statistics", "Raw Data"])
+    # Create tabs for different visualization options
+    viz_tabs = st.tabs(["Line Charts", "Heatmap", "Statistics", "Raw Data"])
 
-# Tab 1: Line Charts
-with viz_tabs[0]:
-    # Create a line chart for each pair
-    for pair, df in choppiness_results.items():
-        fig = px.line(
-            df, 
-            x='timestamp', 
-            y='choppiness',
-            title=f"{pair} - 5-Minute Choppiness",
-            labels={'timestamp': 'Time (Singapore)', 'choppiness': 'Choppiness'},
-            color_discrete_sequence=['#1f77b4'],
-            height=400
-        )
-        
-        # Add moving average line
-        fig.add_scatter(
-            x=df['timestamp'],
-            y=df['choppiness'].rolling(6).mean(),  # 30-min moving average
-            mode='lines',
-            name='30-min MA',
-            line=dict(color='red', width=2)
-        )
-        
-        # Improve layout
-        fig.update_layout(
-            margin=dict(l=10, r=10, t=40, b=10),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            xaxis=dict(
-                tickformat='%H:%M',
-                title_font=dict(size=14),
-                tickfont=dict(size=12)
-            ),
-            yaxis=dict(
-                title_font=dict(size=14),
-                tickfont=dict(size=12)
-            )
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
+    # Tab 1: Line Charts
+    with viz_tabs[0]:
+        # Create a line chart for each pair, comparing Surf and Rollbit
+        for pair in selected_tokens:
+            # Check if we have data for this pair in either exchange
+            surf_data = choppiness_results['surf'].get(pair)
+            rollbit_data = choppiness_results['rollbit'].get(pair)
+            
+            if surf_data is not None or rollbit_data is not None:
+                # Create a Plotly figure
+                fig = go.Figure()
+                
+                # Add Surf data if available
+                if surf_data is not None:
+                    fig.add_trace(go.Scatter(
+                        x=surf_data['timestamp'],
+                        y=surf_data['choppiness'],
+                        mode='lines',
+                        name='Surf',
+                        line=dict(color='blue', width=2)
+                    ))
+                
+                # Add Rollbit data if available
+                if rollbit_data is not None:
+                    fig.add_trace(go.Scatter(
+                        x=rollbit_data['timestamp'],
+                        y=rollbit_data['choppiness'],
+                        mode='lines',
+                        name='Rollbit',
+                        line=dict(color='red', width=2)
+                    ))
+                
+                # Improve layout
+                fig.update_layout(
+                    title=f"{pair} - 5-Minute Choppiness Comparison",
+                    xaxis_title="Time (Singapore)",
+                    yaxis_title="Choppiness",
+                    margin=dict(l=10, r=10, t=40, b=10),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    xaxis=dict(
+                        tickformat='%H:%M',
+                        title_font=dict(size=14),
+                        tickfont=dict(size=12)
+                    ),
+                    yaxis=dict(
+                        title_font=dict(size=14),
+                        tickfont=dict(size=12)
+                    ),
+                    height=400
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning(f"No data available for {pair}")
 
-# Tab 2: Heatmap
-with viz_tabs[1]:
-    # Prepare data for heatmap
-    all_periods = []
-    all_pairs = []
-    all_values = []
-    
-    # Collect all periods first to ensure consistent x-axis
-    all_timestamp_periods = set()
-    for pair, df in choppiness_results.items():
-        all_timestamp_periods.update(df['timestamp'].dt.floor('5min'))
-    
-    # Sort periods chronologically 
-    all_timestamp_periods = sorted(all_timestamp_periods)
-    
-    # Create a mapping of timestamps to display strings
-    period_mapping = {ts: ts.strftime('%H:%M') for ts in all_timestamp_periods}
-    
-    # Collect data for heatmap
-    for pair, df in choppiness_results.items():
-        for _, row in df.iterrows():
-            period_key = row['timestamp'].floor('5min')
-            if period_key in period_mapping:
-                all_periods.append(period_mapping[period_key])
-                all_pairs.append(pair)
-                all_values.append(row['choppiness'])
-    
-    # Create a DataFrame for the heatmap
-    heatmap_df = pd.DataFrame({
-        'Period': all_periods,
-        'Pair': all_pairs,
-        'Choppiness': all_values
-    })
-    
-    # Create the heatmap
-    if not heatmap_df.empty:
-        # Pivot the data for the heatmap
-        pivot_df = heatmap_df.pivot_table(
-            values='Choppiness', 
-            index='Pair', 
-            columns='Period', 
-            aggfunc='mean'
-        )
+    # Tab 2: Heatmap
+    with viz_tabs[1]:
+        # Create separate tabs for Surf and Rollbit heatmaps
+        heatmap_tabs = st.tabs(["Surf Heatmap", "Rollbit Heatmap"])
         
-        # Sort the pivot table
-        pivot_df = pivot_df.reindex(sorted(pivot_df.index))
-        
-        # Create the heatmap with Plotly
-        fig = px.imshow(
-            pivot_df,
-            labels=dict(x="5-Min Period", y="Trading Pair", color="Choppiness"),
-            x=pivot_df.columns,
-            y=pivot_df.index,
-            color_continuous_scale='Viridis',
-            height=max(500, len(pivot_df) * 30)  # Dynamic height
-        )
-        
-        fig.update_layout(
-            title="Choppiness Heatmap - 5-Minute Intervals",
-            margin=dict(l=10, r=10, t=40, b=10),
-            coloraxis_colorbar=dict(
-                title="Choppiness",
-                tickfont=dict(size=12),
-                title_font=dict(size=14)
-            )
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.warning("Insufficient data for heatmap visualization.")
+        for idx, exchange in enumerate(['surf', 'rollbit']):
+            with heatmap_tabs[idx]:
+                # Prepare data for heatmap
+                all_periods = []
+                all_pairs = []
+                all_values = []
+                
+                # Check if we have any data for this exchange
+                if not choppiness_results[exchange]:
+                    st.warning(f"No data available for {exchange.upper()}")
+                    continue
+                
+                # Collect all periods first to ensure consistent x-axis
+                all_timestamp_periods = set()
+                for pair, df in choppiness_results[exchange].items():
+                    all_timestamp_periods.update(df['timestamp'].dt.floor('5min'))
+                
+                # Sort periods chronologically 
+                all_timestamp_periods = sorted(all_timestamp_periods)
+                
+                # Create a mapping of timestamps to display strings
+                period_mapping = {ts: ts.strftime('%H:%M') for ts in all_timestamp_periods}
+                
+                # Collect data for heatmap
+                for pair, df in choppiness_results[exchange].items():
+                    for _, row in df.iterrows():
+                        period_key = row['timestamp'].floor('5min')
+                        if period_key in period_mapping:
+                            all_periods.append(period_mapping[period_key])
+                            all_pairs.append(pair)
+                            all_values.append(row['choppiness'])
+                
+                # Create a DataFrame for the heatmap
+                heatmap_df = pd.DataFrame({
+                    'Period': all_periods,
+                    'Pair': all_pairs,
+                    'Choppiness': all_values
+                })
+                
+                # Create the heatmap
+                if not heatmap_df.empty:
+                    # Pivot the data for the heatmap
+                    pivot_df = heatmap_df.pivot_table(
+                        values='Choppiness', 
+                        index='Pair', 
+                        columns='Period', 
+                        aggfunc='mean'
+                    )
+                    
+                    # Sort the pivot table
+                    pivot_df = pivot_df.reindex(sorted(pivot_df.index))
+                    
+                    # Create the heatmap with Plotly
+                    fig = px.imshow(
+                        pivot_df,
+                        labels=dict(x="5-Min Period", y="Trading Pair", color="Choppiness"),
+                        x=pivot_df.columns,
+                        y=pivot_df.index,
+                        color_continuous_scale='Viridis',
+                        height=max(500, len(pivot_df) * 30)  # Dynamic height
+                    )
+                    
+                    fig.update_layout(
+                        title=f"{exchange.upper()} Choppiness Heatmap - 5-Minute Intervals",
+                        margin=dict(l=10, r=10, t=40, b=10),
+                        coloraxis_colorbar=dict(
+                            title="Choppiness",
+                            tickfont=dict(size=12),
+                            title_font=dict(size=14)
+                        )
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning(f"Insufficient data for {exchange.upper()} heatmap visualization.")
 
-# Tab 3: Statistics
-with viz_tabs[2]:
-    # Calculate statistics for each pair
-    stats_data = []
-    
-    for pair, df in choppiness_results.items():
-        if not df.empty and 'choppiness' in df.columns:
-            stats_data.append({
-                'Pair': pair,
-                'Mean Choppiness': np.mean(df['choppiness']),
-                'Median Choppiness': np.median(df['choppiness']),
-                'Min Choppiness': np.min(df['choppiness']),
-                'Max Choppiness': np.max(df['choppiness']),
-                'Std Dev': np.std(df['choppiness']),
-                'Current': df['choppiness'].iloc[-1] if not df.empty else np.nan,
-                'Volatility': np.std(df['choppiness']) / np.mean(df['choppiness']) if np.mean(df['choppiness']) > 0 else 0
-            })
-    
-    if stats_data:
-        stats_df = pd.DataFrame(stats_data)
+    # Tab 3: Statistics
+    with viz_tabs[2]:
+        # Create tabs for Surf and Rollbit statistics
+        stats_tabs = st.tabs(["Surf Statistics", "Rollbit Statistics", "Comparison"])
         
-        # Sort by mean choppiness (descending)
-        stats_df = stats_df.sort_values('Mean Choppiness', ascending=False)
+        # Prepare comparison data
+        comparison_data = []
         
-        # Format numeric columns
-        for col in stats_df.columns:
-            if col != 'Pair':
-                stats_df[col] = stats_df[col].round(2)
+        for exchange_idx, exchange in enumerate(['surf', 'rollbit']):
+            with stats_tabs[exchange_idx]:
+                # Calculate statistics for each pair
+                stats_data = []
+                
+                for pair in selected_tokens:
+                    if pair in choppiness_results[exchange]:
+                        df = choppiness_results[exchange][pair]
+                        if not df.empty and 'choppiness' in df.columns:
+                            # Store data for comparison
+                            mean_chop = np.mean(df['choppiness'])
+                            
+                            # Add to comparison data
+                            comparison_item = next((item for item in comparison_data if item['Pair'] == pair), None)
+                            if comparison_item:
+                                comparison_item[f'{exchange.capitalize()} Mean'] = mean_chop
+                            else:
+                                comparison_data.append({
+                                    'Pair': pair,
+                                    f'{exchange.capitalize()} Mean': mean_chop
+                                })
+                            
+                            # Add to statistics
+                            stats_data.append({
+                                'Pair': pair,
+                                'Mean Choppiness': mean_chop,
+                                'Median Choppiness': np.median(df['choppiness']),
+                                'Min Choppiness': np.min(df['choppiness']),
+                                'Max Choppiness': np.max(df['choppiness']),
+                                'Std Dev': np.std(df['choppiness']),
+                                'Current': df['choppiness'].iloc[-1] if not df.empty else np.nan,
+                                'Volatility': np.std(df['choppiness']) / np.mean(df['choppiness']) if np.mean(df['choppiness']) > 0 else 0
+                            })
+                
+                if stats_data:
+                    stats_df = pd.DataFrame(stats_data)
+                    
+                    # Sort by mean choppiness (descending)
+                    stats_df = stats_df.sort_values('Mean Choppiness', ascending=False)
+                    
+                    # Format numeric columns
+                    for col in stats_df.columns:
+                        if col != 'Pair':
+                            stats_df[col] = stats_df[col].round(2)
+                    
+                    # Display the dataframe
+                    st.dataframe(stats_df, use_container_width=True)
+                    
+                    # Create a bar chart of average choppiness
+                    fig = px.bar(
+                        stats_df, 
+                        x='Pair', 
+                        y='Mean Choppiness',
+                        title=f'{exchange.upper()} Average 5-Minute Choppiness by Trading Pair',
+                        color='Mean Choppiness',
+                        color_continuous_scale='Viridis',
+                        height=500
+                    )
+                    
+                    fig.update_layout(
+                        xaxis_title='Trading Pair',
+                        yaxis_title='Average Choppiness',
+                        margin=dict(l=10, r=10, t=40, b=10)
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning(f"No statistical data available for {exchange.upper()}.")
         
-        # Display the dataframe
-        st.dataframe(stats_df, use_container_width=True)
-        
-        # Create a bar chart of average choppiness
-        fig = px.bar(
-            stats_df, 
-            x='Pair', 
-            y='Mean Choppiness',
-            title='Average 5-Minute Choppiness by Trading Pair',
-            color='Mean Choppiness',
-            color_continuous_scale='Viridis',
-            height=500
-        )
-        
-        fig.update_layout(
-            xaxis_title='Trading Pair',
-            yaxis_title='Average Choppiness',
-            margin=dict(l=10, r=10, t=40, b=10)
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Create a scatter plot of mean vs volatility
-        fig = px.scatter(
-            stats_df,
-            x='Mean Choppiness',
-            y='Volatility',
-            title='Choppiness Mean vs Volatility',
-            color='Mean Choppiness',
-            size='Std Dev',
-            hover_name='Pair',
-            color_continuous_scale='Viridis',
-            height=500
-        )
-        
-        fig.update_layout(
-            xaxis_title='Mean Choppiness',
-            yaxis_title='Volatility (Std/Mean)',
-            margin=dict(l=10, r=10, t=40, b=10)
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.warning("No statistical data available.")
+        # Comparison tab
+        with stats_tabs[2]:
+            if comparison_data:
+                # Create comparison DataFrame
+                comp_df = pd.DataFrame(comparison_data)
+                
+                # Add difference column if both exchanges have data
+                if 'Surf Mean' in comp_df.columns and 'Rollbit Mean' in comp_df.columns:
+                    comp_df['Difference'] = comp_df['Surf Mean'] - comp_df['Rollbit Mean']
+                    comp_df['Pct Difference'] = (comp_df['Difference'] / comp_df['Rollbit Mean'] * 100).round(2)
+                    
+                    # Sort by absolute difference
+                    comp_df = comp_df.sort_values('Difference', ascending=False)
+                    
+                    # Format numeric columns
+                    for col in comp_df.columns:
+                        if col != 'Pair':
+                            comp_df[col] = comp_df[col].round(2)
+                    
+                    # Display the dataframe
+                    st.dataframe(comp_df, use_container_width=True)
+                    
+                    # Create a bar chart showing the differences
+                    fig = px.bar(
+                        comp_df, 
+                        x='Pair', 
+                        y='Difference',
+                        title='Choppiness Difference (Surf - Rollbit)',
+                        color='Difference',
+                        color_continuous_scale='RdBu_r',  # Red for negative, Blue for positive
+                        height=500
+                    )
+                    
+                    # Add a zero line
+                    fig.add_shape(
+                        type="line",
+                        x0=-0.5,
+                        y0=0,
+                        x1=len(comp_df) - 0.5,
+                        y1=0,
+                        line=dict(
+                            color="black",
+                            width=2,
+                            dash="dash",
+                        )
+                    )
+                    
+                    fig.update_layout(
+                        xaxis_title='Trading Pair',
+                        yaxis_title='Choppiness Difference',
+                        margin=dict(l=10, r=10, t=40, b=10)
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("Insufficient data to compare exchanges.")
+            else:
+                st.warning("No comparison data available.")
 
-# Tab 4: Raw Data
-with viz_tabs[3]:
-    # Select a pair to view raw data
-    pair_to_view = st.selectbox("Select Pair for Raw Data", list(choppiness_results.keys()))
-    
-    if pair_to_view in choppiness_results:
-        raw_df = choppiness_results[pair_to_view].copy()
+    # Tab 4: Raw Data
+    with viz_tabs[3]:
+        # Create tabs for Surf and Rollbit raw data
+        raw_tabs = st.tabs(["Surf Raw Data", "Rollbit Raw Data"])
         
-        # Format columns for display
-        raw_df['timestamp'] = raw_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
-        for col in ['open', 'high', 'low', 'close', 'choppiness']:
-            if col in raw_df.columns:
-                raw_df[col] = raw_df[col].round(6)
-        
-        # Display the dataframe
-        st.dataframe(raw_df, use_container_width=True)
-    else:
-        st.warning("No raw data available for the selected pair.")
+        for idx, exchange in enumerate(['surf', 'rollbit']):
+            with raw_tabs[idx]:
+                if not choppiness_results[exchange]:
+                    st.warning(f"No raw data available for {exchange.upper()}.")
+                    continue
+                    
+                # Select a pair to view raw data
+                available_pairs = list(choppiness_results[exchange].keys())
+                if not available_pairs:
+                    st.warning(f"No data available for {exchange.upper()}.")
+                    continue
+                    
+                pair_to_view = st.selectbox(f"Select Pair for {exchange.upper()} Raw Data", 
+                                           available_pairs, key=f"raw_{exchange}")
+                
+                if pair_to_view in choppiness_results[exchange]:
+                    raw_df = choppiness_results[exchange][pair_to_view].copy()
+                    
+                    # Format columns for display
+                    raw_df['timestamp'] = raw_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                    for col in ['open', 'high', 'low', 'close', 'choppiness']:
+                        if col in raw_df.columns:
+                            raw_df[col] = raw_df[col].round(6)
+                    
+                    # Display the dataframe
+                    st.dataframe(raw_df, use_container_width=True)
+                else:
+                    st.warning(f"No raw data available for {pair_to_view} on {exchange.upper()}.")
+
+else:
+    # Initial message when no data has been loaded yet
+    st.info("Click the 'Refresh Data' button to load choppiness data for the selected tokens.")
 
 # --- DASHBOARD FOOTER ---
 st.markdown("---")
 st.markdown("""
 ### About This Dashboard
 
-This dashboard shows 5-minute choppiness data for selected trading pairs over the specified time period (default: 6 hours).
+This dashboard compares 5-minute choppiness data between Surf and Rollbit for selected trading pairs over the specified time period.
 
 **Choppiness Calculation:**
 - Choppiness measures how much price oscillates within a range
@@ -588,8 +727,8 @@ This dashboard shows 5-minute choppiness data for selected trading pairs over th
 - Lower values indicate more directional price movement
 
 **Data Refresh:**
-- Data is cached for 5 minutes to optimize performance
-- Click the "Refresh Data" button to get the latest data
+- Data is only refreshed when you click the "Refresh Data" button
+- No automatic refresh when switching between tabs or pages
 """)
 
 # Performance optimization note
@@ -597,8 +736,8 @@ st.sidebar.markdown("### Performance Note")
 st.sidebar.info(
     "This dashboard is optimized for fast loading times through:\n"
     "1. Parallel data fetching\n"
-    "2. Smart data caching\n"
-    "3. Optimized database queries\n"
-    "4. Minimal UI elements\n\n"
+    "2. Only refreshing when explicitly requested\n"
+    "3. Smart data caching\n"
+    "4. Optimized database queries\n\n"
     "If you're still experiencing performance issues, try reducing the number of selected pairs."
 )
