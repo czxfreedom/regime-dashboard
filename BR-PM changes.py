@@ -51,6 +51,16 @@ st.markdown("""
         margin: 10px 0;
         border-left: 4px solid #2e7d32;
     }
+    .confirm-button {
+        background-color: #f44336;
+        color: white;
+        font-weight: bold;
+    }
+    .action-button {
+        background-color: #1976D2;
+        color: white;
+        font-weight: bold;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -77,6 +87,8 @@ def init_session_state():
         st.session_state.backup_params = None
     if 'has_applied_recommendations' not in st.session_state:
         st.session_state.has_applied_recommendations = False
+    if 'show_confirm_dialog' not in st.session_state:
+        st.session_state.show_confirm_dialog = False
 
 # --- Utility Functions ---
 def format_percent(value):
@@ -140,8 +152,8 @@ def fetch_current_parameters():
         if not df.empty:
             df['max_leverage'] = df['max_leverage'].fillna(100)
             
-            # Ensure buffer_rate has no zeros (replace with NaN for "N/A" display)
-            df['buffer_rate'] = df['buffer_rate'].replace(0, np.nan)
+            # Note: we'll keep buffer_rate as NaN if it's actually NULL or 0
+            # This way we can distinguish between actual values and missing values
             
         return df if not df.empty else None
     except Exception as e:
@@ -169,10 +181,6 @@ def fetch_rollbit_parameters():
             # Ensure we have bust_buffer to use as buffer_rate
             if 'bust_buffer' in df.columns and 'buffer_rate' not in df.columns:
                 df['buffer_rate'] = df['bust_buffer']
-            
-            # Ensure buffer_rate has no zeros (replace with NaN for "N/A" display)
-            if 'buffer_rate' in df.columns:
-                df['buffer_rate'] = df['buffer_rate'].replace(0, np.nan)
             
         return df if not df.empty else None
     except Exception as e:
@@ -284,8 +292,8 @@ def apply_parameter_recommendations(recommendations_df):
         if not engine:
             return False, "Database connection error"
         
-        # Backup current parameters before applying changes
-        backup_current_params(recommendations_df)
+        # Create a backup of current parameters before applying changes
+        backup_params = {}
         
         # Apply buffer rate and position multiplier recommendations
         success_count = 0
@@ -294,11 +302,23 @@ def apply_parameter_recommendations(recommendations_df):
         
         for _, row in recommendations_df.iterrows():
             pair_name = row['pair_name']
+            current_buffer = row['current_buffer_rate']
+            current_position = row['current_position_multiplier']
+            
+            # Store current values for backup
+            backup_params[pair_name] = {
+                'buffer_rate': current_buffer,
+                'position_multiplier': current_position
+            }
+            
+            # Get recommended values
             buffer_rate = row['recommended_buffer_rate']
             position_multiplier = row['recommended_position_multiplier']
             
-            # Skip rows with null values
-            if check_null_or_zero(buffer_rate) or check_null_or_zero(position_multiplier):
+            # Skip rows with null values or where recommended is same as current
+            if (check_null_or_zero(buffer_rate) or 
+                pd.isna(current_buffer) or 
+                (abs(buffer_change) < 0.01 and abs(position_change) < 0.01)):
                 continue
                 
             try:
@@ -331,7 +351,8 @@ def apply_parameter_recommendations(recommendations_df):
                 error_count += 1
                 errors.append(f"Error updating {pair_name}: {str(e)}")
         
-        # Set flag indicating changes were made
+        # Save backup to session state
+        st.session_state.backup_params = backup_params
         st.session_state.has_applied_recommendations = True
         
         # Clear cache to refresh data
@@ -347,23 +368,6 @@ def apply_parameter_recommendations(recommendations_df):
             
     except Exception as e:
         return False, f"Error applying recommendations: {str(e)}"
-
-def backup_current_params(recommendations_df):
-    """Backup current parameters before applying changes"""
-    params_to_backup = {}
-    
-    for _, row in recommendations_df.iterrows():
-        pair_name = row['pair_name']
-        current_buffer = row['current_buffer_rate']
-        current_position = row['current_position_multiplier']
-        
-        params_to_backup[pair_name] = {
-            'buffer_rate': current_buffer,
-            'position_multiplier': current_position
-        }
-    
-    # Store in session state
-    st.session_state.backup_params = params_to_backup
 
 def undo_parameter_changes():
     """Undo the most recent parameter changes"""
@@ -384,7 +388,7 @@ def undo_parameter_changes():
             position_multiplier = params['position_multiplier']
             
             # Skip rows with null values
-            if check_null_or_zero(buffer_rate) or check_null_or_zero(position_multiplier):
+            if check_null_or_zero(buffer_rate) and check_null_or_zero(position_multiplier):
                 continue
                 
             try:
@@ -404,8 +408,8 @@ def undo_parameter_changes():
                     conn.execute(
                         query, 
                         {
-                            "buffer_rate": buffer_rate,
-                            "position_multiplier": position_multiplier,
+                            "buffer_rate": buffer_rate if not pd.isna(buffer_rate) else None,
+                            "position_multiplier": position_multiplier if not pd.isna(position_multiplier) else None,
                             "updated_at": datetime.now(),
                             "pair_name": pair_name
                         }
@@ -473,20 +477,29 @@ def calculate_recommended_params(current_params, current_spread, baseline_spread
     
     # Handle cases with missing data
     if current_spread is None or baseline_spread is None or baseline_spread <= 0:
-        return current_params
+        return {
+            'buffer_rate': current_params.get('buffer_rate'),
+            'position_multiplier': current_params.get('position_multiplier')
+        }
     
-    # Get current parameter values (with safety checks)
+    # Get current parameter values
     current_buffer_rate = current_params.get('buffer_rate')
-    if check_null_or_zero(current_buffer_rate):
-        current_buffer_rate = 0.01  # Default if zero or null
-        
     current_position_multiplier = current_params.get('position_multiplier')
-    if check_null_or_zero(current_position_multiplier):
-        current_position_multiplier = 1000  # Default if zero or null
-        
-    max_leverage = current_params.get('max_leverage')
-    if check_null_or_zero(max_leverage):
-        max_leverage = 100  # Default if zero or null
+    max_leverage = current_params.get('max_leverage', 100)
+    
+    # If current buffer rate is N/A or zero, return N/A for recommended buffer rate
+    if check_null_or_zero(current_buffer_rate) or pd.isna(current_buffer_rate):
+        return {
+            'buffer_rate': None,
+            'position_multiplier': current_position_multiplier
+        }
+    
+    # If current position multiplier is N/A or zero, use a default but don't recommend changes
+    if check_null_or_zero(current_position_multiplier) or pd.isna(current_position_multiplier):
+        return {
+            'buffer_rate': current_buffer_rate,
+            'position_multiplier': None
+        }
     
     # Get sensitivity parameters
     buffer_sensitivity = sensitivities.get('buffer_sensitivity', 0.5)
@@ -497,7 +510,10 @@ def calculate_recommended_params(current_params, current_spread, baseline_spread
     
     # Check if the change is significant
     if abs(spread_change_ratio - 1.0) < significant_change_threshold:
-        return current_params
+        return {
+            'buffer_rate': current_buffer_rate,
+            'position_multiplier': current_position_multiplier
+        }
     
     # ========== CORE PARAMETER ADJUSTMENT EQUATIONS ==========
     
@@ -565,12 +581,25 @@ def generate_recommendations(current_params_df, market_data_df, baselines_df, se
             
             # Calculate changes with safety checks
             buffer_change = 0
-            if not check_null_or_zero(params['buffer_rate']) and not check_null_or_zero(recommended['buffer_rate']):
+            if (not check_null_or_zero(params['buffer_rate']) and 
+                not check_null_or_zero(recommended['buffer_rate']) and
+                not pd.isna(params['buffer_rate']) and 
+                not pd.isna(recommended['buffer_rate'])):
                 buffer_change = ((recommended['buffer_rate'] - params['buffer_rate']) / params['buffer_rate']) * 100
             
             position_change = 0
-            if not check_null_or_zero(params['position_multiplier']) and not check_null_or_zero(recommended['position_multiplier']):
-                position_change = ((recommended['position_multiplier'] - params['position_multiplier']) / params['position_multiplier']) * 100
+            if (not check_null_or_zero(params['position_multiplier']) and 
+                not check_null_or_zero(recommended['position_multiplier']) and
+                not pd.isna(params['position_multiplier']) and 
+                not pd.isna(recommended['position_multiplier'])):
+                # Only show position change if the rounded values are different
+                if round(recommended['position_multiplier']) != round(params['position_multiplier']):
+                    position_change = ((recommended['position_multiplier'] - params['position_multiplier']) / params['position_multiplier']) * 100
+            
+            # Calculate spread change percentage
+            spread_change_pct = 0
+            if current_spread > 0 and baseline_spread > 0:
+                spread_change_pct = ((current_spread / baseline_spread) - 1) * 100
             
             recommendations.append({
                 'pair_name': pair,
@@ -584,6 +613,7 @@ def generate_recommendations(current_params_df, market_data_df, baselines_df, se
                 'current_spread': current_spread,
                 'baseline_spread': baseline_spread,
                 'spread_change_ratio': safe_division(current_spread, baseline_spread, 1.0),
+                'spread_change_pct': spread_change_pct,
                 'max_leverage': params['max_leverage']
             })
     
@@ -634,7 +664,7 @@ def render_complete_parameter_table(rec_df, sort_by="pair_name"):
     elif sort_by == "position_change":
         sorted_df = rec_df.sort_values("position_change", ascending=False)
     elif sort_by == "spread_change_ratio":
-        sorted_df = rec_df.sort_values("spread_change_ratio", ascending=False)
+        sorted_df = rec_df.sort_values("spread_change_pct", ascending=False)
     else:
         sorted_df = rec_df
     
@@ -658,26 +688,26 @@ def render_complete_parameter_table(rec_df, sort_by="pair_name"):
         'Type': sorted_df['token_type'],
         'Current Spread': sorted_df['current_spread'].apply(lambda x: f"{x*10000:.2f}" if not pd.isna(x) else "N/A"),
         'Baseline Spread': sorted_df['baseline_spread'].apply(lambda x: f"{x*10000:.2f}" if not pd.isna(x) else "N/A"),
-        'Spread Change': sorted_df['spread_change_ratio'].apply(
-            lambda x: f"{(x-1)*100:+.2f}%" if not pd.isna(x) else "N/A"
+        'Spread Change': sorted_df['spread_change_pct'].apply(
+            lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
         ),
         'Current Buffer': sorted_df['current_buffer_rate'].apply(
             lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"
         ),
         'Recommended Buffer': sorted_df['recommended_buffer_rate'].apply(
-            lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"
+            lambda x: f"{x*100:.2f}%" if not pd.isna(x) and not pd.isna(sorted_df['current_buffer_rate'].iloc[_]) else "N/A"
         ),
         'Buffer Change': sorted_df['buffer_change'].apply(
-            lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
+            lambda x: f"{x:+.2f}%" if not pd.isna(x) and abs(x) > 0.01 else "±0.00%"
         ),
         'Current Position': sorted_df['current_position_multiplier'].apply(
             lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
         ),
         'Recommended Position': sorted_df['recommended_position_multiplier'].apply(
-            lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
+            lambda x: f"{x:,.0f}" if not pd.isna(x) and not pd.isna(sorted_df['current_position_multiplier'].iloc[_]) else "N/A"
         ),
         'Position Change': sorted_df['position_change'].apply(
-            lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
+            lambda x: f"{x:+.2f}%" if not pd.isna(x) and abs(x) > 0.01 else "±0.00%"
         ),
         'Max Leverage': sorted_df['max_leverage'].apply(
             lambda x: f"{x:.0f}x" if not pd.isna(x) else "N/A"
@@ -704,11 +734,11 @@ def render_significant_changes_summary(rec_df):
     if rec_df is None or rec_df.empty:
         return
     
-    # Filter pairs with significant changes
+    # Filter pairs with significant changes (either buffer or position)
     significant_df = rec_df[
         (abs(rec_df['buffer_change']) > 2.0) | 
         (abs(rec_df['position_change']) > 2.0)
-    ]
+    ].copy()
     
     if significant_df.empty:
         st.info("No pairs have significant parameter changes at this time.")
@@ -725,26 +755,26 @@ def render_significant_changes_summary(rec_df):
     display_df = pd.DataFrame({
         'Pair': significant_df['pair_name'],
         'Current Spread': significant_df['current_spread'].apply(lambda x: f"{x*10000:.2f}" if not pd.isna(x) else "N/A"),
-        'Spread Change': significant_df['spread_change_ratio'].apply(
-            lambda x: f"{(x-1)*100:+.2f}%" if not pd.isna(x) else "N/A"
+        'Spread Change': significant_df['spread_change_pct'].apply(
+            lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
         ),
         'Current Buffer': significant_df['current_buffer_rate'].apply(
             lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"
         ),
         'Recommended Buffer': significant_df['recommended_buffer_rate'].apply(
-            lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"
+            lambda x: f"{x*100:.2f}%" if not pd.isna(x) and not pd.isna(significant_df['current_buffer_rate'].iloc[_]) else "N/A"
         ),
         'Buffer Change': significant_df['buffer_change'].apply(
-            lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
+            lambda x: f"{x:+.2f}%" if not pd.isna(x) and abs(x) > 0.01 else "±0.00%"
         ),
         'Current Position': significant_df['current_position_multiplier'].apply(
             lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
         ),
         'Recommended Position': significant_df['recommended_position_multiplier'].apply(
-            lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
+            lambda x: f"{x:,.0f}" if not pd.isna(x) and not pd.isna(significant_df['current_position_multiplier'].iloc[_]) else "N/A"
         ),
         'Position Change': significant_df['position_change'].apply(
-            lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
+            lambda x: f"{x:+.2f}%" if not pd.isna(x) and abs(x) > 0.01 else "±0.00%"
         ),
         'Max Leverage': significant_df['max_leverage'].apply(
             lambda x: f"{x:.0f}x" if not pd.isna(x) else "N/A"
@@ -868,10 +898,12 @@ def render_overview():
     
     - **Buffer Rate**: Percentage of the position that must be maintained as margin for safety.
       - When spreads increase, buffer rate should increase to account for higher volatility risk.
+      - When spreads decrease, buffer rate should decrease accordingly.
       - Parameter bounds: 0 to 70% of 1/max_leverage
       
     - **Position Multiplier**: Factor that determines the maximum position size per unit of margin.
       - When spreads increase, position multiplier should decrease to limit exposure.
+      - When spreads decrease, position multiplier should increase accordingly.
       - Parameter bounds: 1 to 15,000
     
     ### Parameter Adjustment Equations
@@ -979,27 +1011,19 @@ def main():
                 index=0
             )
             
-            # Add recommendation application button with confirmation dialog
+            # Add recommendation application and undo buttons
             col1, col2 = st.columns([1, 1])
             
             with col1:
-                if st.button("Apply Recommendations", use_container_width=True):
-                    # Show confirmation dialog
-                    confirm = st.warning("Are you sure you want to apply all recommendations to the database?")
-                    if st.button("Confirm Apply", key="confirm_apply"):
-                        success, message = apply_parameter_recommendations(rec_df)
-                        if success:
-                            st.success(message)
-                            # Refresh data
-                            st.cache_data.clear()
-                            st.experimental_rerun()
-                        else:
-                            st.error(message)
+                apply_button = st.button("Apply Recommendations", key="apply_button", use_container_width=True)
+                
+                if apply_button:
+                    st.session_state.show_confirm_dialog = True
             
             with col2:
-                # Add undo button (only show if recommendations have been applied)
-                if st.session_state.has_applied_recommendations:
-                    if st.button("Undo Latest Changes", use_container_width=True):
+                # Always show the Undo button if we have backup params, regardless of has_applied_recommendations flag
+                if st.session_state.backup_params:
+                    if st.button("Undo Latest Changes", key="undo_button", use_container_width=True):
                         success, message = undo_parameter_changes()
                         if success:
                             st.success(message)
@@ -1008,6 +1032,29 @@ def main():
                             st.experimental_rerun()
                         else:
                             st.error(message)
+            
+            # Show confirmation dialog if needed
+            if st.session_state.show_confirm_dialog:
+                st.warning("Are you sure you want to apply all recommendations to the database?")
+                confirm_col1, confirm_col2 = st.columns([1, 1])
+                
+                with confirm_col1:
+                    if st.button("Yes, Apply Changes", key="confirm_yes"):
+                        success, message = apply_parameter_recommendations(rec_df)
+                        if success:
+                            st.success(message)
+                            # Reset confirmation flag
+                            st.session_state.show_confirm_dialog = False
+                            # Refresh data
+                            st.cache_data.clear()
+                            st.experimental_rerun()
+                        else:
+                            st.error(message)
+                
+                with confirm_col2:
+                    if st.button("No, Cancel", key="confirm_no"):
+                        st.session_state.show_confirm_dialog = False
+                        st.experimental_rerun()
             
             # Show pairs requiring adjustment first
             render_significant_changes_summary(rec_df)
