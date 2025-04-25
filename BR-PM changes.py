@@ -1,11 +1,12 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
 from sqlalchemy import create_engine, text
 from datetime import datetime, timedelta
 import pytz
 import traceback
+import json
+import os
 
 # Page configuration
 st.set_page_config(
@@ -42,6 +43,14 @@ st.markdown("""
         margin: 10px 0;
         border-left: 4px solid #d32f2f;
     }
+    .success-message {
+        color: #2e7d32;
+        background-color: #e8f5e9;
+        padding: 10px;
+        border-radius: 5px;
+        margin: 10px 0;
+        border-left: 4px solid #2e7d32;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -60,6 +69,14 @@ def init_connection():
     except Exception as e:
         st.sidebar.error(f"Error connecting to the database: {e}")
         return None
+
+# --- Session State Management ---
+def init_session_state():
+    """Initialize session state variables"""
+    if 'backup_params' not in st.session_state:
+        st.session_state.backup_params = None
+    if 'has_applied_recommendations' not in st.session_state:
+        st.session_state.has_applied_recommendations = False
 
 # --- Utility Functions ---
 def format_percent(value):
@@ -257,6 +274,167 @@ def save_spread_baseline(pair_name, baseline_spread):
         st.error(f"Error saving baseline spread for {pair_name}: {e}\n\nDetails: {error_details}")
         return False
 
+def apply_parameter_recommendations(recommendations_df):
+    """Apply recommended parameters to the database"""
+    if recommendations_df is None or recommendations_df.empty:
+        return False, "No recommendations to apply"
+    
+    try:
+        engine = init_connection()
+        if not engine:
+            return False, "Database connection error"
+        
+        # Backup current parameters before applying changes
+        backup_current_params(recommendations_df)
+        
+        # Apply buffer rate and position multiplier recommendations
+        success_count = 0
+        error_count = 0
+        errors = []
+        
+        for _, row in recommendations_df.iterrows():
+            pair_name = row['pair_name']
+            buffer_rate = row['recommended_buffer_rate']
+            position_multiplier = row['recommended_position_multiplier']
+            
+            # Skip rows with null values
+            if check_null_or_zero(buffer_rate) or check_null_or_zero(position_multiplier):
+                continue
+                
+            try:
+                # Update query with parameter binding for security
+                query = text("""
+                UPDATE public.trade_pool_pairs
+                SET 
+                    buffer_rate = :buffer_rate,
+                    position_multiplier = :position_multiplier,
+                    updated_at = :updated_at
+                WHERE 
+                    pair_name = :pair_name
+                """)
+                
+                # Execute with parameters
+                with engine.connect() as conn:
+                    conn.execute(
+                        query, 
+                        {
+                            "buffer_rate": buffer_rate,
+                            "position_multiplier": position_multiplier,
+                            "updated_at": datetime.now(),
+                            "pair_name": pair_name
+                        }
+                    )
+                    conn.commit()
+                    
+                success_count += 1
+            except Exception as e:
+                error_count += 1
+                errors.append(f"Error updating {pair_name}: {str(e)}")
+        
+        # Set flag indicating changes were made
+        st.session_state.has_applied_recommendations = True
+        
+        # Clear cache to refresh data
+        st.cache_data.clear()
+        
+        if error_count > 0:
+            error_message = "\n".join(errors[:5])
+            if len(errors) > 5:
+                error_message += f"\n...and {len(errors) - 5} more errors"
+            return success_count > 0, f"Applied {success_count} recommendations with {error_count} errors.\n{error_message}"
+        else:
+            return True, f"Successfully applied {success_count} recommendations"
+            
+    except Exception as e:
+        return False, f"Error applying recommendations: {str(e)}"
+
+def backup_current_params(recommendations_df):
+    """Backup current parameters before applying changes"""
+    params_to_backup = {}
+    
+    for _, row in recommendations_df.iterrows():
+        pair_name = row['pair_name']
+        current_buffer = row['current_buffer_rate']
+        current_position = row['current_position_multiplier']
+        
+        params_to_backup[pair_name] = {
+            'buffer_rate': current_buffer,
+            'position_multiplier': current_position
+        }
+    
+    # Store in session state
+    st.session_state.backup_params = params_to_backup
+
+def undo_parameter_changes():
+    """Undo the most recent parameter changes"""
+    if not st.session_state.backup_params:
+        return False, "No backup parameters available to restore"
+    
+    try:
+        engine = init_connection()
+        if not engine:
+            return False, "Database connection error"
+        
+        success_count = 0
+        error_count = 0
+        errors = []
+        
+        for pair_name, params in st.session_state.backup_params.items():
+            buffer_rate = params['buffer_rate']
+            position_multiplier = params['position_multiplier']
+            
+            # Skip rows with null values
+            if check_null_or_zero(buffer_rate) or check_null_or_zero(position_multiplier):
+                continue
+                
+            try:
+                # Update query with parameter binding for security
+                query = text("""
+                UPDATE public.trade_pool_pairs
+                SET 
+                    buffer_rate = :buffer_rate,
+                    position_multiplier = :position_multiplier,
+                    updated_at = :updated_at
+                WHERE 
+                    pair_name = :pair_name
+                """)
+                
+                # Execute with parameters
+                with engine.connect() as conn:
+                    conn.execute(
+                        query, 
+                        {
+                            "buffer_rate": buffer_rate,
+                            "position_multiplier": position_multiplier,
+                            "updated_at": datetime.now(),
+                            "pair_name": pair_name
+                        }
+                    )
+                    conn.commit()
+                    
+                success_count += 1
+            except Exception as e:
+                error_count += 1
+                errors.append(f"Error restoring {pair_name}: {str(e)}")
+        
+        # Reset flags 
+        st.session_state.has_applied_recommendations = False
+        st.session_state.backup_params = None
+        
+        # Clear cache to refresh data
+        st.cache_data.clear()
+        
+        if error_count > 0:
+            error_message = "\n".join(errors[:5])
+            if len(errors) > 5:
+                error_message += f"\n...and {len(errors) - 5} more errors"
+            return success_count > 0, f"Restored {success_count} parameters with {error_count} errors.\n{error_message}"
+        else:
+            return True, f"Successfully restored {success_count} parameters to their previous values"
+            
+    except Exception as e:
+        return False, f"Error restoring parameters: {str(e)}"
+
 def reset_all_baselines(market_data_df):
     """Reset all baselines to current market spreads"""
     if market_data_df is None or market_data_df.empty:
@@ -290,7 +468,7 @@ def calculate_current_spreads(market_data):
     return current_spreads
 
 def calculate_recommended_params(current_params, current_spread, baseline_spread, 
-                                sensitivities, significant_change_threshold=0.05):
+                               sensitivities, significant_change_threshold=0.05):
     """Calculate recommended parameter values based on spread change ratio"""
     
     # Handle cases with missing data
@@ -304,7 +482,7 @@ def calculate_recommended_params(current_params, current_spread, baseline_spread
         
     current_position_multiplier = current_params.get('position_multiplier')
     if check_null_or_zero(current_position_multiplier):
-        current_position_multiplier = 1000000  # Default if zero or null
+        current_position_multiplier = 1000  # Default if zero or null
         
     max_leverage = current_params.get('max_leverage')
     if check_null_or_zero(max_leverage):
@@ -331,10 +509,13 @@ def calculate_recommended_params(current_params, current_spread, baseline_spread
     # When spreads increase, position multiplier decreases
     recommended_position_multiplier = current_position_multiplier / (spread_change_ratio ** position_sensitivity)
     
-    # Apply bounds to keep values in reasonable ranges
-    max_buffer_rate = 0.9 / max_leverage if max_leverage > 0 else 0.009
-    recommended_buffer_rate = max(0.001, min(max_buffer_rate, recommended_buffer_rate))
-    recommended_position_multiplier = max(100000, min(10000000, recommended_position_multiplier))
+    # Apply bounds based on the provided constraints
+    # Buffer rate: 0 to 70% of 1/max_leverage
+    buffer_upper_bound = 0.7 / max_leverage if max_leverage > 0 else 0.007
+    recommended_buffer_rate = max(0.0, min(buffer_upper_bound, recommended_buffer_rate))
+    
+    # Position multiplier: 1 to 15000
+    recommended_position_multiplier = max(1, min(15000, recommended_position_multiplier))
     
     return {
         'buffer_rate': recommended_buffer_rate,
@@ -402,7 +583,8 @@ def generate_recommendations(current_params_df, market_data_df, baselines_df, se
                 'position_change': position_change,
                 'current_spread': current_spread,
                 'baseline_spread': baseline_spread,
-                'spread_change_ratio': safe_division(current_spread, baseline_spread, 1.0)
+                'spread_change_ratio': safe_division(current_spread, baseline_spread, 1.0),
+                'max_leverage': params['max_leverage']
             })
     
     return pd.DataFrame(recommendations)
@@ -496,6 +678,9 @@ def render_complete_parameter_table(rec_df, sort_by="pair_name"):
         ),
         'Position Change': sorted_df['position_change'].apply(
             lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
+        ),
+        'Max Leverage': sorted_df['max_leverage'].apply(
+            lambda x: f"{x:.0f}x" if not pd.isna(x) else "N/A"
         )
     })
     
@@ -560,6 +745,9 @@ def render_significant_changes_summary(rec_df):
         ),
         'Position Change': significant_df['position_change'].apply(
             lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
+        ),
+        'Max Leverage': significant_df['max_leverage'].apply(
+            lambda x: f"{x:.0f}x" if not pd.isna(x) else "N/A"
         )
     })
     
@@ -680,9 +868,11 @@ def render_overview():
     
     - **Buffer Rate**: Percentage of the position that must be maintained as margin for safety.
       - When spreads increase, buffer rate should increase to account for higher volatility risk.
+      - Parameter bounds: 0 to 70% of 1/max_leverage
       
     - **Position Multiplier**: Factor that determines the maximum position size per unit of margin.
       - When spreads increase, position multiplier should decrease to limit exposure.
+      - Parameter bounds: 1 to 15,000
     
     ### Parameter Adjustment Equations
     
@@ -690,6 +880,13 @@ def render_overview():
     - Position Multiplier = Current Position Multiplier ÷ (Spread Change Ratio ^ Position Sensitivity)
     
     Where Spread Change Ratio = Current Spread ÷ Baseline Spread
+    
+    ### Dashboard Controls
+    
+    - **Refresh Data**: Updates current spreads and parameters from the database
+    - **Reset Baselines**: Sets current market spreads as new baselines
+    - **Apply Recommendations**: Updates database with recommended parameters
+    - **Undo Latest Changes**: Reverts parameters to values before last applied recommendations
     
     ### Methodology
     
@@ -708,15 +905,13 @@ def render_overview():
     - P(t) is the opening price
     - P(T) is the market price at close time
     - position_multiplier is the parameter we optimize
-    
-    ### Interpretation
-    
-    - Parameters with significant recommended changes may need manual adjustment
-    - Consider both market conditions and competitor settings when finalizing parameters
     """)
 
 # --- Main Application ---
 def main():
+    # Initialize session state
+    init_session_state()
+    
     st.markdown('<div class="header-style">Exchange Parameter Optimization Dashboard</div>', unsafe_allow_html=True)
 
     # Sidebar controls
@@ -784,12 +979,49 @@ def main():
                 index=0
             )
             
+            # Add recommendation application button with confirmation dialog
+            col1, col2 = st.columns([1, 1])
+            
+            with col1:
+                if st.button("Apply Recommendations", use_container_width=True):
+                    # Show confirmation dialog
+                    confirm = st.warning("Are you sure you want to apply all recommendations to the database?")
+                    if st.button("Confirm Apply", key="confirm_apply"):
+                        success, message = apply_parameter_recommendations(rec_df)
+                        if success:
+                            st.success(message)
+                            # Refresh data
+                            st.cache_data.clear()
+                            st.experimental_rerun()
+                        else:
+                            st.error(message)
+            
+            with col2:
+                # Add undo button (only show if recommendations have been applied)
+                if st.session_state.has_applied_recommendations:
+                    if st.button("Undo Latest Changes", use_container_width=True):
+                        success, message = undo_parameter_changes()
+                        if success:
+                            st.success(message)
+                            # Refresh data
+                            st.cache_data.clear()
+                            st.experimental_rerun()
+                        else:
+                            st.error(message)
+            
             # Show pairs requiring adjustment first
             render_significant_changes_summary(rec_df)
             
             # Show complete parameter comparison table
             st.markdown("### Complete Parameter Comparison Table")
             render_complete_parameter_table(rec_df, sort_by)
+            
+            # Add info about parameter constraints
+            st.markdown("""
+            ### Parameter Constraints
+            - **Buffer Rate**: Values are constrained between 0 and 70% of 1/max_leverage
+            - **Position Multiplier**: Values are constrained between 1 and 15,000
+            """)
             
         with tabs[1]:  # Rollbit Comparison
             render_rollbit_comparison(rec_df)
