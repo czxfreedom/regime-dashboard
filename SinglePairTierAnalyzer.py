@@ -224,7 +224,7 @@ class SimplifiedDepthTierAnalyzer:
         self.depth_tier_columns = [
             'price_1', 'price_2', 'price_3', 'price_4', 'price_5',
             'price_6', 'price_7', 'price_8', 'price_9', 'price_10',
-            'price_11', 'price_12', 'price_13', 'price_14', 'price_15'
+            'price_11', 'price_12', 'price_13', 'price_14', 'price_15','price_19','price_21'
         ]
 
         # Map column names to actual depth values
@@ -243,7 +243,9 @@ class SimplifiedDepthTierAnalyzer:
             'price_12': '1000k',
             'price_13': '2000k',
             'price_14': '3000k',
-            'price_15': '4000k'
+            'price_15': '4000k',
+            'price_19': '8000k',
+            'price_21':'10000k',
         }
 
         # Metrics to calculate
