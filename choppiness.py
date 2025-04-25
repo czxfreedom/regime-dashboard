@@ -302,7 +302,7 @@ def process_tick_data_into_5min_blocks(df):
             result_data.append({
                 'timestamp': block_time,
                 'choppiness': choppiness,
-                'tick_count': len(prices),
+                'num_ticks': len(prices),
                 'period': block_time.strftime('%H:%M')
             })
     
@@ -465,7 +465,7 @@ if st.session_state.choppiness_results:
                         name='Surf',
                         line=dict(color='blue', width=2),
                         hovertemplate='%{x}<br>Choppiness: %{y:.2f}<br>Ticks: %{text}',
-                        text=surf_data['tick_count']
+                        text=surf_data['num_ticks']
                     ))
                 
                 # Add Rollbit data if available
@@ -477,7 +477,7 @@ if st.session_state.choppiness_results:
                         name='Rollbit',
                         line=dict(color='red', width=2),
                         hovertemplate='%{x}<br>Choppiness: %{y:.2f}<br>Ticks: %{text}',
-                        text=rollbit_data['tick_count']
+                        text=rollbit_data['num_ticks']
                     ))
                 
                 # Add a horizontal reference line at 100 (moderate choppiness level)
@@ -622,12 +622,12 @@ if st.session_state.choppiness_results:
                             comparison_item = next((item for item in comparison_data if item['Pair'] == pair), None)
                             if comparison_item:
                                 comparison_item[f'{exchange.capitalize()} Mean'] = mean_chop
-                                comparison_item[f'{exchange.capitalize()} Ticks'] = df['tick_count'].mean()
+                                comparison_item[f'{exchange.capitalize()} Ticks'] = df['num_ticks'].mean()
                             else:
                                 comparison_data.append({
                                     'Pair': pair,
                                     f'{exchange.capitalize()} Mean': mean_chop,
-                                    f'{exchange.capitalize()} Ticks': df['tick_count'].mean()
+                                    f'{exchange.capitalize()} Ticks': df['num_ticks'].mean()
                                 })
                             
                             # Add to statistics
@@ -639,7 +639,7 @@ if st.session_state.choppiness_results:
                                 'Max Choppiness': np.max(df['choppiness']),
                                 'Std Dev': np.std(df['choppiness']),
                                 'Current': df['choppiness'].iloc[-1] if not df.empty else np.nan,
-                                'Avg Ticks/5min': df['tick_count'].mean(),
+                                'Avg Ticks/5min': df['num_ticks'].mean(),
                                 'Volatility': np.std(df['choppiness']) / np.mean(df['choppiness']) if np.mean(df['choppiness']) > 0 else 0
                             })
                 
@@ -764,7 +764,7 @@ if st.session_state.choppiness_results:
                     
                     # Format columns for display
                     raw_df['timestamp'] = raw_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
-                    for col in ['choppiness', 'tick_count']:
+                    for col in ['choppiness', 'num_ticks']:
                         if col in raw_df.columns:
                             if col == 'choppiness':
                                 raw_df[col] = raw_df[col].round(2)
