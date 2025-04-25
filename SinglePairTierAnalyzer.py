@@ -93,6 +93,16 @@ def release_conn(conn):
     if pool and conn:
         pool.putconn(conn)
 
+# Format number with commas (e.g., 1,234,567)
+def format_number(num):
+    if num is None:
+        return "N/A"
+    try:
+        # Convert to int and format with commas
+        return f"{int(float(num)):,}"
+    except:
+        return str(num)
+
 # Pre-defined pairs as a fast fallback
 PREDEFINED_PAIRS = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", 
@@ -327,16 +337,17 @@ class FastDepthTierAnalyzer:
                                           text=f"Processing {point_count} points...")
                     
                     if len(all_df) >= point_count:
-                        df = all_df.iloc[:point_count].copy()
-                        
-                        # Process each depth tier independently
+                        # Process each depth tier separately
                         tier_results = {}
                         
                         for column in self.depth_tier_columns:
-                            if column in df.columns:
-                                # Make sure each column is processed independently
-                                price_data = df[[column]].copy()
-                                metrics = self._calculate_metrics(price_data, column, point_count)
+                            # Extract price data for this tier
+                            if column in all_df.columns:
+                                # Make a clean copy of the data for this specific tier
+                                df_tier = all_df[['pair_name', column]].copy()
+                                
+                                # Calculate metrics using the correct method
+                                metrics = self._calculate_metrics(df_tier, column, point_count)
                                 if metrics:
                                     tier = self.depth_tier_values[column]
                                     tier_results[tier] = metrics
@@ -368,58 +379,49 @@ class FastDepthTierAnalyzer:
             return False
     
     def _calculate_metrics(self, df, price_col, point_count):
-        """Calculate metrics completely independently for each tier"""
+        """Calculate metrics using exactly the same method as your file"""
         try:
-            # Convert to numeric 
+            # Convert to numeric and drop any NaN values
             prices = pd.to_numeric(df[price_col], errors='coerce').dropna()
             
             if len(prices) < point_count * 0.8:  # Allow some flexibility for missing data
                 return None
+                
+            # Take only the needed number of points
+            prices = prices.iloc[:point_count].copy()
             
-            # Calculate window size based on point count
-            window = min(20, max(5, point_count // 100))
+            # Calculate mean price for ATR percentage calculation
+            mean_price = prices.mean()
             
-            # Direction changes
+            # Direction changes - exactly as in your file
             price_changes = prices.diff().dropna()
             signs = np.sign(price_changes)
-            sign_changes = (signs != signs.shift(1)).astype(int)
-            direction_changes = sign_changes.sum()
+            direction_changes = (signs.shift(1) != signs).sum()
             direction_change_pct = (direction_changes / (len(signs) - 1)) * 100 if len(signs) > 1 else 0
             
-            # Fixed choppiness calculation - completely independent for each tier
-            # Calculate choppiness using original logic
+            # Choppiness - exactly as in your file
+            window = min(20, point_count // 10)  
             diff = prices.diff().abs()
+            sum_abs_changes = diff.rolling(window, min_periods=1).sum()
+            price_range = prices.rolling(window, min_periods=1).max() - prices.rolling(window, min_periods=1).min()
             
-            # Ensure window is appropriate for the data size
-            window = min(window, len(diff) // 10) if len(diff) > 20 else 5
-            
-            # Apply rolling calculations
-            sum_abs_changes = diff.rolling(window).sum()
-            rolling_high = prices.rolling(window).max()
-            rolling_low = prices.rolling(window).min()
-            rolling_range = rolling_high - rolling_low
-            
-            # Small epsilon to prevent division by zero
+            # Avoid division by zero - add small epsilon
             epsilon = 1e-10
+            choppiness_values = 100 * sum_abs_changes / (price_range + epsilon)
             
-            # Calculate choppiness for each point where range is not zero
-            # Higher value = more choppy = better for market making
-            choppiness_series = 100 * sum_abs_changes / (rolling_range + epsilon)
+            # Cap extreme values
+            choppiness_values = np.minimum(choppiness_values, 1000)
             
-            # Now take the average, capping extreme values
-            choppiness = min(choppiness_series.mean(), 1000)
+            # Calculate mean choppiness
+            choppiness = choppiness_values.mean()
             
             # Tick ATR
             tick_atr = price_changes.abs().mean()
-            tick_atr_pct = (tick_atr / prices.mean()) * 100 if prices.mean() > 0 else 0
+            tick_atr_pct = (tick_atr / mean_price) * 100
             
-            # Trend strength
+            # Trend strength - exactly as in your file
             net_change = (prices - prices.shift(window)).abs()
-            sums = sum_abs_changes.dropna()
-            if len(sums) > 0 and sums.mean() > 0:
-                trend_strength = (net_change / (sum_abs_changes + epsilon)).dropna().mean()
-            else:
-                trend_strength = 0.5  # Default if we can't calculate
+            trend_strength = (net_change / (sum_abs_changes + epsilon)).dropna().mean()
             
             return {
                 'direction_changes': direction_change_pct,
@@ -429,7 +431,6 @@ class FastDepthTierAnalyzer:
             }
             
         except Exception as e:
-            # Don't show error to keep UI clean
             return None
     
     def _calculate_scores(self, tier_results):
@@ -556,8 +557,8 @@ def main():
             <div style="background-color: #f0f2f6; padding: 10px; border-radius: 5px; margin-bottom: 20px;">
                 <h3 style="margin: 0;">Current Market Data: {selected_pair}</h3>
                 <p style="margin: 5px 0;"><strong>UTC+8:</strong> {bid_ask_data['time']}</p>
-                <p style="margin: 5px 0;"><strong>Total Bid:</strong> {bid_ask_data['all_bid']}</p>
-                <p style="margin: 5px 0;"><strong>Total Ask:</strong> {bid_ask_data['all_ask']}</p>
+                <p style="margin: 5px 0;"><strong>Total Bid:</strong> {format_number(bid_ask_data['all_bid'])}</p>
+                <p style="margin: 5px 0;"><strong>Total Ask:</strong> {format_number(bid_ask_data['all_ask'])}</p>
             </div>
             """, unsafe_allow_html=True)
         
