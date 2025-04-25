@@ -50,15 +50,59 @@ def fetch_pairs():
         if not conn:
             return []
         
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT DISTINCT pair_name
-            FROM public.trade_pool_pairs
-            WHERE status = 1
-            ORDER BY pair_name;
-        """)
+        # Get list of partition tables for the last 48 hours
+        start_date = datetime.now() - timedelta(hours=48)
+        end_date = datetime.now()
         
-        pairs = [row[0] for row in cursor.fetchall()]
+        # Generate partition table names for this date range
+        table_names = []
+        current_date = start_date
+        
+        while current_date <= end_date:
+            table_name = f"oracle_order_book_level_price_data_partition_v3_{current_date.strftime('%Y%m%d')}"
+            table_names.append(table_name)
+            current_date += timedelta(days=1)
+        
+        # Check which tables actually exist
+        cursor = conn.cursor()
+        existing_tables = []
+        
+        for table in table_names:
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = %s
+                );
+            """, (table,))
+            
+            if cursor.fetchone()[0]:
+                existing_tables.append(table)
+        
+        if not existing_tables:
+            return []
+            
+        # Build query to find unique pairs
+        query_parts = []
+        for table in existing_tables:
+            query_part = f"""
+                SELECT DISTINCT 
+                    pair_name
+                FROM public.{table}
+                WHERE created_at >= NOW() - INTERVAL '48 hours'
+            """
+            query_parts.append(query_part)
+        
+        # Combine with UNION and add ORDER BY
+        if query_parts:
+            query = " UNION ".join(query_parts) + " ORDER BY pair_name;"
+            
+            # Execute the query
+            cursor.execute(query)
+            pairs = [row[0] for row in cursor.fetchall()]
+        else:
+            pairs = []
+        
         cursor.close()
         
         return pairs
@@ -533,12 +577,8 @@ def main():
         else:
             pair_to_analyze = st.text_input("Enter Pair (e.g., BTC/USDT)")
         
-        # Simple time option
-        hours = st.select_slider(
-            "Analysis Timeframe",
-            options=[1, 2, 6, 12, 24, 48, 72],
-            value=24
-        )
+        # Fixed 24 hours (no user selection needed)
+        hours = 24
         
         run_analysis = st.button("Run Analysis", use_container_width=True)
     
@@ -684,8 +724,7 @@ def main():
         st.info("""
         ### Quick Start
         1. Select a cryptocurrency pair from the sidebar
-        2. Set the analysis timeframe
-        3. Click "Run Analysis"
+        2. Click "Run Analysis"
         
         The tool will analyze the best liquidity depth tiers at 500, 5000, and 10000 data points.
         """)
