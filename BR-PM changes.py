@@ -128,51 +128,28 @@ def check_null_or_zero(value):
 
 @st.cache_data(ttl=600)
 def fetch_current_parameters():
-    """Fetch current parameters from the database"""
+    """Fetch current parameters from the leverage_config JSON"""
     try:
         engine = init_connection()
         if not engine:
             return None
-            
         query = """
         SELECT
             pair_name,
-            buffer_rate,
+            (leverage_config::jsonb->0->>'buffer_rate')::numeric AS buffer_rate,
             position_multiplier,
             max_leverage,
             leverage_config
         FROM
             public.trade_pool_pairs
         WHERE
-            status = 1  -- Only active pairs
+            status = 1
         ORDER BY
             pair_name
         """
-        
         df = pd.read_sql(query, engine)
-        
-        # Fill NaN values with reasonable defaults
         if not df.empty:
             df['max_leverage'] = df['max_leverage'].fillna(100)
-            
-            # Process buffer_rate from leverage_config if needed
-            for i, row in df.iterrows():
-                # If buffer_rate is null/zero and leverage_config exists
-                if (check_null_or_zero(row['buffer_rate']) or pd.isna(row['buffer_rate'])) and not pd.isna(row['leverage_config']):
-                    try:
-                        # Parse leverage_config JSON
-                        config = json.loads(row['leverage_config'])
-                        if config and isinstance(config, list) and len(config) > 0:
-                            # Get the first buffer_rate from config
-                            buffer_rate = config[0].get('buffer_rate')
-                            if buffer_rate:
-                                # Convert from string if needed
-                                if isinstance(buffer_rate, str):
-                                    buffer_rate = float(buffer_rate)
-                                df.at[i, 'buffer_rate'] = buffer_rate
-                    except Exception as e:
-                        st.warning(f"Error parsing leverage_config for {row['pair_name']}: {str(e)}")
-            
         return df if not df.empty else None
     except Exception as e:
         st.error(f"Error fetching current parameters: {e}")
