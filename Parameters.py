@@ -61,6 +61,15 @@ st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 if 'last_analysis_time' not in st.session_state:
     st.session_state.last_analysis_time = None
 
+# Helper function to ensure datetime is timezone aware
+def ensure_timezone_aware(dt, timezone=pytz.UTC):
+    """Ensure a datetime object is timezone aware"""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return timezone.localize(dt)
+    return dt
+
 # Exchange comparison class
 class ExchangeAnalyzer:
     """Specialized analyzer for comparing metrics between Surf and Rollbit"""
@@ -233,7 +242,7 @@ class ExchangeAnalyzer:
         start_time = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
         
         # Set the current analysis time
-        self.analysis_time = datetime.now()
+        self.analysis_time = ensure_timezone_aware(datetime.now())
         st.session_state.last_analysis_time = self.analysis_time
         
         st.info(f"Retrieving data from the last {hours} hours")
@@ -276,6 +285,9 @@ class ExchangeAnalyzer:
                                 
                                 # Store newest timestamp from database for this pair and exchange
                                 newest_timestamp = df['timestamp'].max()
+                                # Ensure timestamp is timezone aware
+                                newest_timestamp = ensure_timezone_aware(newest_timestamp)
+                                
                                 if coin_key not in self.newest_data_timestamps[exchange]:
                                     self.newest_data_timestamps[exchange][coin_key] = newest_timestamp
                                 
@@ -333,6 +345,10 @@ class ExchangeAnalyzer:
                     newest_timestamp = sample_timestamps.max()
                     oldest_timestamp = sample_timestamps.min()
                     
+                    # Ensure timestamps are timezone aware
+                    newest_timestamp = ensure_timezone_aware(newest_timestamp)
+                    oldest_timestamp = ensure_timezone_aware(oldest_timestamp)
+                    
                     # Calculate mean price for ATR percentage calculation
                     mean_price = sample.mean()
                     
@@ -369,7 +385,7 @@ class ExchangeAnalyzer:
                     
                     # Store both the calculation time and the time range of the data points
                     self.data_timestamps[point_count][coin_key][exchange] = {
-                        'calculation_time': datetime.now(),
+                        'calculation_time': ensure_timezone_aware(datetime.now()),
                         'newest_data_time': newest_timestamp,
                         'oldest_data_time': oldest_timestamp,
                         'time_span_seconds': (newest_timestamp - oldest_timestamp).total_seconds()
@@ -575,7 +591,8 @@ class ExchangeAnalyzer:
                     # Add timestamps if available
                     if timestamp_data:
                         df_data['Data Timestamp'] = [timestamp_data.get(coin, None) for coin in coin_data.keys()]
-                        df_data['Data Age (minutes)'] = [(datetime.now() - timestamp_data.get(coin, datetime.now())).total_seconds() / 60 
+                        current_time = ensure_timezone_aware(datetime.now())
+                        df_data['Data Age (minutes)'] = [(current_time - timestamp_data.get(coin, current_time)).total_seconds() / 60 
                                                      for coin in coin_data.keys()]
                     
                     df = pd.DataFrame(df_data)
@@ -741,9 +758,6 @@ with st.sidebar:
         
         st.info("Analysis will be performed on the most recent data points: 500, 5000, and 50000 points regardless of time span.")
         
-        # List of all available pairs
-
-        
         # Create multiselect for pairs
         selected_pairs = st.multiselect(
             "Select Pairs to Analyze",
@@ -767,7 +781,7 @@ with st.sidebar:
 
 # Display the last analysis time if available
 if st.session_state.last_analysis_time:
-    last_analysis_time_sg = st.session_state.last_analysis_time.astimezone(singapore_timezone) if st.session_state.last_analysis_time.tzinfo else pytz.utc.localize(st.session_state.last_analysis_time).astimezone(singapore_timezone)
+    last_analysis_time_sg = st.session_state.last_analysis_time.astimezone(singapore_timezone)
     st.info(f"Last Analysis Time: {last_analysis_time_sg.strftime('%Y-%m-%d %H:%M:%S')} (SGT)")
 
 # When form is submitted
@@ -811,7 +825,9 @@ if submit_button:
                                 time_span_minutes = timestamps['time_span_seconds'] / 60
                                 
                                 # Calculate age of the data in minutes
-                                data_age_minutes = (datetime.now() - newest_time).total_seconds() / 60
+                                # Ensure both datetimes are timezone-aware for comparison
+                                current_time = ensure_timezone_aware(datetime.now())
+                                data_age_minutes = (current_time - newest_time).total_seconds() / 60
                                 
                                 sol_freshness_data.append({
                                     'Exchange': exchange.upper(),
@@ -826,15 +842,12 @@ if submit_button:
                         sol_freshness_df = pd.DataFrame(sol_freshness_data)
                         
                         # Style the dataframe with colors based on data age
-                        def highlight_freshness(val):
-                            if isinstance(val, float) and 'Data Age' in val.name:
-                                if val < 1:
-                                    return 'background-color: #a0d995'  # Fresh (green)
-                                elif val < 5:
-                                    return 'background-color: #f1f1aa'  # Somewhat fresh (yellow)
-                                else:
-                                    return 'background-color: #ffc299'  # Stale (orange)
-                            return ''
+                        def highlight_freshness(s):
+                            is_age_column = s.name == 'Data Age (minutes)'
+                            return ['background-color: #a0d995' if is_age_column and v < 1 else
+                                   'background-color: #f1f1aa' if is_age_column and v < 5 else
+                                   'background-color: #ffc299' if is_age_column else
+                                   '' for v in s]
                         
                         st.write("SOL/USDT Data Freshness")
                         st.dataframe(sol_freshness_df.style.apply(highlight_freshness), use_container_width=True)
@@ -843,13 +856,15 @@ if submit_button:
                 
                 # Show a summary for all other pairs
                 freshness_summary = []
+                current_time = ensure_timezone_aware(datetime.now())
+                
                 for pair in pairs:
                     pair_key = pair.replace('/', '_')
                     for point_count in analyzer.point_counts:
                         if pair_key in analyzer.data_timestamps[point_count]:
                             for exchange, timestamps in analyzer.data_timestamps[point_count][pair_key].items():
                                 newest_time = timestamps['newest_data_time']
-                                data_age_minutes = (datetime.now() - newest_time).total_seconds() / 60
+                                data_age_minutes = (current_time - newest_time).total_seconds() / 60
                                 time_span_minutes = timestamps['time_span_seconds'] / 60
                                 
                                 freshness_summary.append({
@@ -865,15 +880,12 @@ if submit_button:
                     freshness_df = pd.DataFrame(freshness_summary)
                     
                     # Define styling function for the dataframe
-                    def color_age(val):
-                        if isinstance(val, float) and val.name == 'Data Age (minutes)':
-                            if val < 1:
-                                return 'background-color: #a0d995'  # Fresh (green)
-                            elif val < 5:
-                                return 'background-color: #f1f1aa'  # Somewhat fresh (yellow)
-                            else:
-                                return 'background-color: #ffc299'  # Stale (orange)
-                        return ''
+                    def color_age(s):
+                        is_age_column = s.name == 'Data Age (minutes)'
+                        return ['background-color: #a0d995' if is_age_column and v < 1 else
+                               'background-color: #f1f1aa' if is_age_column and v < 5 else
+                               'background-color: #ffc299' if is_age_column else
+                               '' for v in s]
                     
                     st.write("All Pairs Data Freshness")
                     st.dataframe(
@@ -938,34 +950,27 @@ if submit_button:
                             
                             if df is not None and not df.empty:
                                 # Style the DataFrame for relative scores
-                                def highlight_scores(val):
-                                    try:
-                                        if isinstance(val.name, str) and 'Score' in val.name:
-                                            if val > 130:
-                                                return 'background-color: #60b33c; color: white; font-weight: bold'
-                                            elif val > 110:
-                                                return 'background-color: #a0d995; color: black'
-                                            elif val > 90:
-                                                return 'background-color: #f1f1aa; color: black'
-                                            elif val > 70:
-                                                return 'background-color: #ffc299; color: black'
-                                            else:
-                                                return 'background-color: #ff8080; color: black; font-weight: bold'
-                                    except:
-                                        pass
-                                    return ''
+                                def highlight_scores(s):
+                                    is_score_column = isinstance(s.name, str) and 'Score' in s.name
+                                    return ['background-color: #60b33c; color: white; font-weight: bold' if is_score_column and v > 130 else
+                                           'background-color: #a0d995; color: black' if is_score_column and v > 110 else
+                                           'background-color: #f1f1aa; color: black' if is_score_column and v > 90 else
+                                           'background-color: #ffc299; color: black' if is_score_column and v > 70 else
+                                           'background-color: #ff8080; color: black; font-weight: bold' if is_score_column else
+                                           '' for v in s]
                                 
                                 # Display the data
                                 st.subheader(f"Relative Performance: {point_count} Points")
                                 
                                 # Add column with data age if available
                                 if 'Data Timestamp' in df.columns:
-                                    df['Data Age (minutes)'] = [(datetime.now() - ts).total_seconds() / 60 
+                                    current_time = ensure_timezone_aware(datetime.now())
+                                    df['Data Age (minutes)'] = [(current_time - ts).total_seconds() / 60 
                                                            if not pd.isna(ts) else None 
                                                            for ts in df['Data Timestamp']]
                                 
                                 st.dataframe(
-                                    df.style.applymap(highlight_scores),
+                                    df.style.apply(highlight_scores),
                                     height=400,
                                     use_container_width=True
                                 )
@@ -1037,15 +1042,12 @@ if submit_button:
                                                 metric_df = results['individual_rankings']['rollbit'][point_count][metric]
                                                 if not metric_df.empty:
                                                     # Style by data age if available
-                                                    def color_data_age(val):
-                                                        if isinstance(val, float) and val.name == 'Data Age (minutes)':
-                                                            if val < 1:
-                                                                return 'background-color: #a0d995'  # Fresh
-                                                            elif val < 5:
-                                                                return 'background-color: #f1f1aa'  # Somewhat fresh
-                                                            else:
-                                                                return 'background-color: #ffc299'  # Stale
-                                                        return ''
+                                                    def color_data_age(s):
+                                                        is_age_column = s.name == 'Data Age (minutes)'
+                                                        return ['background-color: #a0d995' if is_age_column and v < 1 else
+                                                               'background-color: #f1f1aa' if is_age_column and v < 5 else
+                                                               'background-color: #ffc299' if is_age_column else
+                                                               '' for v in s]
                                                     
                                                     if 'Data Age (minutes)' in metric_df.columns:
                                                         st.dataframe(metric_df.style.apply(color_data_age), height=300, use_container_width=True)
@@ -1080,15 +1082,12 @@ if submit_button:
                                                 metric_df = results['individual_rankings']['surf'][point_count][metric]
                                                 if not metric_df.empty:
                                                     # Style by data age if available
-                                                    def color_data_age(val):
-                                                        if isinstance(val, float) and val.name == 'Data Age (minutes)':
-                                                            if val < 1:
-                                                                return 'background-color: #a0d995'  # Fresh
-                                                            elif val < 5:
-                                                                return 'background-color: #f1f1aa'  # Somewhat fresh
-                                                            else:
-                                                                return 'background-color: #ffc299'  # Stale
-                                                        return ''
+                                                    def color_data_age(s):
+                                                        is_age_column = s.name == 'Data Age (minutes)'
+                                                        return ['background-color: #a0d995' if is_age_column and v < 1 else
+                                                               'background-color: #f1f1aa' if is_age_column and v < 5 else
+                                                               'background-color: #ffc299' if is_age_column else
+                                                               '' for v in s]
                                                     
                                                     if 'Data Age (minutes)' in metric_df.columns:
                                                         st.dataframe(metric_df.style.apply(color_data_age), height=300, use_container_width=True)
