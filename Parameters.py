@@ -57,19 +57,6 @@ now_utc = datetime.now(pytz.utc)
 now_sg = now_utc.astimezone(singapore_timezone)
 st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
-# Add session state for last analysis time if not exists
-if 'last_analysis_time' not in st.session_state:
-    st.session_state.last_analysis_time = None
-
-# Helper function to ensure datetime is timezone aware
-def ensure_timezone_aware(dt, timezone=pytz.UTC):
-    """Ensure a datetime object is timezone aware"""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return timezone.localize(dt)
-    return dt
-
 # Exchange comparison class
 class ExchangeAnalyzer:
     """Specialized analyzer for comparing metrics between Surf and Rollbit"""
@@ -116,12 +103,6 @@ class ExchangeAnalyzer:
         # Initialize exchange_data structure
         for metric in self.metrics:
             self.exchange_data[metric] = {point: {} for point in self.point_counts}
-        
-        # Add timestamp structure to track when data was last updated
-        self.data_timestamps = {point: {} for point in self.point_counts}
-        
-        # Add structure to track the newest data timestamp from the database
-        self.newest_data_timestamps = {exchange: {} for exchange in self.all_exchanges}
 
     def _get_partition_tables(self, conn, start_date, end_date):
         """
@@ -241,10 +222,6 @@ class ExchangeAnalyzer:
         end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         start_time = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
         
-        # Set the current analysis time
-        self.analysis_time = ensure_timezone_aware(datetime.now())
-        st.session_state.last_analysis_time = self.analysis_time
-        
         st.info(f"Retrieving data from the last {hours} hours")
         
         try:
@@ -282,15 +259,6 @@ class ExchangeAnalyzer:
                             if len(df) > 0:
                                 # Store the pair name in a way that's easier to reference later
                                 coin_key = pair.replace('/', '_')
-                                
-                                # Store newest timestamp from database for this pair and exchange
-                                newest_timestamp = df['timestamp'].max()
-                                # Ensure timestamp is timezone aware
-                                newest_timestamp = ensure_timezone_aware(newest_timestamp)
-                                
-                                if coin_key not in self.newest_data_timestamps[exchange]:
-                                    self.newest_data_timestamps[exchange][coin_key] = newest_timestamp
-                                
                                 self._process_price_data(df, 'timestamp', 'price', coin_key, exchange)
                             else:
                                 st.warning(f"No data found for {exchange.upper()}_{pair}")
@@ -312,9 +280,7 @@ class ExchangeAnalyzer:
             return {
                 'comparison_results': comparison_results,
                 'individual_rankings': individual_rankings,
-                'raw_data': self.exchange_data,
-                'newest_data_timestamps': self.newest_data_timestamps,
-                'analysis_time': self.analysis_time
+                'raw_data': self.exchange_data
             }
                 
         except Exception as e:
@@ -339,15 +305,6 @@ class ExchangeAnalyzer:
                 if len(prices) >= point_count:
                     # Use the most recent N points
                     sample = prices.iloc[-point_count:]
-                    
-                    # Get the timestamps for these points to know their time range
-                    sample_timestamps = filtered_df[timestamp_col].iloc[-point_count:]
-                    newest_timestamp = sample_timestamps.max()
-                    oldest_timestamp = sample_timestamps.min()
-                    
-                    # Ensure timestamps are timezone aware
-                    newest_timestamp = ensure_timezone_aware(newest_timestamp)
-                    oldest_timestamp = ensure_timezone_aware(oldest_timestamp)
                     
                     # Calculate mean price for ATR percentage calculation
                     mean_price = sample.mean()
@@ -378,18 +335,6 @@ class ExchangeAnalyzer:
                     self.exchange_data['choppiness'][point_count][coin_key][exchange] = choppiness
                     self.exchange_data['tick_atr_pct'][point_count][coin_key][exchange] = tick_atr_pct
                     self.exchange_data['trend_strength'][point_count][coin_key][exchange] = trend_strength
-                    
-                    # Store timestamp information for this data point
-                    if coin_key not in self.data_timestamps[point_count]:
-                        self.data_timestamps[point_count][coin_key] = {}
-                    
-                    # Store both the calculation time and the time range of the data points
-                    self.data_timestamps[point_count][coin_key][exchange] = {
-                        'calculation_time': ensure_timezone_aware(datetime.now()),
-                        'newest_data_time': newest_timestamp,
-                        'oldest_data_time': oldest_timestamp,
-                        'time_span_seconds': (newest_timestamp - oldest_timestamp).total_seconds()
-                    }
         except Exception as e:
             st.error(f"Error processing {coin_key}: {e}")
     
@@ -525,31 +470,6 @@ class ExchangeAnalyzer:
                 else:
                     row['Overall Score'] = 100  # Default to "equal" if no metrics
                 
-                # Add timestamp information for this coin
-                if coin in self.data_timestamps[point_count]:
-                    # Get the newest data point timestamps for both exchanges if available
-                    newest_times = []
-                    time_spans = []
-                    
-                    if primary_exchange in self.data_timestamps[point_count][coin]:
-                        primary_newest = self.data_timestamps[point_count][coin][primary_exchange]['newest_data_time']
-                        primary_span = self.data_timestamps[point_count][coin][primary_exchange]['time_span_seconds']
-                        newest_times.append(primary_newest)
-                        time_spans.append(primary_span)
-                    
-                    if secondary_exchange in self.data_timestamps[point_count][coin]:
-                        secondary_newest = self.data_timestamps[point_count][coin][secondary_exchange]['newest_data_time']
-                        secondary_span = self.data_timestamps[point_count][coin][secondary_exchange]['time_span_seconds']
-                        newest_times.append(secondary_newest)
-                        time_spans.append(secondary_span)
-                    
-                    if newest_times:
-                        # Use the most recent timestamp from either exchange
-                        row['Data Timestamp'] = max(newest_times)
-                        # Use the average time span
-                        if time_spans:
-                            row['Data Span (minutes)'] = sum(time_spans) / len(time_spans) / 60
-                
                 comparison_data.append(row)
             
             # Create DataFrame and sort by relative score (highest first)
@@ -572,30 +492,16 @@ class ExchangeAnalyzer:
             for metric in self.metrics:
                 # Get all coins that have data for this exchange and metric
                 coin_data = {}
-                timestamp_data = {}
-                
                 for coin, exchanges in self.exchange_data[metric][point_count].items():
                     if exchange in exchanges:
                         coin_data[coin] = exchanges[exchange]
-                        # Get timestamp info if available
-                        if coin in self.data_timestamps[point_count] and exchange in self.data_timestamps[point_count][coin]:
-                            timestamp_data[coin] = self.data_timestamps[point_count][coin][exchange]['newest_data_time']
                 
                 if coin_data:
                     # Create DataFrame
-                    df_data = {
+                    df = pd.DataFrame({
                         'Coin': [coin.replace('_', '/') for coin in coin_data.keys()],
                         'Value': list(coin_data.values())
-                    }
-                    
-                    # Add timestamps if available
-                    if timestamp_data:
-                        df_data['Data Timestamp'] = [timestamp_data.get(coin, None) for coin in coin_data.keys()]
-                        current_time = ensure_timezone_aware(datetime.now())
-                        df_data['Data Age (minutes)'] = [(current_time - timestamp_data.get(coin, current_time)).total_seconds() / 60 
-                                                     for coin in coin_data.keys()]
-                    
-                    df = pd.DataFrame(df_data)
+                    })
                     
                     # Sort based on metric (ascending or descending)
                     # For trend_strength, lower is better
@@ -650,18 +556,6 @@ class ExchangeAnalyzer:
                         row[f'{self.metric_short_names[metric]} {secondary_exchange.upper()} ({point_count})'] = self.exchange_data[metric][point_count][coin][secondary_exchange]
                     else:
                         row[f'{self.metric_short_names[metric]} {secondary_exchange.upper()} ({point_count})'] = None
-                
-                # Add timestamp information if available
-                if coin in self.data_timestamps[point_count]:
-                    if primary_exchange in self.data_timestamps[point_count][coin]:
-                        row[f'Last Data {primary_exchange.upper()} ({point_count})'] = self.data_timestamps[point_count][coin][primary_exchange]['newest_data_time']
-                    else:
-                        row[f'Last Data {primary_exchange.upper()} ({point_count})'] = None
-                        
-                    if secondary_exchange in self.data_timestamps[point_count][coin]:
-                        row[f'Last Data {secondary_exchange.upper()} ({point_count})'] = self.data_timestamps[point_count][coin][secondary_exchange]['newest_data_time']
-                    else:
-                        row[f'Last Data {secondary_exchange.upper()} ({point_count})'] = None
             
             rows.append(row)
         
@@ -671,38 +565,6 @@ class ExchangeAnalyzer:
             return comparison_df
         else:
             return None
-
-    def get_data_freshness_info(self):
-        """Get information about data freshness for display"""
-        # Create a dictionary to hold freshness information
-        freshness_info = {
-            'newest_timestamps': {},
-            'oldest_timestamps': {},
-            'time_spans': {}
-        }
-        
-        # Calculate for each point count
-        for point_count in self.point_counts:
-            newest_timestamps = {}
-            oldest_timestamps = {}
-            time_spans = {}
-            
-            for coin, exchanges in self.data_timestamps[point_count].items():
-                coin_name = coin.replace('_', '/')
-                newest_timestamps[coin_name] = {}
-                oldest_timestamps[coin_name] = {}
-                time_spans[coin_name] = {}
-                
-                for exchange, timestamps in exchanges.items():
-                    newest_timestamps[coin_name][exchange] = timestamps['newest_data_time']
-                    oldest_timestamps[coin_name][exchange] = timestamps['oldest_data_time']
-                    time_spans[coin_name][exchange] = timestamps['time_span_seconds'] / 60  # Convert to minutes
-            
-            freshness_info['newest_timestamps'][point_count] = newest_timestamps
-            freshness_info['oldest_timestamps'][point_count] = oldest_timestamps
-            freshness_info['time_spans'][point_count] = time_spans
-        
-        return freshness_info
 
 
 # Setup sidebar with simplified options
@@ -758,6 +620,9 @@ with st.sidebar:
         
         st.info("Analysis will be performed on the most recent data points: 500, 5000, and 50000 points regardless of time span.")
         
+        # List of all available pairs
+
+        
         # Create multiselect for pairs
         selected_pairs = st.multiselect(
             "Select Pairs to Analyze",
@@ -778,11 +643,6 @@ with st.sidebar:
         
         # Submit button - this should be indented at the same level as other elements in the form
         submit_button = st.form_submit_button("Analyze Exchanges")
-
-# Display the last analysis time if available
-if st.session_state.last_analysis_time:
-    last_analysis_time_sg = st.session_state.last_analysis_time.astimezone(singapore_timezone)
-    st.info(f"Last Analysis Time: {last_analysis_time_sg.strftime('%Y-%m-%d %H:%M:%S')} (SGT)")
 
 # When form is submitted
 if submit_button:
@@ -805,104 +665,6 @@ if submit_button:
             )
         
         if results:
-            # Display data freshness information
-            with st.expander("📊 Data Freshness Information", expanded=True):
-                st.subheader("Data Freshness")
-                
-                # Create a DataFrame with the timestamp information for SOL/USDT
-                sol_key = "SOL/USDT" if "SOL/USDT" in pairs else None
-                
-                if sol_key:
-                    sol_freshness_data = []
-                    for point_count in analyzer.point_counts:
-                        sol_timestamps = analyzer.data_timestamps[point_count].get('SOL_USDT', {})
-                        
-                        for exchange in ['rollbit', 'surf']:
-                            if exchange in sol_timestamps:
-                                timestamps = sol_timestamps[exchange]
-                                newest_time = timestamps['newest_data_time']
-                                oldest_time = timestamps['oldest_data_time']
-                                time_span_minutes = timestamps['time_span_seconds'] / 60
-                                
-                                # Calculate age of the data in minutes
-                                # Ensure both datetimes are timezone-aware for comparison
-                                current_time = ensure_timezone_aware(datetime.now())
-                                data_age_minutes = (current_time - newest_time).total_seconds() / 60
-                                
-                                sol_freshness_data.append({
-                                    'Exchange': exchange.upper(),
-                                    'Point Count': point_count,
-                                    'Newest Data Time': newest_time,
-                                    'Oldest Data Time': oldest_time,
-                                    'Time Span (minutes)': time_span_minutes,
-                                    'Data Age (minutes)': data_age_minutes
-                                })
-                    
-                    if sol_freshness_data:
-                        sol_freshness_df = pd.DataFrame(sol_freshness_data)
-                        
-                        # Style the dataframe with colors based on data age
-                        def highlight_freshness(s):
-                            is_age_column = s.name == 'Data Age (minutes)'
-                            return ['background-color: #a0d995' if is_age_column and v < 1 else
-                                   'background-color: #f1f1aa' if is_age_column and v < 5 else
-                                   'background-color: #ffc299' if is_age_column else
-                                   '' for v in s]
-                        
-                        st.write("SOL/USDT Data Freshness")
-                        st.dataframe(sol_freshness_df.style.apply(highlight_freshness), use_container_width=True)
-                    else:
-                        st.write("No SOL/USDT data available")
-                
-                # Show a summary for all other pairs
-                freshness_summary = []
-                current_time = ensure_timezone_aware(datetime.now())
-                
-                for pair in pairs:
-                    pair_key = pair.replace('/', '_')
-                    for point_count in analyzer.point_counts:
-                        if pair_key in analyzer.data_timestamps[point_count]:
-                            for exchange, timestamps in analyzer.data_timestamps[point_count][pair_key].items():
-                                newest_time = timestamps['newest_data_time']
-                                data_age_minutes = (current_time - newest_time).total_seconds() / 60
-                                time_span_minutes = timestamps['time_span_seconds'] / 60
-                                
-                                freshness_summary.append({
-                                    'Pair': pair,
-                                    'Exchange': exchange.upper(),
-                                    'Points': point_count,
-                                    'Last Update': newest_time,
-                                    'Data Age (minutes)': data_age_minutes,
-                                    'Time Span (minutes)': time_span_minutes
-                                })
-                
-                if freshness_summary:
-                    freshness_df = pd.DataFrame(freshness_summary)
-                    
-                    # Define styling function for the dataframe
-                    def color_age(s):
-                        is_age_column = s.name == 'Data Age (minutes)'
-                        return ['background-color: #a0d995' if is_age_column and v < 1 else
-                               'background-color: #f1f1aa' if is_age_column and v < 5 else
-                               'background-color: #ffc299' if is_age_column else
-                               '' for v in s]
-                    
-                    st.write("All Pairs Data Freshness")
-                    st.dataframe(
-                        freshness_df.sort_values(['Pair', 'Points']).style.apply(color_age),
-                        height=300,
-                        use_container_width=True
-                    )
-                    
-                    # Create a download button for the freshness data
-                    csv = freshness_df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="Download Freshness Data CSV",
-                        data=csv,
-                        file_name="data_freshness.csv",
-                        mime="text/csv"
-                    )
-            
             # Create parameter comparison table for Tab 1
             with tab1:
                 st.header("Parameter Comparison Table")
@@ -950,27 +712,27 @@ if submit_button:
                             
                             if df is not None and not df.empty:
                                 # Style the DataFrame for relative scores
-                                def highlight_scores(s):
-                                    is_score_column = isinstance(s.name, str) and 'Score' in s.name
-                                    return ['background-color: #60b33c; color: white; font-weight: bold' if is_score_column and v > 130 else
-                                           'background-color: #a0d995; color: black' if is_score_column and v > 110 else
-                                           'background-color: #f1f1aa; color: black' if is_score_column and v > 90 else
-                                           'background-color: #ffc299; color: black' if is_score_column and v > 70 else
-                                           'background-color: #ff8080; color: black; font-weight: bold' if is_score_column else
-                                           '' for v in s]
+                                def highlight_scores(val):
+                                    try:
+                                        if isinstance(val.name, str) and 'Score' in val.name:
+                                            if val > 130:
+                                                return 'background-color: #60b33c; color: white; font-weight: bold'
+                                            elif val > 110:
+                                                return 'background-color: #a0d995; color: black'
+                                            elif val > 90:
+                                                return 'background-color: #f1f1aa; color: black'
+                                            elif val > 70:
+                                                return 'background-color: #ffc299; color: black'
+                                            else:
+                                                return 'background-color: #ff8080; color: black; font-weight: bold'
+                                    except:
+                                        pass
+                                    return ''
                                 
                                 # Display the data
                                 st.subheader(f"Relative Performance: {point_count} Points")
-                                
-                                # Add column with data age if available
-                                if 'Data Timestamp' in df.columns:
-                                    current_time = ensure_timezone_aware(datetime.now())
-                                    df['Data Age (minutes)'] = [(current_time - ts).total_seconds() / 60 
-                                                           if not pd.isna(ts) else None 
-                                                           for ts in df['Data Timestamp']]
-                                
                                 st.dataframe(
-                                    df.style.apply(highlight_scores),
+                                    df.style.applymap(highlight_scores),
                                     height=400,
                                     use_container_width=True
                                 )
@@ -1041,18 +803,7 @@ if submit_button:
                                             with metric_tabs_primary[j]:
                                                 metric_df = results['individual_rankings']['rollbit'][point_count][metric]
                                                 if not metric_df.empty:
-                                                    # Style by data age if available
-                                                    def color_data_age(s):
-                                                        is_age_column = s.name == 'Data Age (minutes)'
-                                                        return ['background-color: #a0d995' if is_age_column and v < 1 else
-                                                               'background-color: #f1f1aa' if is_age_column and v < 5 else
-                                                               'background-color: #ffc299' if is_age_column else
-                                                               '' for v in s]
-                                                    
-                                                    if 'Data Age (minutes)' in metric_df.columns:
-                                                        st.dataframe(metric_df.style.apply(color_data_age), height=300, use_container_width=True)
-                                                    else:
-                                                        st.dataframe(metric_df, height=300, use_container_width=True)
+                                                    st.dataframe(metric_df, height=300, use_container_width=True)
                                                     
                                                     # Bar chart of top 10
                                                     top_10_metric = metric_df.head(10)
@@ -1081,18 +832,7 @@ if submit_button:
                                             with metric_tabs_secondary[j]:
                                                 metric_df = results['individual_rankings']['surf'][point_count][metric]
                                                 if not metric_df.empty:
-                                                    # Style by data age if available
-                                                    def color_data_age(s):
-                                                        is_age_column = s.name == 'Data Age (minutes)'
-                                                        return ['background-color: #a0d995' if is_age_column and v < 1 else
-                                                               'background-color: #f1f1aa' if is_age_column and v < 5 else
-                                                               'background-color: #ffc299' if is_age_column else
-                                                               '' for v in s]
-                                                    
-                                                    if 'Data Age (minutes)' in metric_df.columns:
-                                                        st.dataframe(metric_df.style.apply(color_data_age), height=300, use_container_width=True)
-                                                    else:
-                                                        st.dataframe(metric_df, height=300, use_container_width=True)
+                                                    st.dataframe(metric_df, height=300, use_container_width=True)
                                                     
                                                     # Bar chart of top 10
                                                     top_10_metric = metric_df.head(10)
