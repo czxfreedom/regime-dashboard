@@ -304,6 +304,8 @@ def apply_parameter_recommendations(recommendations_df):
             pair_name = row['pair_name']
             current_buffer = row['current_buffer_rate']
             current_position = row['current_position_multiplier']
+            buffer_change = row['buffer_change']
+            position_change = row['position_change']
             
             # Store current values for backup
             backup_params[pair_name] = {
@@ -316,9 +318,7 @@ def apply_parameter_recommendations(recommendations_df):
             position_multiplier = row['recommended_position_multiplier']
             
             # Skip rows with null values or where recommended is same as current
-            if (check_null_or_zero(buffer_rate) or 
-                pd.isna(current_buffer) or 
-                (abs(buffer_change) < 0.01 and abs(position_change) < 0.01)):
+            if check_null_or_zero(buffer_rate) or pd.isna(current_buffer):
                 continue
                 
             try:
@@ -694,8 +694,11 @@ def render_complete_parameter_table(rec_df, sort_by="pair_name"):
         'Current Buffer': sorted_df['current_buffer_rate'].apply(
             lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"
         ),
-        'Recommended Buffer': sorted_df['recommended_buffer_rate'].apply(
-            lambda x: f"{x*100:.2f}%" if not pd.isna(x) and not pd.isna(sorted_df['current_buffer_rate'].iloc[_]) else "N/A"
+        'Recommended Buffer': sorted_df.apply(
+            lambda row: f"{row['recommended_buffer_rate']*100:.2f}%" 
+            if not pd.isna(row['recommended_buffer_rate']) and not pd.isna(row['current_buffer_rate']) 
+            else "N/A", 
+            axis=1
         ),
         'Buffer Change': sorted_df['buffer_change'].apply(
             lambda x: f"{x:+.2f}%" if not pd.isna(x) and abs(x) > 0.01 else "±0.00%"
@@ -703,8 +706,11 @@ def render_complete_parameter_table(rec_df, sort_by="pair_name"):
         'Current Position': sorted_df['current_position_multiplier'].apply(
             lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
         ),
-        'Recommended Position': sorted_df['recommended_position_multiplier'].apply(
-            lambda x: f"{x:,.0f}" if not pd.isna(x) and not pd.isna(sorted_df['current_position_multiplier'].iloc[_]) else "N/A"
+        'Recommended Position': sorted_df.apply(
+            lambda row: f"{row['recommended_position_multiplier']:,.0f}" 
+            if not pd.isna(row['recommended_position_multiplier']) and not pd.isna(row['current_position_multiplier']) 
+            else "N/A", 
+            axis=1
         ),
         'Position Change': sorted_df['position_change'].apply(
             lambda x: f"{x:+.2f}%" if not pd.isna(x) and abs(x) > 0.01 else "±0.00%"
@@ -761,8 +767,11 @@ def render_significant_changes_summary(rec_df):
         'Current Buffer': significant_df['current_buffer_rate'].apply(
             lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"
         ),
-        'Recommended Buffer': significant_df['recommended_buffer_rate'].apply(
-            lambda x: f"{x*100:.2f}%" if not pd.isna(x) and not pd.isna(significant_df['current_buffer_rate'].iloc[_]) else "N/A"
+        'Recommended Buffer': significant_df.apply(
+            lambda row: f"{row['recommended_buffer_rate']*100:.2f}%" 
+            if not pd.isna(row['recommended_buffer_rate']) and not pd.isna(row['current_buffer_rate']) 
+            else "N/A", 
+            axis=1
         ),
         'Buffer Change': significant_df['buffer_change'].apply(
             lambda x: f"{x:+.2f}%" if not pd.isna(x) and abs(x) > 0.01 else "±0.00%"
@@ -770,8 +779,11 @@ def render_significant_changes_summary(rec_df):
         'Current Position': significant_df['current_position_multiplier'].apply(
             lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
         ),
-        'Recommended Position': significant_df['recommended_position_multiplier'].apply(
-            lambda x: f"{x:,.0f}" if not pd.isna(x) and not pd.isna(significant_df['current_position_multiplier'].iloc[_]) else "N/A"
+        'Recommended Position': significant_df.apply(
+            lambda row: f"{row['recommended_position_multiplier']:,.0f}" 
+            if not pd.isna(row['recommended_position_multiplier']) and not pd.isna(row['current_position_multiplier']) 
+            else "N/A", 
+            axis=1
         ),
         'Position Change': significant_df['position_change'].apply(
             lambda x: f"{x:+.2f}%" if not pd.isna(x) and abs(x) > 0.01 else "±0.00%"
