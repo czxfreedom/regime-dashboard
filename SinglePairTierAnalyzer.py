@@ -2,8 +2,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-import psycopg2
-from psycopg2.pool import ThreadedConnectionPool
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
+from contextlib import contextmanager
 
 # Page configuration - absolute minimum for speed
 st.set_page_config(
@@ -69,52 +70,54 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Connection pool for better performance and reliability
+# Database configuration
+DB_CONFIG = {
+    'main': {
+        'url': "postgresql://public_rw:aTJ92^kl04hllk@aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com:5432/report_dev"
+    },
+    'replication': {
+        'url': "postgresql://public_replication:866^FKC4hllk@aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com:5432/replication_report"
+    }
+}
+
+# Create database engine
 @st.cache_resource
-def get_connection_pool():
+def get_engine(use_replication=True):
+    """Create database engine
+    Args:
+        use_replication (bool): Whether to use replication database connection, default is True (use replication database)
+    Returns:
+        engine: SQLAlchemy engine
+    """
     try:
-        pool = ThreadedConnectionPool(
-            5, 20,  # min_conn, max_conn
-             host="aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com",
-                        port=5432,
-                        database="replication_report",  # Replication database
-                        user="public_replication",  # User for replication database
-                        password="866^FKC4hllk"  # Password for replication database
-        )
-        return pool
+        config = DB_CONFIG['replication' if use_replication else 'main']
+        return create_engine(config['url'], pool_size=5, max_overflow=10)
     except Exception as e:
-        st.error(f"Error creating connection pool: {e}")
+        st.error(f"Error creating database engine: {e}")
         return None
 
-# Get a connection from the pool
-def get_conn():
+@contextmanager
+def get_session(use_replication=True):
+    """Database session context manager
+    Args:
+        use_replication (bool): Whether to use replication database connection, default is True (use replication database)
+    Yields:
+        session: SQLAlchemy session
+    """
+    engine = get_engine(use_replication)
+    if not engine:
+        yield None
+        return
+        
+    Session = sessionmaker(bind=engine)
+    session = Session()
     try:
-        pool = get_connection_pool()
-        if pool:
-            return pool.getconn()
-        return None
+        yield session
     except Exception as e:
-        st.error(f"Error getting connection: {e}")
-        return None
-
-# Return a connection to the pool
-def release_conn(conn):
-    try:
-        pool = get_connection_pool()
-        if pool and conn:
-            pool.putconn(conn)
-    except Exception as e:
-        st.error(f"Error releasing connection: {e}")
-
-# Format number with commas (e.g., 1,234,567)
-def format_number(num):
-    if num is None:
-        return "N/A"
-    try:
-        # Convert to int and format with commas
-        return f"{int(float(num)):,}"
-    except:
-        return str(num)
+        st.error(f"Database error: {e}")
+        session.rollback()
+    finally:
+        session.close()
 
 # Pre-defined pairs as a fast fallback
 PREDEFINED_PAIRS = [
@@ -126,108 +129,84 @@ PREDEFINED_PAIRS = [
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def get_available_pairs():
     try:
-        # Connect to the replication database
-        conn = get_conn()
-        if not conn:
-            return PREDEFINED_PAIRS  # Fallback to predefined pairs
-
-        cursor = conn.cursor()
-
-        # Query to get active pairs
-        query = "SELECT pair_name FROM trade_pool_pairs WHERE status = 1"
-
-        cursor.execute(query)
-        pairs = [row[0] for row in cursor.fetchall()]
-
-        cursor.close()
-        release_conn(conn)
-
-        # Return sorted pairs or fallback to predefined list if empty
-        return sorted(pairs) if pairs else PREDEFINED_PAIRS
-
+        with get_session() as session:
+            if not session:
+                return PREDEFINED_PAIRS  # Fallback to predefined pairs
+            
+            query = text("SELECT pair_name FROM trade_pool_pairs WHERE status = 1")
+            result = session.execute(query)
+            pairs = [row[0] for row in result]
+            
+            # Return sorted pairs or fallback to predefined list if empty
+            return sorted(pairs) if pairs else PREDEFINED_PAIRS
+    
     except Exception as e:
         st.error(f"Error fetching available pairs: {e}")
         return PREDEFINED_PAIRS  # Fallback to predefined pairs
 
 # Get current bid/ask data
-def get_current_bid_ask(pair_name):
+def get_current_bid_ask(pair_name, use_replication=True):
     try:
-        conn = get_conn()
-        if not conn:
-            return None
-
-        cursor = conn.cursor()
-
-        # Get the most recent partition table
-        today = datetime.now().strftime("%Y%m%d")
-        table_name = f'oracle_order_book_level_price_data_partition_v3_{today}'
-
-        # Check if table exists
-        cursor.execute("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables
-                WHERE table_schema = 'public'
-                AND table_name = %s
-            );
-        """, (table_name,))
-
-        if not cursor.fetchone()[0]:
-            # Try yesterday if today doesn't exist
-            yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-            table_name = f'oracle_order_book_level_price_data_partition_v3_{yesterday}'
-
-            # Check if yesterday's table exists
-            cursor.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables
-                    WHERE table_schema = 'public'
-                    AND table_name = %s
-                );
-            """, (table_name,))
-
-            if not cursor.fetchone()[0]:
-                cursor.close()
-                release_conn(conn)
+        with get_session(use_replication=use_replication) as session:
+            if not session:
                 return None
-
-        # Use the exact SQL you provided
-        query = f"""
-        SELECT DISTINCT ON (p.pair_name)
-          p.pair_name,
-          TO_CHAR(p.utc8, 'YYYY-MM-DD HH24:MI:SS.MS') AS "UTC+8",
-          p.all_bid,
-          p.all_ask
-        FROM (
-          SELECT
-            pair_name,
-            (created_at + INTERVAL '8 hour') AS utc8,
-            all_bid,
-            all_ask
-          FROM
-            public."{table_name}"
-          WHERE
-            pair_name = %s
-        ) AS p
-        ORDER BY
-          p.pair_name ASC,
-          p.utc8 DESC
-        """
-
-        cursor.execute(query, (pair_name,))
-        result = cursor.fetchone()
-
-        cursor.close()
-        release_conn(conn)
-
-        if result:
-            return {
-                "pair": result[0],
-                "time": result[1],
-                "all_bid": result[2],
-                "all_ask": result[3]
-            }
-        return None
-
+            
+            # Get the most recent partition table
+            today = datetime.now().strftime("%Y%m%d")
+            table_name = f'oracle_order_book_level_price_data_partition_v3_{today}'
+            
+            # Check if table exists
+            check_table = text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = :table_name
+                );
+            """)
+            
+            if not session.execute(check_table, {"table_name": table_name}).scalar():
+                # Try yesterday if today doesn't exist
+                yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+                table_name = f'oracle_order_book_level_price_data_partition_v3_{yesterday}'
+                
+                # Check if yesterday's table exists
+                if not session.execute(check_table, {"table_name": table_name}).scalar():
+                    return None
+            
+            # Use the exact SQL you provided
+            query = text(f"""
+            SELECT DISTINCT ON (p.pair_name)
+              p.pair_name,
+              TO_CHAR(p.utc8, 'YYYY-MM-DD HH24:MI:SS.MS') AS "UTC+8",
+              p.all_bid,
+              p.all_ask
+            FROM (
+              SELECT
+                pair_name,
+                (created_at + INTERVAL '8 hour') AS utc8,
+                all_bid,
+                all_ask
+              FROM
+                public."{table_name}"
+              WHERE
+                pair_name = :pair_name
+            ) AS p
+            ORDER BY
+              p.pair_name ASC,
+              p.utc8 DESC
+            """)
+            
+            result = session.execute(query, {"pair_name": pair_name}).fetchone()
+            
+            if result:
+                return {
+                    "pair": result[0],
+                    "time": result[1],
+                    "all_bid": result[2],
+                    "all_ask": result[3]
+                }
+            return None
+            
     except Exception as e:
         st.error(f"Error getting bid/ask data: {e}")
         return None
@@ -286,121 +265,112 @@ class SimplifiedDepthTierAnalyzer:
         # Store results
         self.results = {point: None for point in self.point_counts}
 
-    def fetch_and_analyze(self, pair_name, hours=24, progress_bar=None):
+    def fetch_and_analyze(self, pair_name, hours=24, progress_bar=None, use_replication=True):
         """Fetch data and calculate metrics for each depth tier"""
         try:
-            # First, get all data at once with a single query
-            conn = get_conn()
-            if not conn:
-                return False
-
-            cursor = conn.cursor()
-
-            # Calculate time range
-            end_time = datetime.now()
-            start_time = end_time - timedelta(hours=hours)
-
-            # Get current day's partition table (most likely to have data)
-            table_date = datetime.now().strftime("%Y%m%d")
-            table_name = f"oracle_order_book_level_price_data_partition_v3_{table_date}"
-
-            try:
+            with get_session(use_replication=use_replication) as session:
+                if not session:
+                    return False
+                
+                # Get current day's partition table (most likely to have data)
+                today = datetime.now().strftime("%Y%m%d")
+                table_name = f"oracle_order_book_level_price_data_partition_v3_{today}"
+                
                 # Check if table exists
-                cursor.execute("""
+                check_table = text("""
                     SELECT EXISTS (
-                        SELECT FROM information_schema.tables
-                        WHERE table_schema = 'public'
-                        AND table_name = %s
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = :table_name
                     );
-                """, (table_name,))
-
-                if not cursor.fetchone()[0]:
+                """)
+                
+                if not session.execute(check_table, {"table_name": table_name}).scalar():
                     # Try yesterday if today doesn't exist
                     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
                     table_name = f"oracle_order_book_level_price_data_partition_v3_{yesterday}"
-
+                    
+                    # Check if yesterday's table exists
+                    if not session.execute(check_table, {"table_name": table_name}).scalar():
+                        return False
+                
+                # Calculate time range
+                start_time = datetime.now() - timedelta(hours=hours)
+                start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+                
                 # Fetch all data at once with a single query for the max point count
                 max_points = max(self.point_counts)
-
-                # Format time strings for query
-                start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
-
-                query = f"""
+                
+                query = text(f"""
                     SELECT
                         pair_name,
                         {', '.join(self.depth_tier_columns)}
                     FROM
-                        public.{table_name}
+                        public."{table_name}"
                     WHERE
-                        pair_name = %s
-                        AND created_at >= %s
+                        pair_name = :pair_name
+                        AND created_at >= :start_time
                     ORDER BY created_at DESC
-                    LIMIT {max_points + 1000}
-                """
-
-                # Execute query with parameters to prevent SQL injection
-                cursor.execute(query, (pair_name, start_str))
-
+                    LIMIT :limit
+                """)
+                
+                # Execute query with parameters
+                result = session.execute(
+                    query,
+                    {
+                        "pair_name": pair_name,
+                        "start_time": start_str,
+                        "limit": max_points + 1000
+                    }
+                )
+                
                 # Fetch all rows and create DataFrame
                 columns = ['pair_name'] + self.depth_tier_columns
-                all_data = cursor.fetchall()
-
+                all_data = result.fetchall()
+                
                 if not all_data or len(all_data) < min(self.point_counts):
-                    cursor.close()
-                    release_conn(conn)
                     return False
-
+                
                 # Convert to DataFrame for faster processing
                 all_df = pd.DataFrame(all_data, columns=columns)
-
-                # Close cursor and connection
-                cursor.close()
-                release_conn(conn)
-
+                
                 # Process each point count using the pre-fetched data
                 for i, point_count in enumerate(self.point_counts):
                     if progress_bar:
-                        progress_bar.progress((i / len(self.point_counts)) * 0.9 + 0.1,
+                        progress_bar.progress((i / len(self.point_counts)) * 0.9 + 0.1, 
                                           text=f"Processing {point_count} points...")
-
+                    
                     if len(all_df) >= point_count:
                         # Process each depth tier separately
                         tier_results = {}
-
+                        
                         for column in self.depth_tier_columns:
                             # Extract price data for this tier
                             if column in all_df.columns:
                                 # Make a clean copy of the data for this specific tier
                                 df_tier = all_df[['pair_name', column]].copy()
-
+                                
                                 # Calculate metrics using the correct method
                                 metrics = self._calculate_metrics(df_tier, column, point_count)
                                 if metrics:
                                     tier = self.depth_tier_values[column]
                                     tier_results[tier] = metrics
-
+                        
                         # Convert to DataFrame and sort by a primary metric
                         self.results[point_count] = self._create_results_table(tier_results)
-
+                
                 if progress_bar:
                     progress_bar.progress(1.0, text="Analysis complete!")
-
+                    
                 # Check if we got any results
                 has_results = False
                 for pc in self.point_counts:
                     if self.results[pc] is not None:
                         has_results = True
                         break
-
+                    
                 return has_results
-
-            except Exception as e:
-                st.error(f"Database query error: {e}")
-                if cursor:
-                    cursor.close()
-                release_conn(conn)
-                return False
-
+                
         except Exception as e:
             st.error(f"Error in analysis: {e}")
             return False
@@ -537,6 +507,22 @@ def create_point_count_table(analyzer, point_count):
         use_container_width=True,
         height=min(800, 100 + (len(display_df) * 35))  # Adaptive height
     )
+
+# Format number with commas (e.g., 1,234,567)
+def format_number(num):
+    """格式化数字显示，添加千位分隔符
+    Args:
+        num: 要格式化的数字
+    Returns:
+        str: 格式化后的字符串
+    """
+    if num is None:
+        return "N/A"
+    try:
+        # Convert to int and format with commas
+        return f"{int(float(num)):,}"
+    except:
+        return str(num)
 
 def main():
     # Main layout - super streamlined
