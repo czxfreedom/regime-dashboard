@@ -26,7 +26,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Database connection with explicit transaction handling
+# Database connection with proper transaction management
 @st.cache_resource
 def init_connection():
     try:
@@ -35,10 +35,10 @@ def init_connection():
             port=5432,
             database="report_dev",
             user="public_rw",
-            password="aTJ92^kl04hllk",
-            # Add autocommit to avoid transaction issues
-            autocommit=True  
+            password="aTJ92^kl04hllk"
         )
+        # Set isolation level to avoid transaction issues
+        conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
         return conn
     except Exception as e:
         st.error(f"Error connecting to database: {e}")
@@ -72,7 +72,7 @@ def fetch_pairs():
         existing_tables = []
         
         for table in table_names:
-            # Use try-except for each query to avoid transaction abort issues
+            # Use try-except for each query
             try:
                 cursor.execute("""
                     SELECT EXISTS (
@@ -270,91 +270,75 @@ class FastDepthTierAnalyzer:
             query = " UNION ALL ".join(query_parts)
             query += " ORDER BY utc8 DESC"
             
-            # Process each point count, using different connections for each
-            # to avoid transaction conflicts
-            results = {}
+            # Check if we can get enough data for the smallest point count
+            min_point = min(self.point_counts)
+            point_query = f"{query} LIMIT {min_point + 100}"  # Add buffer for NAs
             
-            # First check if we can get enough data for the largest point count
-            max_point = max(self.point_counts)
-            point_query = f"{query} LIMIT {max_point + 1000}"  # Add buffer for NAs
-            
-            # Use a fresh connection for the check
-            check_conn = init_connection()
-            all_data_df = pd.read_sql_query(point_query, check_conn)
-            check_conn.close()
-            
-            # Exit early if we don't have enough data for at least one point count
-            if len(all_data_df) < min(self.point_counts):
-                if progress_bar:
-                    progress_bar.progress(1.0, text=f"Not enough data points for analysis")
+            # Try to get data for the minimum points
+            try:
+                min_df = pd.read_sql_query(point_query, conn)
+                if len(min_df) < min_point:
+                    if progress_bar:
+                        progress_bar.progress(1.0, text=f"Not enough data points for analysis")
+                    return False
+            except Exception as e:
+                st.error(f"Error checking data availability: {e}")
                 return False
             
-            # Determine which point counts we can analyze
-            valid_point_counts = [p for p in self.point_counts if len(all_data_df) >= p]
+            # Process each point count
+            for i, point_count in enumerate(self.point_counts):
+                if progress_bar:
+                    progress_bar.progress((i / len(self.point_counts)) * 0.9 + 0.1, 
+                                        text=f"Processing {point_count} points...")
+                
+                # Create point-specific query with appropriate limit
+                point_query = f"{query} LIMIT {point_count * 2}"  # Get double to account for NAs
+                
+                try:
+                    # Create a new connection for this query
+                    point_conn = init_connection()
+                    if not point_conn:
+                        continue
+                        
+                    # Fetch data
+                    df = pd.read_sql_query(point_query, point_conn)
+                    point_conn.close()
+                    
+                    if len(df) < point_count:
+                        continue
+                    
+                    # Process each depth tier
+                    tier_results = {}
+                    
+                    for column in self.depth_tier_columns:
+                        if column in df.columns and not df[column].isna().all():
+                            # Calculate metrics for this tier
+                            metrics = self._calculate_metrics(df, column, point_count)
+                            if metrics:
+                                tier = self.depth_tier_values[column]
+                                tier_results[tier] = metrics
+                    
+                    # Calculate scores and ranking
+                    self.results[point_count] = self._calculate_scores(tier_results)
+                    
+                except Exception as e:
+                    st.error(f"Error processing {point_count} points: {e}")
             
-            # Process each valid point count with its own connection
-            with ThreadPoolExecutor() as executor:
-                futures = {}
+            if progress_bar:
+                progress_bar.progress(1.0, text="Analysis complete!")
                 
-                for point_count in valid_point_counts:
-                    # Start asynchronous processing for each point count
-                    futures[point_count] = executor.submit(
-                        self._process_point_count_with_new_connection, query, point_count, pair_name
-                    )
-                
-                # Update progress as each future completes
-                completed = 0
-                total = len(futures)
-                
-                for point_count, future in futures.items():
-                    self.results[point_count] = future.result()
-                    completed += 1
-                    if progress_bar:
-                        progress_bar.progress(0.1 + (0.9 * completed / total), 
-                                             text=f"Processed {point_count} points ({completed}/{total})")
-            
-            cursor.close()
-            return True
+            # Check if we got any results
+            has_results = False
+            for pc in self.point_counts:
+                if self.results[pc] is not None:
+                    has_results = True
+                    break
+                    
+            return has_results
             
         except Exception as e:
             st.error(f"Error in analysis: {e}")
             return False
-    
-    def _process_point_count_with_new_connection(self, query, point_count, pair_name):
-        """Process a specific point count with a new connection to avoid transaction conflicts"""
-        try:
-            # Create a new connection for this point count
-            conn = init_connection()
-            if not conn:
-                return None
-            
-            # Add limit to the query for this specific point count
-            point_query = f"{query} LIMIT {point_count * 2}"  # Get double to account for NAs
-            
-            # Fetch data for this point count
-            df = pd.read_sql_query(point_query, conn)
-            conn.close()
-            
-            if len(df) < point_count:
-                return None
-            
-            # Process each depth tier
-            tier_results = {}
-            
-            for column in self.depth_tier_columns:
-                if column in df.columns and not df[column].isna().all():
-                    # Calculate metrics for this tier
-                    metrics = self._calculate_metrics(df, column, point_count)
-                    if metrics:
-                        tier = self.depth_tier_values[column]
-                        tier_results[tier] = metrics
-            
-            # Calculate scores and ranking
-            return self._calculate_scores(tier_results)
-        
-        except Exception as e:
-            st.error(f"Error processing {point_count} points: {e}")
-            return None
     
     def _calculate_metrics(self, df, price_col, point_count):
         """Calculate all metrics for a specific tier and point count"""
