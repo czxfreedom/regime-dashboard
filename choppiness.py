@@ -1,4 +1,4 @@
-# Save this as pages/07_Choppiness_Analysis.py in your Streamlit app folder
+# Save this as pages/07_Tick_Choppiness_Analysis.py in your Streamlit app folder
 
 import streamlit as st
 import pandas as pd
@@ -17,7 +17,7 @@ warnings.filterwarnings('ignore')
 
 # Page configuration - optimized for speed
 st.set_page_config(
-    page_title="5-Minute Choppiness Analysis",
+    page_title="Tick-Based Choppiness Analysis",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="collapsed"  # Start with sidebar collapsed for speed
@@ -65,6 +65,9 @@ PAIRS_TO_ANALYZE = [
     "TST/USDT", "ETH/USDT"
 ]
 
+# Constant for number of ticks in a 5-min period (500ms per tick * 600 = 5 min)
+TICKS_PER_5MIN = 600
+
 # --- DB CONNECTION OPTIMIZATION ---
 @st.cache_resource
 def get_db_connection():
@@ -83,8 +86,8 @@ def get_db_connection():
         return None
 
 # --- APP TITLE AND DESCRIPTION ---
-st.title("5-Minute Choppiness Analysis: Surf vs Rollbit")
-st.subheader("Last 6 Hours Comparison")
+st.title("Tick-Based 5-Minute Choppiness Analysis: Surf vs Rollbit")
+st.subheader("Market Microstructure Analysis")
 
 # Get the current time in Singapore timezone
 sg_timezone = pytz.timezone('Asia/Singapore')
@@ -153,7 +156,7 @@ def build_query_for_partition_tables(tables, pair_name, start_time, end_time, ex
         query = f"""
         SELECT 
             pair_name,
-            created_at + INTERVAL '8 hour' AS timestamp_sg, 
+            created_at + INTERVAL '8 hour' AS timestamp, 
             final_price AS price
         FROM 
             public.{table}
@@ -167,7 +170,7 @@ def build_query_for_partition_tables(tables, pair_name, start_time, end_time, ex
         union_parts.append(query)
     
     # Join with UNION and add ORDER BY at the end
-    complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp_sg"
+    complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp"
     return complete_query
 
 @st.cache_data(ttl=600)  # Cache for 10 minutes, only refresh when explicitly requested
@@ -205,8 +208,7 @@ def fetch_price_data(pair_name, hours=6, exchange='surf'):
         if df.empty:
             return None
             
-        # Rename and convert columns
-        df = df.rename(columns={'timestamp_sg': 'timestamp'})
+        # Convert columns
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df['price'] = pd.to_numeric(df['price'], errors='coerce')
         
@@ -219,11 +221,21 @@ def fetch_price_data(pair_name, hours=6, exchange='surf'):
         st.error(f"Error fetching {exchange} data for {pair_name}: {e}")
         return None
 
-def calculate_choppiness(price_series, window=20):
-    """Calculate choppiness exactly as in the DepthAnalyzer code"""
+def calculate_tick_choppiness(price_series, window=20):
+    """
+    Calculate choppiness using raw tick data, identical to the depth analyzer method.
+    This measures microstructure choppiness.
+    
+    Args:
+        price_series: Series of price ticks
+        window: Window size for the rolling calculation
+        
+    Returns:
+        Choppiness value (single float)
+    """
     try:
-        if price_series.empty:
-            return pd.Series()
+        if len(price_series) < window:
+            return None
             
         # Calculate absolute price changes
         diff = price_series.diff().abs()
@@ -244,38 +256,66 @@ def calculate_choppiness(price_series, window=20):
         # Cap extreme values
         choppiness_values = np.minimum(choppiness_values, 1000)
         
-        return choppiness_values
+        # Return the mean choppiness
+        return choppiness_values.mean()
         
     except Exception as e:
-        st.error(f"Error calculating choppiness: {e}")
-        return pd.Series()
-
-def calculate_5min_choppiness(df):
-    """Calculate choppiness for 5-minute intervals"""
-    try:
-        if df is None or df.empty:
-            return None
-            
-        # Resample to 5-minute intervals
-        resampled = df.resample('5min', on='timestamp').agg({'price': 'ohlc'})
-        
-        # Flatten the multi-index columns
-        resampled.columns = ['open', 'high', 'low', 'close']
-        
-        # Calculate choppiness on the close prices
-        resampled['choppiness'] = calculate_choppiness(resampled['close'], window=12)  # Adjusted window for 5-min data
-        
-        # Reset index to get timestamp as a column
-        resampled = resampled.reset_index()
-        
-        # Add period label column for easy reference
-        resampled['period'] = resampled['timestamp'].dt.strftime('%H:%M')
-        
-        return resampled
-        
-    except Exception as e:
-        st.error(f"Error calculating 5-minute choppiness: {e}")
+        print(f"Error calculating choppiness: {e}")
         return None
+
+def process_tick_data_into_5min_blocks(df):
+    """
+    Process raw tick data into 5-minute blocks and calculate choppiness for each block.
+    Uses the same window approach as DepthAnalyzer on each 5-minute chunk.
+    
+    Args:
+        df: DataFrame with timestamp and price columns
+        
+    Returns:
+        DataFrame with 5-minute blocks and their choppiness values
+    """
+    if df is None or df.empty:
+        return None
+    
+    # Round down timestamps to 5-minute intervals to create blocks
+    df['block_time'] = df['timestamp'].dt.floor('5min')
+    
+    # Group data by 5-minute blocks
+    groups = df.groupby('block_time')
+    
+    # Calculate choppiness for each 5-minute block
+    result_data = []
+    
+    for block_time, group in groups:
+        # Get price data for this block
+        prices = group['price']
+        
+        # Only process if we have enough data points
+        if len(prices) >= 20:  # Minimum needed for meaningful choppiness calculation
+            # Calculate window size (same approach as DepthAnalyzer)
+            window = min(20, len(prices) // 10)
+            
+            # Calculate choppiness
+            choppiness = calculate_tick_choppiness(prices, window)
+            
+            # Store result
+            result_data.append({
+                'timestamp': block_time,
+                'choppiness': choppiness,
+                'tick_count': len(prices),
+                'period': block_time.strftime('%H:%M')
+            })
+    
+    if not result_data:
+        return None
+        
+    # Create DataFrame from results
+    result_df = pd.DataFrame(result_data)
+    
+    # Sort by timestamp
+    result_df = result_df.sort_values('timestamp')
+    
+    return result_df
 
 # --- PARALLEL DATA FETCHING ---
 def fetch_data_for_multiple_pairs(pairs, hours=6):
@@ -318,12 +358,12 @@ def fetch_data_for_multiple_pairs(pairs, hours=6):
     return results
 
 def calculate_choppiness_for_all_pairs(pair_data):
-    """Calculate choppiness for all pairs with data"""
+    """Calculate tick-based 5-minute choppiness for all pairs with data"""
     choppiness_results = {'surf': {}, 'rollbit': {}}
     
     for exchange in ['surf', 'rollbit']:
         for pair, df in pair_data[exchange].items():
-            choppiness_df = calculate_5min_choppiness(df)
+            choppiness_df = process_tick_data_into_5min_blocks(df)
             if choppiness_df is not None and not choppiness_df.empty:
                 choppiness_results[exchange][pair] = choppiness_df
     
@@ -421,9 +461,11 @@ if st.session_state.choppiness_results:
                     fig.add_trace(go.Scatter(
                         x=surf_data['timestamp'],
                         y=surf_data['choppiness'],
-                        mode='lines',
+                        mode='lines+markers',
                         name='Surf',
-                        line=dict(color='blue', width=2)
+                        line=dict(color='blue', width=2),
+                        hovertemplate='%{x}<br>Choppiness: %{y:.2f}<br>Ticks: %{text}',
+                        text=surf_data['tick_count']
                     ))
                 
                 # Add Rollbit data if available
@@ -431,14 +473,30 @@ if st.session_state.choppiness_results:
                     fig.add_trace(go.Scatter(
                         x=rollbit_data['timestamp'],
                         y=rollbit_data['choppiness'],
-                        mode='lines',
+                        mode='lines+markers',
                         name='Rollbit',
-                        line=dict(color='red', width=2)
+                        line=dict(color='red', width=2),
+                        hovertemplate='%{x}<br>Choppiness: %{y:.2f}<br>Ticks: %{text}',
+                        text=rollbit_data['tick_count']
                     ))
+                
+                # Add a horizontal reference line at 100 (moderate choppiness level)
+                fig.add_shape(
+                    type="line",
+                    x0=surf_data['timestamp'].min() if surf_data is not None else rollbit_data['timestamp'].min(),
+                    x1=surf_data['timestamp'].max() if surf_data is not None else rollbit_data['timestamp'].max(),
+                    y0=100,
+                    y1=100,
+                    line=dict(
+                        color="gray",
+                        width=1,
+                        dash="dash",
+                    )
+                )
                 
                 # Improve layout
                 fig.update_layout(
-                    title=f"{pair} - 5-Minute Choppiness Comparison",
+                    title=f"{pair} - 5-Minute Tick-Based Choppiness Comparison",
                     xaxis_title="Time (Singapore)",
                     yaxis_title="Choppiness",
                     margin=dict(l=10, r=10, t=40, b=10),
@@ -479,7 +537,7 @@ if st.session_state.choppiness_results:
                 # Collect all periods first to ensure consistent x-axis
                 all_timestamp_periods = set()
                 for pair, df in choppiness_results[exchange].items():
-                    all_timestamp_periods.update(df['timestamp'].dt.floor('5min'))
+                    all_timestamp_periods.update(df['timestamp'])
                 
                 # Sort periods chronologically 
                 all_timestamp_periods = sorted(all_timestamp_periods)
@@ -490,7 +548,7 @@ if st.session_state.choppiness_results:
                 # Collect data for heatmap
                 for pair, df in choppiness_results[exchange].items():
                     for _, row in df.iterrows():
-                        period_key = row['timestamp'].floor('5min')
+                        period_key = row['timestamp']
                         if period_key in period_mapping:
                             all_periods.append(period_mapping[period_key])
                             all_pairs.append(pair)
@@ -527,7 +585,7 @@ if st.session_state.choppiness_results:
                     )
                     
                     fig.update_layout(
-                        title=f"{exchange.upper()} Choppiness Heatmap - 5-Minute Intervals",
+                        title=f"{exchange.upper()} Tick-Based Choppiness Heatmap - 5-Minute Intervals",
                         margin=dict(l=10, r=10, t=40, b=10),
                         coloraxis_colorbar=dict(
                             title="Choppiness",
@@ -564,10 +622,12 @@ if st.session_state.choppiness_results:
                             comparison_item = next((item for item in comparison_data if item['Pair'] == pair), None)
                             if comparison_item:
                                 comparison_item[f'{exchange.capitalize()} Mean'] = mean_chop
+                                comparison_item[f'{exchange.capitalize()} Ticks'] = df['tick_count'].mean()
                             else:
                                 comparison_data.append({
                                     'Pair': pair,
-                                    f'{exchange.capitalize()} Mean': mean_chop
+                                    f'{exchange.capitalize()} Mean': mean_chop,
+                                    f'{exchange.capitalize()} Ticks': df['tick_count'].mean()
                                 })
                             
                             # Add to statistics
@@ -579,6 +639,7 @@ if st.session_state.choppiness_results:
                                 'Max Choppiness': np.max(df['choppiness']),
                                 'Std Dev': np.std(df['choppiness']),
                                 'Current': df['choppiness'].iloc[-1] if not df.empty else np.nan,
+                                'Avg Ticks/5min': df['tick_count'].mean(),
                                 'Volatility': np.std(df['choppiness']) / np.mean(df['choppiness']) if np.mean(df['choppiness']) > 0 else 0
                             })
                 
@@ -601,7 +662,7 @@ if st.session_state.choppiness_results:
                         stats_df, 
                         x='Pair', 
                         y='Mean Choppiness',
-                        title=f'{exchange.upper()} Average 5-Minute Choppiness by Trading Pair',
+                        title=f'{exchange.upper()} Average 5-Minute Tick-Based Choppiness',
                         color='Mean Choppiness',
                         color_continuous_scale='Viridis',
                         height=500
@@ -633,8 +694,10 @@ if st.session_state.choppiness_results:
                     
                     # Format numeric columns
                     for col in comp_df.columns:
-                        if col != 'Pair':
+                        if col != 'Pair' and 'Ticks' not in col:
                             comp_df[col] = comp_df[col].round(2)
+                        elif 'Ticks' in col:
+                            comp_df[col] = comp_df[col].round(0)
                     
                     # Display the dataframe
                     st.dataframe(comp_df, use_container_width=True)
@@ -701,9 +764,12 @@ if st.session_state.choppiness_results:
                     
                     # Format columns for display
                     raw_df['timestamp'] = raw_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
-                    for col in ['open', 'high', 'low', 'close', 'choppiness']:
+                    for col in ['choppiness', 'tick_count']:
                         if col in raw_df.columns:
-                            raw_df[col] = raw_df[col].round(6)
+                            if col == 'choppiness':
+                                raw_df[col] = raw_df[col].round(2)
+                            else:
+                                raw_df[col] = raw_df[col].round(0).astype(int)
                     
                     # Display the dataframe
                     st.dataframe(raw_df, use_container_width=True)
@@ -712,19 +778,26 @@ if st.session_state.choppiness_results:
 
 else:
     # Initial message when no data has been loaded yet
-    st.info("Click the 'Refresh Data' button to load choppiness data for the selected tokens.")
+    st.info("Click the 'Refresh Data' button to load tick-based choppiness data for the selected tokens.")
 
 # --- DASHBOARD FOOTER ---
 st.markdown("---")
 st.markdown("""
 ### About This Dashboard
 
-This dashboard compares 5-minute choppiness data between Surf and Rollbit for selected trading pairs over the specified time period.
+This dashboard analyzes tick-by-tick data in 5-minute blocks to calculate market microstructure choppiness for Surf and Rollbit exchanges.
 
-**Choppiness Calculation:**
-- Choppiness measures how much price oscillates within a range
-- Higher values indicate more chaotic price action (more changes relative to the overall range)
-- Lower values indicate more directional price movement
+**Tick-Based Choppiness Calculation:**
+- Analyzes approximately 600 ticks per 5-minute period (each tick is ~500ms data)
+- Calculates choppiness using the formula: 100 * (sum of absolute changes) / (price range)
+- Higher values indicate more oscillation relative to the overall range
+- Lower values indicate more directional movement
+
+**Key Implementation Details:**
+- Uses identical calculation method as the Depth Analyzer
+- Processes raw tick data without resampling
+- Window size proportional to number of available ticks
+- Shows true microstructure choppiness
 
 **Data Refresh:**
 - Data is only refreshed when you click the "Refresh Data" button
