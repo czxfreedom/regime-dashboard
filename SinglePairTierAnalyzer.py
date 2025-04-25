@@ -240,10 +240,9 @@ class FastDepthTierAnalyzer:
                     if len(all_df) >= point_count:
                         df = all_df.iloc[:point_count].copy()
                         
-                        # Process each depth tier in parallel
+                        # Process each depth tier
                         tier_results = {}
                         
-                        # Process in a batch for speed
                         for column in self.depth_tier_columns:
                             metrics = self._calculate_metrics(df, column, point_count)
                             if metrics:
@@ -277,7 +276,7 @@ class FastDepthTierAnalyzer:
             return False
     
     def _calculate_metrics(self, df, price_col, point_count):
-        """Optimized calculation of metrics"""
+        """Calculate metrics using the original methodology but fixing the choppiness issue"""
         try:
             # Convert to numeric 
             prices = pd.to_numeric(df[price_col], errors='coerce').dropna()
@@ -285,6 +284,9 @@ class FastDepthTierAnalyzer:
             if len(prices) < point_count * 0.8:  # Allow some flexibility for missing data
                 return None
                 
+            # Take the last n points for analysis
+            prices = prices.iloc[-int(point_count * 0.8):]
+            
             # Calculate metrics with vectorized operations for speed
             mean_price = prices.mean()
             
@@ -294,31 +296,46 @@ class FastDepthTierAnalyzer:
             direction_changes = (signs.shift(1) != signs).sum()
             direction_change_pct = (direction_changes / (len(signs) - 1)) * 100 if len(signs) > 1 else 0
             
-            # Smaller window for faster calculation
-            window = min(10, max(2, point_count // 50))
+            # Fix for choppiness calculation - ensure it's calculated per tier
+            # Use appropriate window size based on point count
+            window = min(20, max(5, point_count // 50))
             
-            # Choppiness index (vectorized)
+            # Calculate absolute price changes
             diff = prices.diff().abs()
-            sum_abs_changes = diff.rolling(window, min_periods=1).sum()
-            price_range = prices.rolling(window, min_periods=1).max() - prices.rolling(window, min_periods=1).min()
-            choppiness = (100 * sum_abs_changes / (price_range + 1e-10)).mean()
             
-            # Tick ATR (vectorized)
+            # Calculate sum of absolute changes over the window
+            sum_abs_changes = diff.rolling(window, min_periods=1).sum()
+            
+            # Calculate price range (high - low) over the window
+            price_range = prices.rolling(window, min_periods=1).max() - prices.rolling(window, min_periods=1).min()
+            
+            # Add small epsilon to prevent division by zero
+            epsilon = 1e-10
+            
+            # Calculate choppiness as ratio of sum of changes to range, multiplied by 100
+            # Higher values indicate more choppy price action (better for market making)
+            chop_values = 100 * sum_abs_changes / (price_range + epsilon)
+            
+            # Take mean and cap extreme values
+            choppiness = min(chop_values.mean(), 1000)
+            
+            # Tick ATR
             tick_atr = price_changes.abs().mean()
             tick_atr_pct = (tick_atr / mean_price) * 100
             
-            # Trend strength (vectorized)
+            # Trend strength - use original calculation
             net_change = (prices - prices.shift(window)).abs()
-            trend_strength = (net_change / (sum_abs_changes + 1e-10)).dropna().mean()
+            trend_strength = (net_change / (sum_abs_changes + epsilon)).dropna().mean()
             
             return {
                 'direction_changes': direction_change_pct,
-                'choppiness': min(choppiness, 1000),  # Cap extreme values
+                'choppiness': choppiness,
                 'tick_atr_pct': tick_atr_pct,
                 'trend_strength': trend_strength
             }
             
         except Exception as e:
+            # Don't display error to keep UI clean
             return None
     
     def _calculate_scores(self, tier_results):
@@ -343,6 +360,7 @@ class FastDepthTierAnalyzer:
                 min_val = df[metric].min()
                 max_val = df[metric].max()
                 
+                # Skip if min equals max (no variation)
                 if min_val == max_val:
                     df[f'{display_name} Score'] = 100
                     continue
