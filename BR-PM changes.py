@@ -807,7 +807,7 @@ def add_rollbit_comparison(rec_df, rollbit_df):
     
     return rec_df
 
-def render_complete_parameter_table(rec_df, sort_by="pair_name"):
+def render_complete_parameter_table(rec_df, sort_by="Pair Name"):
     """Render the complete parameter table with all pairs including z-score"""
     
     if rec_df is None or rec_df.empty:
@@ -827,7 +827,12 @@ def render_complete_parameter_table(rec_df, sort_by="pair_name"):
     sort_column = sort_map.get(sort_by, "pair_name")
     
     if sort_column == "z_score":
-        sorted_df = rec_df.sort_values(sort_column, key=abs, ascending=False)
+        # Handle NaN values in z_score before sorting
+        sorted_df = rec_df.copy()
+        # Fill NaN z_scores with 0 for sorting purposes only
+        sorted_df['z_score_for_sort'] = sorted_df['z_score'].fillna(0).abs()
+        sorted_df = sorted_df.sort_values('z_score_for_sort', ascending=False)
+        sorted_df = sorted_df.drop('z_score_for_sort', axis=1)
     elif sort_column in ["buffer_change", "position_change", "spread_change_pct"]:
         sorted_df = rec_df.sort_values(sort_column, ascending=False)
     else:
@@ -924,18 +929,19 @@ def render_significant_changes_summary(rec_df):
         return
     
     # Filter pairs with significant changes (either buffer or position)
+    # Use a safer approach for z-score filtering that handles NaN values
     significant_df = rec_df[
         (abs(rec_df['buffer_change']) > 2.0) | 
         (abs(rec_df['position_change']) > 2.0) |
-        (rec_df['z_score'].abs() > 1.5)  # Add Z-score filter
+        (rec_df['z_score'].notna() & (rec_df['z_score'].abs() > 1.5))  # Safely handle z-score
     ].copy()
     
     if significant_df.empty:
         st.info("No pairs have significant parameter changes at this time.")
         return
     
-    # Sort by Z-score (absolute value) as primary sort
-    significant_df['abs_z_score'] = significant_df['z_score'].abs()
+    # Sort by Z-score (absolute value) as primary sort, safely handling NaN values
+    significant_df['abs_z_score'] = significant_df['z_score'].fillna(0).abs()
     significant_df = significant_df.sort_values('abs_z_score', ascending=False)
     
     # Display summary table
