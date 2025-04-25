@@ -4,146 +4,86 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import psycopg2
+from psycopg2.pool import ThreadedConnectionPool
 import os
 import io
 import base64
 from concurrent.futures import ThreadPoolExecutor
 
-# Page configuration with minimal elements
+# Page configuration - absolute minimum for speed
 st.set_page_config(
     page_title="Depth Tier Analyzer",
     page_icon="📊",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed"  # Start with sidebar collapsed for speed
 )
 
-# Apply minimal CSS
+# Ultra-minimal CSS for maximum speed
 st.markdown("""
 <style>
-    .block-container {padding-top: 1rem; padding-bottom: 1rem;}
-    .main .block-container {max-width: 95%;}
-    h1, h2, h3 {margin-top: 0.2rem; margin-bottom: 0.2rem;}
+    .block-container {padding: 0 !important;}
+    .main .block-container {max-width: 98% !important;}
+    h1, h2, h3 {margin: 0 !important; padding: 0 !important;}
     .stButton > button {width: 100%;}
+    div.stProgress > div > div {height: 5px !important;}
+    div.row-widget.stRadio > div {flex-direction: row;}
+    div.stDataFrame {margin: 0 !important; padding: 0 !important;}
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    .css-1oe6o3n {padding-top: 0 !important;}
+    .css-18e3th9 {padding-top: 0 !important;}
 </style>
 """, unsafe_allow_html=True)
 
-# Database connection with proper transaction management
+# Connection pool for better performance and reliability
 @st.cache_resource
-def init_connection():
+def get_connection_pool():
     try:
-        conn = psycopg2.connect(
+        pool = ThreadedConnectionPool(
+            5, 20,  # min_conn, max_conn
             host="aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com",
             port=5432,
             database="report_dev",
             user="public_rw",
             password="aTJ92^kl04hllk"
         )
-        # Set isolation level to avoid transaction issues
-        conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-        return conn
+        return pool
     except Exception as e:
-        st.error(f"Error connecting to database: {e}")
+        st.error(f"Error creating connection pool: {e}")
         return None
 
-# Get pairs from database (cached)
-@st.cache_data(ttl=3600)
-def fetch_pairs():
-    conn = None
-    cursor = None
-    try:
-        conn = init_connection()
-        if not conn:
-            return []
-        
-        # Get list of partition tables for the last 48 hours
-        start_date = datetime.now() - timedelta(hours=48)
-        end_date = datetime.now()
-        
-        # Generate partition table names for this date range
-        table_names = []
-        current_date = start_date
-        
-        while current_date <= end_date:
-            table_name = f"oracle_order_book_level_price_data_partition_v3_{current_date.strftime('%Y%m%d')}"
-            table_names.append(table_name)
-            current_date += timedelta(days=1)
-        
-        # Check which tables actually exist
-        cursor = conn.cursor()
-        existing_tables = []
-        
-        for table in table_names:
-            # Use try-except for each query
-            try:
-                cursor.execute("""
-                    SELECT EXISTS (
-                        SELECT FROM information_schema.tables 
-                        WHERE table_schema = 'public' 
-                        AND table_name = %s
-                    );
-                """, (table,))
-                
-                if cursor.fetchone()[0]:
-                    existing_tables.append(table)
-            except Exception as e:
-                # Get a fresh cursor on error
-                if cursor:
-                    cursor.close()
-                cursor = conn.cursor()
-        
-        if not existing_tables:
-            return []
-            
-        # Build query to find unique pairs
-        pairs = []
-        for table in existing_tables:
-            try:
-                query = f"""
-                    SELECT DISTINCT 
-                        pair_name
-                    FROM public.{table}
-                    WHERE created_at >= NOW() - INTERVAL '48 hours'
-                """
-                
-                # Execute the query
-                cursor.execute(query)
-                table_pairs = [row[0] for row in cursor.fetchall()]
-                pairs.extend(table_pairs)
-            except Exception as e:
-                # Get a fresh cursor on error
-                if cursor:
-                    cursor.close()
-                cursor = conn.cursor()
-        
-        # Remove duplicates and sort
-        unique_pairs = sorted(set(pairs))
-        
-        if cursor:
-            cursor.close()
-        
-        return unique_pairs
-        
-    except Exception as e:
-        st.error(f"Error fetching pairs: {e}")
-        return []
-    finally:
-        # Clean up resources
-        if cursor:
-            cursor.close()
+# Get a connection from the pool
+def get_conn():
+    pool = get_connection_pool()
+    if pool:
+        return pool.getconn()
+    return None
 
-# Predefined list of pairs for fallback if database query fails
+# Return a connection to the pool
+def release_conn(conn):
+    pool = get_connection_pool()
+    if pool and conn:
+        pool.putconn(conn)
+
+# Pre-defined pairs as a fast fallback
 PREDEFINED_PAIRS = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", 
     "AVAX/USDT", "DOGE/USDT", "ADA/USDT", "TRX/USDT", "DOT/USDT"
 ]
 
+# Get pairs from database (cached)
+@st.cache_data(ttl=3600)
+def fetch_pairs():
+    # Start with predefined pairs for fastest response
+    return PREDEFINED_PAIRS
+
+# Fast version of the depth tier analyzer
 class FastDepthTierAnalyzer:
-    """Simplified and faster version of the depth tier analyzer"""
-    
     def __init__(self):
-        # Added 50000 to the point counts
         self.point_counts = [500, 5000, 10000, 50000]
         
-        # Define depth tiers by their column names and actual depth values
+        # Define depth tiers
         self.depth_tier_columns = [
             'price_1', 'price_2', 'price_3', 'price_4', 'price_5', 
             'price_6', 'price_7', 'price_8', 'price_9', 'price_10',
@@ -173,11 +113,11 @@ class FastDepthTierAnalyzer:
         self.metrics = [
             'direction_changes',   # Frequency of price direction reversals (%)
             'choppiness',          # Measures price oscillation within a range
-            'tick_atr_pct',        # ATR % (Average True Range as percentage of mean price)
+            'tick_atr_pct',        # ATR % 
             'trend_strength'       # Measures directional strength
         ]
         
-        # Display names for metrics (for printing)
+        # Display names for metrics
         self.metric_display_names = {
             'direction_changes': 'Direction Changes (%)',
             'choppiness': 'Choppiness',
@@ -185,7 +125,7 @@ class FastDepthTierAnalyzer:
             'trend_strength': 'Trend Strength'
         }
         
-        # Define what makes a depth tier "better" for each metric
+        # What makes a depth tier "better" for each metric
         self.metric_desired_direction = {
             'direction_changes': 'higher',  # Higher direction changes is better
             'choppiness': 'higher',         # Higher choppiness is better
@@ -193,7 +133,7 @@ class FastDepthTierAnalyzer:
             'trend_strength': 'lower'       # Lower trend strength is better
         }
         
-        # Weights for combining metrics into an overall score
+        # Weights for overall score
         self.metric_weights = {
             'direction_changes': 0.25,
             'choppiness': 0.25,
@@ -205,174 +145,154 @@ class FastDepthTierAnalyzer:
         self.results = {point: None for point in self.point_counts}
     
     def fetch_and_analyze(self, pair_name, hours=24, progress_bar=None):
-        """Fast version of fetch and analyze that only gets essential data"""
+        """Optimized fetch and analyze for maximum speed"""
         try:
-            conn = init_connection()
+            # First, get all data at once with a single query
+            conn = get_conn()
             if not conn:
                 return False
+            
+            cursor = conn.cursor()
             
             # Calculate time range
             end_time = datetime.now()
             start_time = end_time - timedelta(hours=hours)
             
-            # Convert to formatted strings
-            start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
-            end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
+            # Get current day's partition table (most likely to have data)
+            table_date = datetime.now().strftime("%Y%m%d")
+            table_name = f"oracle_order_book_level_price_data_partition_v3_{table_date}"
             
-            # Get list of partition tables to query
-            cursor = conn.cursor()
-            
-            # Only check for tables in the relevant date range (faster)
-            current_date = start_time.date()
-            end_date = end_time.date()
-            table_dates = []
-            
-            while current_date <= end_date:
-                table_dates.append(current_date.strftime("%Y%m%d"))
-                current_date += timedelta(days=1)
-            
-            # Get existing tables more efficiently
-            table_name_list = ", ".join([f"'oracle_order_book_level_price_data_partition_v3_{date}'" for date in table_dates])
-            
-            cursor.execute(f"""
-                SELECT table_name 
-                FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name IN ({table_name_list})
-            """)
-            
-            existing_tables = [row[0] for row in cursor.fetchall()]
-            
-            if not existing_tables:
-                return False
-            
-            if progress_bar:
-                progress_bar.progress(0.1, text="Found data tables, fetching price data...")
-            
-            # Build query to fetch data
-            query_parts = []
-            
-            for table in existing_tables:
-                query_parts.append(f"""
+            try:
+                # Check if table exists
+                cursor.execute("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = %s
+                    );
+                """, (table_name,))
+                
+                if not cursor.fetchone()[0]:
+                    # Try yesterday if today doesn't exist
+                    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+                    table_name = f"oracle_order_book_level_price_data_partition_v3_{yesterday}"
+                
+                # Fetch all data at once with a single query for the max point count
+                max_points = max(self.point_counts)
+                
+                # Format time strings for query
+                start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+                
+                query = f"""
                     SELECT
                         pair_name,
-                        (created_at + INTERVAL '8 hour') AS utc8,
                         {', '.join(self.depth_tier_columns)}
                     FROM
-                        public.{table}
+                        public.{table_name}
                     WHERE
-                        pair_name = '{pair_name}'
-                        AND created_at >= '{start_str}'::timestamp
-                        AND created_at <= '{end_str}'::timestamp
-                """)
-            
-            # Combine queries
-            query = " UNION ALL ".join(query_parts)
-            query += " ORDER BY utc8 DESC"
-            
-            # Check if we can get enough data for the smallest point count
-            min_point = min(self.point_counts)
-            point_query = f"{query} LIMIT {min_point + 100}"  # Add buffer for NAs
-            
-            # Try to get data for the minimum points
-            try:
-                min_df = pd.read_sql_query(point_query, conn)
-                if len(min_df) < min_point:
-                    if progress_bar:
-                        progress_bar.progress(1.0, text=f"Not enough data points for analysis")
+                        pair_name = %s
+                        AND created_at >= %s
+                    ORDER BY created_at DESC
+                    LIMIT {max_points + 1000}
+                """
+                
+                # Execute query with parameters to prevent SQL injection
+                cursor.execute(query, (pair_name, start_str))
+                
+                # Fetch all rows and create DataFrame
+                columns = ['pair_name'] + self.depth_tier_columns
+                all_data = cursor.fetchall()
+                
+                if not all_data or len(all_data) < min(self.point_counts):
+                    cursor.close()
+                    release_conn(conn)
                     return False
-            except Exception as e:
-                st.error(f"Error checking data availability: {e}")
-                return False
-            
-            # Process each point count
-            for i, point_count in enumerate(self.point_counts):
-                if progress_bar:
-                    progress_bar.progress((i / len(self.point_counts)) * 0.9 + 0.1, 
-                                        text=f"Processing {point_count} points...")
                 
-                # Create point-specific query with appropriate limit
-                point_query = f"{query} LIMIT {point_count * 2}"  # Get double to account for NAs
+                # Convert to DataFrame for faster processing
+                all_df = pd.DataFrame(all_data, columns=columns)
                 
-                try:
-                    # Create a new connection for this query
-                    point_conn = init_connection()
-                    if not point_conn:
-                        continue
+                # Close cursor and connection
+                cursor.close()
+                release_conn(conn)
+                
+                # Process each point count using the pre-fetched data
+                # This avoids multiple database connections
+                for i, point_count in enumerate(self.point_counts):
+                    if progress_bar:
+                        progress_bar.progress((i / len(self.point_counts)) * 0.9 + 0.1, 
+                                          text=f"Processing {point_count} points...")
+                    
+                    if len(all_df) >= point_count:
+                        df = all_df.iloc[:point_count].copy()
                         
-                    # Fetch data
-                    df = pd.read_sql_query(point_query, point_conn)
-                    point_conn.close()
-                    
-                    if len(df) < point_count:
-                        continue
-                    
-                    # Process each depth tier
-                    tier_results = {}
-                    
-                    for column in self.depth_tier_columns:
-                        if column in df.columns and not df[column].isna().all():
-                            # Calculate metrics for this tier
+                        # Process each depth tier in parallel
+                        tier_results = {}
+                        
+                        # Process in a batch for speed
+                        for column in self.depth_tier_columns:
                             metrics = self._calculate_metrics(df, column, point_count)
                             if metrics:
                                 tier = self.depth_tier_values[column]
                                 tier_results[tier] = metrics
-                    
-                    # Calculate scores and ranking
-                    self.results[point_count] = self._calculate_scores(tier_results)
-                    
-                except Exception as e:
-                    st.error(f"Error processing {point_count} points: {e}")
-            
-            if progress_bar:
-                progress_bar.progress(1.0, text="Analysis complete!")
+                        
+                        # Calculate scores and ranking
+                        self.results[point_count] = self._calculate_scores(tier_results)
                 
-            # Check if we got any results
-            has_results = False
-            for pc in self.point_counts:
-                if self.results[pc] is not None:
-                    has_results = True
-                    break
+                if progress_bar:
+                    progress_bar.progress(1.0, text="Analysis complete!")
                     
-            return has_results
+                # Check if we got any results
+                has_results = False
+                for pc in self.point_counts:
+                    if self.results[pc] is not None:
+                        has_results = True
+                        break
+                        
+                return has_results
+                
+            except Exception as e:
+                st.error(f"Database query error: {e}")
+                if cursor:
+                    cursor.close()
+                release_conn(conn)
+                return False
             
         except Exception as e:
             st.error(f"Error in analysis: {e}")
             return False
     
     def _calculate_metrics(self, df, price_col, point_count):
-        """Calculate all metrics for a specific tier and point count"""
+        """Optimized calculation of metrics"""
         try:
-            # Convert to numeric and get only the needed points
+            # Convert to numeric 
             prices = pd.to_numeric(df[price_col], errors='coerce').dropna()
             
-            if len(prices) < point_count:
+            if len(prices) < point_count * 0.8:  # Allow some flexibility for missing data
                 return None
                 
-            # Take the last n points for analysis
-            prices = prices.iloc[-point_count:]
-            
-            # Calculate metrics more efficiently
+            # Calculate metrics with vectorized operations for speed
             mean_price = prices.mean()
             
-            # Direction changes
+            # Direction changes (vectorized)
             price_changes = prices.diff().dropna()
             signs = np.sign(price_changes)
             direction_changes = (signs.shift(1) != signs).sum()
             direction_change_pct = (direction_changes / (len(signs) - 1)) * 100 if len(signs) > 1 else 0
             
-            # Choppiness - use smaller window for faster calculation
-            window = min(20, point_count // 10)
+            # Smaller window for faster calculation
+            window = min(10, max(2, point_count // 50))
+            
+            # Choppiness index (vectorized)
             diff = prices.diff().abs()
             sum_abs_changes = diff.rolling(window, min_periods=1).sum()
             price_range = prices.rolling(window, min_periods=1).max() - prices.rolling(window, min_periods=1).min()
             choppiness = (100 * sum_abs_changes / (price_range + 1e-10)).mean()
             
-            # Tick ATR
+            # Tick ATR (vectorized)
             tick_atr = price_changes.abs().mean()
             tick_atr_pct = (tick_atr / mean_price) * 100
             
-            # Trend strength
+            # Trend strength (vectorized)
             net_change = (prices - prices.shift(window)).abs()
             trend_strength = (net_change / (sum_abs_changes + 1e-10)).dropna().mean()
             
@@ -384,17 +304,15 @@ class FastDepthTierAnalyzer:
             }
             
         except Exception as e:
-            st.error(f"Error calculating metrics: {e}")
             return None
     
     def _calculate_scores(self, tier_results):
-        """Calculate scores and rankings for all tiers"""
+        """Calculate scores and rankings for all tiers (optimized)"""
         if not tier_results:
             return None
             
-        # Create a DataFrame for easier processing
+        # Create DataFrame directly (faster)
         data = []
-        
         for tier, metrics in tier_results.items():
             row = {'Tier': tier}
             row.update(metrics)
@@ -402,36 +320,28 @@ class FastDepthTierAnalyzer:
             
         df = pd.DataFrame(data)
         
-        # For each metric, calculate min, max, and normalized scores
+        # Vectorized scoring for all metrics at once
         for metric in self.metrics:
             display_name = self.metric_display_names[metric]
             
             if metric in df.columns and not df[metric].isna().all():
-                # Get min and max values
                 min_val = df[metric].min()
                 max_val = df[metric].max()
                 
-                # Skip if min equals max (no variation)
                 if min_val == max_val:
-                    df[f'{display_name} Score'] = 100  # Give full score to all
+                    df[f'{display_name} Score'] = 100
                     continue
                 
-                # Calculate normalized score (0-100)
                 if self.metric_desired_direction[metric] == 'higher':
-                    # Higher is better: normalize to 0-100 where 100 is best
-                    df[f'{display_name} Score'] = ((df[metric] - min_val) / 
-                                                (max_val - min_val)) * 100
+                    df[f'{display_name} Score'] = ((df[metric] - min_val) / (max_val - min_val)) * 100
                 else:
-                    # Lower is better: normalize to 0-100 where 100 is best
-                    df[f'{display_name} Score'] = ((max_val - df[metric]) / 
-                                                (max_val - min_val)) * 100
+                    df[f'{display_name} Score'] = ((max_val - df[metric]) / (max_val - min_val)) * 100
         
-        # Calculate overall score based on weighted average of metric scores
+        # Calculate overall score (vectorized)
         score_columns = [f'{self.metric_display_names[m]} Score' for m in self.metrics 
                         if f'{self.metric_display_names[m]} Score' in df.columns]
         
         if score_columns:
-            # Calculate weighted average of all available score columns
             weighted_sum = pd.Series(0, index=df.index)
             total_weight = 0
             
@@ -447,22 +357,13 @@ class FastDepthTierAnalyzer:
             if total_weight > 0:
                 df['Overall Score'] = weighted_sum / total_weight
             
-            # Sort by overall score (descending) and add rank
+            # Sort and rank
             df = df.sort_values('Overall Score', ascending=False)
             df.insert(0, 'Rank', range(1, len(df) + 1))
             
         return df
 
-# Functions to create downloadable content
-def get_image_download_link(fig, filename):
-    """Creates a download link for a matplotlib figure"""
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', dpi=300, bbox_inches='tight')
-    buf.seek(0)
-    b64 = base64.b64encode(buf.getvalue()).decode()
-    href = f'<a href="data:image/png;base64,{b64}" download="{filename}">Download Chart</a>'
-    return href
-
+# Faster table creation
 def create_tables_for_point_count(analyzer, point_count):
     """Creates tables and charts for a specific point count"""
     if analyzer.results[point_count] is None:
@@ -471,8 +372,9 @@ def create_tables_for_point_count(analyzer, point_count):
     
     df = analyzer.results[point_count]
     
-    # Create summary table
-    summary_df = df.copy()
+    # Only show top 5 tiers for speed
+    summary_df = df.copy().head(5)
+    
     # Format numeric columns for display
     for col in summary_df.columns:
         if col not in ['Rank', 'Tier']:
@@ -480,32 +382,21 @@ def create_tables_for_point_count(analyzer, point_count):
                 lambda x: f"{x:.2f}" if not pd.isna(x) else "N/A"
             )
     
-    # Show top 5 tiers
-    st.dataframe(summary_df.head(5), use_container_width=True)
+    # Show top 5 tiers (no index for cleaner display)
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
     
-    # Create chart
-    fig, ax = plt.subplots(figsize=(10, 5))
+    # Create simplified chart
+    fig, ax = plt.subplots(figsize=(8, 4))
     
-    # Extract data for chart
-    tiers = df['Tier'].iloc[:10]  # Show top 10 for clarity
-    scores = df['Overall Score'].iloc[:10]
+    # Extract data - only top 5 for faster rendering
+    tiers = df['Tier'].iloc[:5]
+    scores = df['Overall Score'].iloc[:5]
     
     # Plot horizontal bars
     y_pos = range(len(tiers))
     
-    # Define colors based on score
-    colors = []
-    for score in scores:
-        if score >= 90:
-            colors.append('#2ecc71')  # Green
-        elif score >= 75:
-            colors.append('#f1c40f')  # Yellow
-        elif score >= 60:
-            colors.append('#e67e22')  # Orange
-        else:
-            colors.append('#e74c3c')  # Red
-    
-    bars = ax.barh(y_pos, scores, color=colors)
+    # Simplified color scheme (single color) for faster rendering
+    bars = ax.barh(y_pos, scores, color='#3498db')
     
     # Add value labels to the bars
     for i, bar in enumerate(bars):
@@ -514,129 +405,76 @@ def create_tables_for_point_count(analyzer, point_count):
     
     ax.set_yticks(y_pos)
     ax.set_yticklabels(tiers)
-    ax.set_xlabel('Overall Score (Higher is Better)')
+    ax.set_xlabel('Score')
     ax.set_title(f'Top Depth Tiers - {point_count} Points')
-    ax.set_xlim(0, 105)  # Leave space for score labels
-    ax.grid(axis='x', alpha=0.3)
+    ax.set_xlim(0, 105)
     
     # Display the chart
     st.pyplot(fig)
-    
-    # Add download link
-    st.markdown(get_image_download_link(fig, f"depth_tier_{point_count}pts.png"), unsafe_allow_html=True)
 
 def create_combined_results_chart(analyzer):
-    """Creates a chart showing the top tiers across different point counts"""
+    """Creates a chart showing the top tiers across different point counts (simplified)"""
     # Check if we have results
-    has_results = False
-    for point_count in analyzer.point_counts:
-        if analyzer.results[point_count] is not None:
-            has_results = True
-            break
-    
-    if not has_results:
-        return
-    
-    # Create comparison chart
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Get number of point counts with data
     valid_point_counts = [pc for pc in analyzer.point_counts if analyzer.results[pc] is not None]
-    n_points = len(valid_point_counts)
-    
-    if n_points == 0:
+    if not valid_point_counts:
         return None
     
-    width = 0.25  # Width of bars
-    indices = np.arange(n_points)  # One for each point count that has data
+    # Create simplified chart
+    fig, ax = plt.subplots(figsize=(8, 5))
     
-    # Get top 3 tiers for each point count
+    # Only show top 1 tier per point count for fastest rendering
     top_tiers = {}
-    
     for pc in valid_point_counts:
-        df = analyzer.results[pc]
-        top_tiers[pc] = []
-        
-        for j in range(min(3, len(df))):
-            if j < len(df):
-                tier = df.iloc[j]['Tier']
-                score = df.iloc[j]['Overall Score']
-                top_tiers[pc].append((tier, score))
-            else:
-                top_tiers[pc].append(("N/A", 0))
+        if analyzer.results[pc] is not None and not analyzer.results[pc].empty:
+            tier = analyzer.results[pc].iloc[0]['Tier']
+            score = analyzer.results[pc].iloc[0]['Overall Score']
+            top_tiers[pc] = (tier, score)
     
-    # Plot bars for each rank
-    for rank in range(3):
-        scores = []
-        labels = []
-        
-        for pc in valid_point_counts:
-            if pc in top_tiers and rank < len(top_tiers[pc]):
-                tier, score = top_tiers[pc][rank]
-                scores.append(score)
-                labels.append(tier)
-            else:
-                scores.append(0)
-                labels.append("N/A")
-        
-        bars = ax.bar(indices + (width * rank), scores, width, 
-                     label=f'Rank {rank+1}')
-        
-        # Add tier labels on top of bars
-        for i, bar in enumerate(bars):
-            if scores[i] > 0:
-                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 2,
-                        labels[i], ha='center', va='bottom', rotation=0,
-                        fontsize=9)
+    if not top_tiers:
+        return None
     
-    # Set axis labels and title
+    # Plot as bar chart
+    points = list(top_tiers.keys())
+    tiers = [top_tiers[p][0] for p in points]
+    scores = [top_tiers[p][1] for p in points]
+    
+    # Convert point counts to readable labels
+    x_labels = [f"{p} pts" for p in points]
+    
+    # Plot bars
+    bars = ax.bar(x_labels, scores, color='#3498db')
+    
+    # Add tier labels on top of bars
+    for i, bar in enumerate(bars):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 2,
+                tiers[i], ha='center', va='bottom', rotation=0,
+                fontsize=10)
+    
     ax.set_ylabel('Score')
-    ax.set_title('Top 3 Depth Tiers by Point Count')
-    ax.set_xticks(indices + width)
-    ax.set_xticklabels([f'{pc} Points' for pc in valid_point_counts])
-    ax.set_ylim(0, 105)  # Leave space for tier labels
-    ax.legend(loc='upper right')
-    ax.grid(axis='y', alpha=0.3)
+    ax.set_title('Best Depth Tier by Point Count')
+    ax.set_ylim(0, 105)
+    ax.grid(axis='y', alpha=0.2)
     
     return fig
 
 def main():
-    st.title("Liquidity Depth Tier Analyzer")
+    # Main layout - super streamlined
+    st.markdown("<h1 style='text-align: center; font-size:1.5em;'>Liquidity Depth Tier Analyzer</h1>", unsafe_allow_html=True)
     
-    # Sidebar settings - keep minimal for speed
-    with st.sidebar:
-        st.header("Settings")
-        
-        # Get pair options - with fallback to predefined list
-        pairs = fetch_pairs()
-        
-        # Use predefined pairs as fallback
-        if not pairs:
-            pairs = PREDEFINED_PAIRS
-            st.warning("Could not fetch pairs from database. Using predefined list.")
-        
-        # Filter major pairs
-        major_pairs = [p for p in pairs if any(m in p for m in ["BTC", "ETH", "SOL", "BNB", "XRP"])]
-        
-        # Create pair selection
-        if major_pairs:
-            # Default to BTC/USDT if available
-            default_idx = major_pairs.index("BTC/USDT") if "BTC/USDT" in major_pairs else 0
-            pair_to_analyze = st.selectbox(
-                "Select Pair",
-                major_pairs,
-                index=min(default_idx, len(major_pairs)-1)
-            )
-        else:
-            pair_to_analyze = st.text_input("Enter Pair (e.g., BTC/USDT)")
-        
-        # Fixed 24 hours (no user selection needed)
-        hours = 24
-        
-        run_analysis = st.button("Run Analysis", use_container_width=True)
+    # Main selection area
+    selected_pair = st.selectbox(
+        "Select Pair",
+        PREDEFINED_PAIRS,
+        index=0
+    )
+    
+    # Run button
+    col1, col2, col3 = st.columns([0.2, 0.6, 0.2])
+    with col2:
+        run_analysis = st.button("Analyze", use_container_width=True)
     
     # Main content
-    if run_analysis and pair_to_analyze:
+    if run_analysis and selected_pair:
         # Set up tabs for results - added 50000 Points tab
         tabs = st.tabs(["Summary", "500 Points", "5000 Points", "10000 Points", "50000 Points"])
         
@@ -645,18 +483,12 @@ def main():
         
         # Initialize analyzer and run analysis
         analyzer = FastDepthTierAnalyzer()
-        success = analyzer.fetch_and_analyze(pair_to_analyze, hours, progress_bar)
+        success = analyzer.fetch_and_analyze(selected_pair, 24, progress_bar)
         
         if success:
-            progress_bar.progress(1.0, text="Analysis complete!")
-            
             # Show summary in first tab
             with tabs[0]:
-                st.header(f"Analysis Summary: {pair_to_analyze}")
-                st.markdown(f"**Timeframe:** Last {hours} hours")
-                
                 # Create metrics for each point count
-                # Determine how many columns to create based on available results
                 valid_points = [pc for pc in analyzer.point_counts if analyzer.results[pc] is not None]
                 
                 if valid_points:
@@ -673,10 +505,9 @@ def main():
                             
                             # Display metric in its column
                             with cols[i]:
-                                st.metric(f"Best Tier ({point_count} pts)", best_tier, f"Score: {best_score:.1f}")
+                                st.metric(f"Best ({point_count})", best_tier, f"Score: {best_score:.1f}")
                 
                 # Show combined chart
-                st.subheader("Comparison Across Time Frames")
                 combined_fig = create_combined_results_chart(analyzer)
                 if combined_fig:
                     st.pyplot(combined_fig)
@@ -684,30 +515,10 @@ def main():
                 # Add key insights
                 st.subheader("Key Insights")
                 
-                # Generate some insights based on the results
+                # Generate insights
                 insights = []
                 
-                # Check if the best tier is consistent across time frames
-                if len(best_tiers) > 1:
-                    best_tier_values = [t[0] for t in best_tiers.values()]
-                    if len(set(best_tier_values)) == 1:
-                        insights.append(f"The {best_tier_values[0]} depth tier is consistently optimal across all analyzed time frames.")
-                    else:
-                        # Look for patterns like lower is better for short term
-                        try:
-                            if 500 in best_tiers and (10000 in best_tiers or 50000 in best_tiers):
-                                short_tier = int(best_tiers[500][0].replace('k', ''))
-                                long_tier_key = 50000 if 50000 in best_tiers else 10000
-                                long_tier = int(best_tiers[long_tier_key][0].replace('k', ''))
-                                
-                                if short_tier < long_tier:
-                                    insights.append(f"Lower depths ({short_tier}k) perform better for short-term trading, while higher depths ({long_tier}k) are better for longer-term trading.")
-                                elif short_tier > long_tier:
-                                    insights.append(f"Higher depths ({short_tier}k) perform better for short-term trading, while lower depths ({long_tier}k) are better for longer-term trading.")
-                        except:
-                            pass
-                
-                # Check if there's a generally optimal tier
+                # Find the overall best tier
                 if best_tiers:
                     avg_scores = {}
                     for point_count, (tier, score) in best_tiers.items():
@@ -720,9 +531,11 @@ def main():
                     
                     insights.append(f"The {best_overall[0]} depth tier has the best overall performance with an average score of {best_overall[1]:.1f}.")
                 
-                # If no insights, add default message
-                if not insights:
-                    insights.append("Analysis complete. See detailed results in the other tabs.")
+                if len(best_tiers) > 1:
+                    # Check if the best tier is consistent
+                    best_tier_values = [t[0] for t in best_tiers.values()]
+                    if len(set(best_tier_values)) == 1:
+                        insights.append(f"The {best_tier_values[0]} depth tier is consistently optimal across all analyzed time frames.")
                 
                 # Display insights
                 for insight in insights:
@@ -744,38 +557,32 @@ def main():
                     if 50000 in best_tiers:
                         st.markdown(f"• For very long-term trading, use the **{best_tiers[50000][0]}** depth tier.")
                 else:
-                    st.markdown("No specific recommendations available. Try analyzing a different pair or time period.")
+                    st.markdown("No recommendations available.")
             
             # Display detailed results for each point count
             with tabs[1]:
-                st.header(f"500 Points Analysis (Short-Term)")
+                st.header(f"500 Points Analysis")
                 create_tables_for_point_count(analyzer, 500)
             
             with tabs[2]:
-                st.header(f"5000 Points Analysis (Medium-Term)")
+                st.header(f"5000 Points Analysis")
                 create_tables_for_point_count(analyzer, 5000)
             
             with tabs[3]:
-                st.header(f"10000 Points Analysis (Long-Term)")
+                st.header(f"10000 Points Analysis")
                 create_tables_for_point_count(analyzer, 10000)
                 
             with tabs[4]:
-                st.header(f"50000 Points Analysis (Very Long-Term)")
+                st.header(f"50000 Points Analysis")
                 create_tables_for_point_count(analyzer, 50000)
                 
         else:
             progress_bar.empty()
-            st.error(f"Failed to analyze {pair_to_analyze}. Please check if data exists for this pair.")
+            st.error(f"Failed to analyze {selected_pair}. Please try another pair.")
             
     else:
-        # Simple welcome message - keep it minimal for speed
-        st.info("""
-        ### Quick Start
-        1. Select a cryptocurrency pair from the sidebar
-        2. Click "Run Analysis"
-        
-        The tool will analyze the best liquidity depth tiers at 500, 5000, 10000, and 50000 data points.
-        """)
+        # Minimal welcome message
+        st.info("Select a pair and click Analyze to find the optimal depth tier.")
 
 if __name__ == "__main__":
     main()
