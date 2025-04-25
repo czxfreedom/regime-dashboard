@@ -13,20 +13,17 @@ st.set_page_config(
     initial_sidebar_state="collapsed"  # Start with sidebar collapsed for speed
 )
 
-# Ultra-minimal CSS for maximum speed with prominent tabs
+# Enhanced CSS for better table readability
 st.markdown("""
 <style>
     .block-container {padding: 0 !important;}
     .main .block-container {max-width: 98% !important;}
     h1, h2, h3 {margin: 0 !important; padding: 0 !important;}
-    .stButton > button {width: 100%;}
+    .stButton > button {width: 100%; font-weight: bold; height: 46px; font-size: 18px;}
     div.stProgress > div > div {height: 5px !important;}
-    div.row-widget.stRadio > div {flex-direction: row;}
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
-    .css-1oe6o3n {padding-top: 0 !important;}
-    .css-18e3th9 {padding-top: 0 !important;}
     
     /* Make tabs much bigger and more prominent */
     .stTabs [data-baseweb="tab-list"] {
@@ -50,15 +47,24 @@ st.markdown("""
         color: white !important;
     }
     
-    /* Larger tables with no scrollbar */
+    /* Improved table styling */
     .dataframe {
-        font-size: 16px !important;
+        font-size: 18px !important;
         width: 100% !important;
     }
     
-    /* Highlight recommended tier */
-    .highlight-row {
-        background-color: #d4f1f9 !important;
+    .dataframe th {
+        font-weight: 700 !important;
+        background-color: #f0f2f6 !important;
+    }
+    
+    .dataframe td {
+        font-weight: 500 !important;
+    }
+    
+    /* Highlight top tier */
+    .dataframe tr:first-child {
+        background-color: #e6f7ff !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -192,26 +198,10 @@ def get_current_bid_ask(pair_name):
         st.error(f"Error getting bid/ask data: {e}")
         return None
 
-# Fast version of the depth tier analyzer
-class FastDepthTierAnalyzer:
+# Simplified version of the depth tier analyzer
+class SimplifiedDepthTierAnalyzer:
     """
-    Specialized analyzer for evaluating different liquidity depth tiers 
-    to find the optimal depth based on trading characteristics.
-    
-    Overall Score Formula:
-    ---------------------
-    The overall score is calculated as a weighted average of the normalized metric scores:
-    
-    Overall Score = (Direction Changes Score * 0.25) + 
-                   (Choppiness Score * 0.25) + 
-                   (Tick ATR % Score * 0.25) + 
-                   (Trend Strength Score * 0.25)
-                   
-    Where each metric score is normalized to a 0-100 scale based on:
-    - Direction Changes: Higher is better (100 = highest value, 0 = lowest value)
-    - Choppiness: Higher is better (100 = highest value, 0 = lowest value)
-    - Tick ATR %: Higher is better (100 = highest value, 0 = lowest value)
-    - Trend Strength: Lower is better (100 = lowest value, 0 = highest value)
+    Simplified analyzer for liquidity depth tiers - raw metrics only, no scoring
     """
     
     def __init__(self):
@@ -259,27 +249,11 @@ class FastDepthTierAnalyzer:
             'trend_strength': 'Trend Strength'
         }
         
-        # What makes a depth tier "better" for each metric
-        self.metric_desired_direction = {
-            'direction_changes': 'higher',  # Higher direction changes is better
-            'choppiness': 'higher',         # Higher choppiness is better
-            'tick_atr_pct': 'higher',       # Higher ATR % is better
-            'trend_strength': 'lower'       # Lower trend strength is better
-        }
-        
-        # Weights for overall score
-        self.metric_weights = {
-            'direction_changes': 0.25,
-            'choppiness': 0.25,
-            'tick_atr_pct': 0.25,
-            'trend_strength': 0.25
-        }
-        
         # Store results
         self.results = {point: None for point in self.point_counts}
     
     def fetch_and_analyze(self, pair_name, hours=24, progress_bar=None):
-        """Optimized fetch and analyze for maximum speed"""
+        """Fetch data and calculate metrics for each depth tier"""
         try:
             # First, get all data at once with a single query
             conn = get_conn()
@@ -350,7 +324,6 @@ class FastDepthTierAnalyzer:
                 release_conn(conn)
                 
                 # Process each point count using the pre-fetched data
-                # This avoids multiple database connections
                 for i, point_count in enumerate(self.point_counts):
                     if progress_bar:
                         progress_bar.progress((i / len(self.point_counts)) * 0.9 + 0.1, 
@@ -372,8 +345,8 @@ class FastDepthTierAnalyzer:
                                     tier = self.depth_tier_values[column]
                                     tier_results[tier] = metrics
                         
-                        # Calculate scores and ranking
-                        self.results[point_count] = self._calculate_scores(tier_results)
+                        # Convert to DataFrame and sort by a primary metric
+                        self.results[point_count] = self._create_results_table(tier_results)
                 
                 if progress_bar:
                     progress_bar.progress(1.0, text="Analysis complete!")
@@ -399,7 +372,7 @@ class FastDepthTierAnalyzer:
             return False
     
     def _calculate_metrics(self, df, price_col, point_count):
-        """Calculate metrics using exactly the same method as your file"""
+        """Calculate raw metrics without any normalization or scoring"""
         try:
             # Convert to numeric and drop any NaN values
             prices = pd.to_numeric(df[price_col], errors='coerce').dropna()
@@ -413,19 +386,19 @@ class FastDepthTierAnalyzer:
             # Calculate mean price for ATR percentage calculation
             mean_price = prices.mean()
             
-            # Direction changes - exactly as in your file
+            # Direction changes
             price_changes = prices.diff().dropna()
             signs = np.sign(price_changes)
             direction_changes = (signs.shift(1) != signs).sum()
             direction_change_pct = (direction_changes / (len(signs) - 1)) * 100 if len(signs) > 1 else 0
             
-            # Choppiness - exactly as in your file
+            # Choppiness
             window = min(20, point_count // 10)  
             diff = prices.diff().abs()
             sum_abs_changes = diff.rolling(window, min_periods=1).sum()
             price_range = prices.rolling(window, min_periods=1).max() - prices.rolling(window, min_periods=1).min()
             
-            # Avoid division by zero - add small epsilon
+            # Avoid division by zero
             epsilon = 1e-10
             choppiness_values = 100 * sum_abs_changes / (price_range + epsilon)
             
@@ -439,7 +412,7 @@ class FastDepthTierAnalyzer:
             tick_atr = price_changes.abs().mean()
             tick_atr_pct = (tick_atr / mean_price) * 100
             
-            # Trend strength - exactly as in your file
+            # Trend strength
             net_change = (prices - prices.shift(window)).abs()
             trend_strength = (net_change / (sum_abs_changes + epsilon)).dropna().mean()
             
@@ -453,12 +426,12 @@ class FastDepthTierAnalyzer:
         except Exception as e:
             return None
     
-    def _calculate_scores(self, tier_results):
-        """Calculate scores and rankings for all tiers (optimized)"""
+    def _create_results_table(self, tier_results):
+        """Create a simple results table without scoring or normalization"""
         if not tier_results:
             return None
             
-        # Create DataFrame directly (faster)
+        # Create DataFrame directly
         data = []
         for tier, metrics in tier_results.items():
             row = {'Tier': tier}
@@ -467,96 +440,73 @@ class FastDepthTierAnalyzer:
             
         df = pd.DataFrame(data)
         
-        # Vectorized scoring for all metrics at once
-        for metric in self.metrics:
-            display_name = self.metric_display_names[metric]
-            
-            if metric in df.columns and not df[metric].isna().all():
-                min_val = df[metric].min()
-                max_val = df[metric].max()
-                
-                # Skip if min equals max (no variation)
-                if min_val == max_val:
-                    df[f'{display_name} Score'] = 100
-                    continue
-                
-                if self.metric_desired_direction[metric] == 'higher':
-                    df[f'{display_name} Score'] = ((df[metric] - min_val) / (max_val - min_val)) * 100
-                else:
-                    df[f'{display_name} Score'] = ((max_val - df[metric]) / (max_val - min_val)) * 100
-        
-        # Calculate overall score (vectorized)
-        score_columns = [f'{self.metric_display_names[m]} Score' for m in self.metrics 
-                        if f'{self.metric_display_names[m]} Score' in df.columns]
-        
-        if score_columns:
-            weighted_sum = pd.Series(0, index=df.index)
-            total_weight = 0
-            
-            for metric in self.metrics:
-                display_name = self.metric_display_names[metric]
-                score_col = f'{display_name} Score'
-                
-                if score_col in df.columns:
-                    weight = self.metric_weights[metric]
-                    weighted_sum += df[score_col] * weight
-                    total_weight += weight
-            
-            if total_weight > 0:
-                df['Overall Score'] = weighted_sum / total_weight
-            
-            # Sort and rank
-            df = df.sort_values('Overall Score', ascending=False)
-            df.insert(0, 'Rank', range(1, len(df) + 1))
+        # Sort by direction changes (higher is better) as the primary metric
+        # You can change this to sort by another metric if you prefer
+        if 'direction_changes' in df.columns:
+            df = df.sort_values('direction_changes', ascending=False)
+        else:
+            # If direction_changes is not available, try another metric
+            for metric in ['choppiness', 'tick_atr_pct']:
+                if metric in df.columns:
+                    df = df.sort_values(metric, ascending=False)
+                    break
             
         return df
 
-# Table-only display function
+# Table-only display function - simplified
 def create_point_count_table(analyzer, point_count):
-    """Creates large table without scrolling"""
+    """Creates a clean, readable table of raw metrics without scoring"""
     if analyzer.results[point_count] is None:
         st.info(f"No data available for {point_count} points analysis.")
         return
     
     df = analyzer.results[point_count]
     
-    # Full results with all metrics
+    # Make a clean copy for display
     display_df = df.copy()
     
-    # Format numeric columns for display
+    # Select only the columns we want to display
+    display_columns = ['Tier', 'direction_changes', 'choppiness', 'tick_atr_pct', 'trend_strength']
+    display_df = display_df[display_columns]
+    
+    # Rename columns for better display
+    display_df = display_df.rename(columns={
+        'direction_changes': 'Direction Changes (%)',
+        'choppiness': 'Choppiness',
+        'tick_atr_pct': 'Tick ATR %',
+        'trend_strength': 'Trend Strength'
+    })
+    
+    # Format numeric columns with appropriate decimal places
     for col in display_df.columns:
-        if col not in ['Rank', 'Tier']:
-            if 'Tick ATR %' in col or col == 'tick_atr_pct':
+        if col != 'Tier':
+            if col == 'Tick ATR %':
                 display_df[col] = display_df[col].apply(
                     lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
+                )
+            elif col == 'Trend Strength':
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:.2f}" if not pd.isna(x) else "N/A"
                 )
             else:
                 display_df[col] = display_df[col].apply(
                     lambda x: f"{x:.1f}" if not pd.isna(x) else "N/A"
                 )
     
-    # Get best tier
-    best_tier = df.iloc[0]['Tier']
-    best_score = df.iloc[0]['Overall Score']
+    # Display the top tier as recommendation
+    top_tier = display_df.iloc[0]['Tier']
+    st.markdown(f"### Recommended Depth Tier: **{top_tier}**")
     
-    # Display recommendation
-    st.markdown(f"### Recommendation: **{best_tier}** (Score: {best_score:.1f})")
-    
-    # Show the table with large font
-    st.markdown("""
-    <style>
-    .dataframe {
-        font-size: 18px !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-    
-    # Show the full table
-    st.dataframe(display_df, use_container_width=True, height=800)
+    # Show the full table with enhanced styling
+    st.dataframe(
+        display_df, 
+        use_container_width=True,
+        height=min(800, 100 + (len(display_df) * 35))  # Adaptive height
+    )
 
 def main():
     # Main layout - super streamlined
-    st.markdown("<h1 style='text-align: center; font-size:24px;'>Liquidity Depth Tier Analyzer</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center; font-size:28px; margin-bottom: 10px;'>Liquidity Depth Tier Analyzer</h1>", unsafe_allow_html=True)
     
     # Main selection area
     col1, col2, col3 = st.columns([1, 1, 1])
@@ -587,30 +537,24 @@ def main():
             </div>
             """, unsafe_allow_html=True)
         
-        # Display the overall score formula explanation
+        # Simple explanation of metrics (much shorter)
         st.markdown("""
-        ### Overall Score Formula
-        The overall score is a weighted average of four metrics, each contributing 25%:
-        - **Direction Changes (%)**: Higher values are better (more trading opportunities)
-        - **Choppiness**: Higher values are better (more oscillation)
-        - **Tick ATR %**: Higher values are better (more volatility)
-        - **Trend Strength**: Lower values are better (more reversal opportunities)
-        
-        Each metric is normalized to a 0-100 scale, then weighted and combined for the final score.
+        **Metrics:** Direction Changes (%), Choppiness, Tick ATR %, and Trend Strength. 
+        Higher values of the first three metrics and lower values of Trend Strength typically indicate better trading conditions.
         """)
         
-        # Set up tabs for results - removed summary tab, made tabs bigger
+        # Set up tabs for results
         tabs = st.tabs(["500 POINTS", "5,000 POINTS", "10,000 POINTS", "50,000 POINTS"])
         
         # Create progress bar
         progress_bar = st.progress(0, text="Starting analysis...")
         
         # Initialize analyzer and run analysis
-        analyzer = FastDepthTierAnalyzer()
+        analyzer = SimplifiedDepthTierAnalyzer()
         success = analyzer.fetch_and_analyze(selected_pair, 24, progress_bar)
         
         if success:
-            # Display detailed results for each point count - table only
+            # Display results for each point count
             with tabs[0]:
                 create_point_count_table(analyzer, 500)
             
