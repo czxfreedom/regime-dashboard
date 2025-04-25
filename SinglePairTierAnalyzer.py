@@ -8,7 +8,6 @@ from psycopg2.pool import ThreadedConnectionPool
 import os
 import io
 import base64
-from concurrent.futures import ThreadPoolExecutor
 
 # Page configuration - absolute minimum for speed
 st.set_page_config(
@@ -18,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed"  # Start with sidebar collapsed for speed
 )
 
-# Ultra-minimal CSS for maximum speed
+# Ultra-minimal CSS for maximum speed with prominent tabs
 st.markdown("""
 <style>
     .block-container {padding: 0 !important;}
@@ -33,6 +32,28 @@ st.markdown("""
     header {visibility: hidden;}
     .css-1oe6o3n {padding-top: 0 !important;}
     .css-18e3th9 {padding-top: 0 !important;}
+    
+    /* Make tabs much bigger and more prominent */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        white-space: pre-wrap;
+        background-color: #f0f2f6;
+        border-radius: 4px;
+        color: #000000;
+        font-size: 18px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 20px;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #1f77b4 !important;
+        color: white !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -71,12 +92,6 @@ PREDEFINED_PAIRS = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", 
     "AVAX/USDT", "DOGE/USDT", "ADA/USDT", "TRX/USDT", "DOT/USDT"
 ]
-
-# Get pairs from database (cached)
-@st.cache_data(ttl=3600)
-def fetch_pairs():
-    # Start with predefined pairs for fastest response
-    return PREDEFINED_PAIRS
 
 # Fast version of the depth tier analyzer
 class FastDepthTierAnalyzer:
@@ -363,120 +378,109 @@ class FastDepthTierAnalyzer:
             
         return df
 
-# Faster table creation
-def create_tables_for_point_count(analyzer, point_count):
-    """Creates tables and charts for a specific point count"""
+# Balanced table and chart creation
+def create_point_count_analysis(analyzer, point_count):
+    """Creates tables and charts with balanced sizes"""
     if analyzer.results[point_count] is None:
         st.info(f"No data available for {point_count} points analysis.")
         return
     
     df = analyzer.results[point_count]
     
-    # Only show top 5 tiers for speed
-    summary_df = df.copy().head(5)
+    # Create two columns with balanced sizes
+    col1, col2 = st.columns([2, 1])  # Give the table more space
     
-    # Format numeric columns for display
-    for col in summary_df.columns:
-        if col not in ['Rank', 'Tier']:
-            summary_df[col] = summary_df[col].apply(
-                lambda x: f"{x:.2f}" if not pd.isna(x) else "N/A"
-            )
+    with col1:  # Table column - now wider
+        # Show full rankings table
+        st.markdown(f"### Rankings Table")
+        
+        # Full results with all metrics
+        display_df = df.copy()
+        # Format numeric columns for display
+        for col in display_df.columns:
+            if col not in ['Rank', 'Tier']:
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:.1f}" if not pd.isna(x) else "N/A"
+                )
+        
+        # Use bigger text for the table
+        st.markdown("""
+        <style>
+        .dataframe {
+            font-size: 16px !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+        
+        # Show all tiers with formatted numbers
+        st.dataframe(display_df, use_container_width=True, height=400)
     
-    # Show top 5 tiers (no index for cleaner display)
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    with col2:  # Chart column
+        # Create compact chart
+        fig, ax = plt.subplots(figsize=(5, 7))  # Taller, narrower chart
+        
+        # Extract data - show more tiers
+        max_tiers = min(10, len(df))
+        tiers = df['Tier'].iloc[:max_tiers]
+        scores = df['Overall Score'].iloc[:max_tiers]
+        
+        # Plot horizontal bars with clearer colors
+        y_pos = range(len(tiers))
+        
+        # Define colors based on score
+        colors = []
+        for score in scores:
+            if score >= 90:
+                colors.append('#2ecc71')  # Green
+            elif score >= 75:
+                colors.append('#f1c40f')  # Yellow
+            elif score >= 60:
+                colors.append('#e67e22')  # Orange
+            else:
+                colors.append('#e74c3c')  # Red
+        
+        bars = ax.barh(y_pos, scores, color=colors)
+        
+        # Add value labels to the bars
+        for i, bar in enumerate(bars):
+            ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height()/2, 
+                    f'{scores.iloc[i]:.1f}', va='center', fontsize=12)
+        
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(tiers, fontsize=14)  # Larger font for tier labels
+        ax.set_xlabel('Score', fontsize=12)
+        ax.set_title(f'Top Depth Tiers', fontsize=16)
+        ax.set_xlim(0, 105)
+        plt.tight_layout()
+        
+        # Display the chart
+        st.pyplot(fig)
     
-    # Create simplified chart
-    fig, ax = plt.subplots(figsize=(8, 4))
-    
-    # Extract data - only top 5 for faster rendering
-    tiers = df['Tier'].iloc[:5]
-    scores = df['Overall Score'].iloc[:5]
-    
-    # Plot horizontal bars
-    y_pos = range(len(tiers))
-    
-    # Simplified color scheme (single color) for faster rendering
-    bars = ax.barh(y_pos, scores, color='#3498db')
-    
-    # Add value labels to the bars
-    for i, bar in enumerate(bars):
-        ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height()/2, 
-                f'{scores.iloc[i]:.1f}', va='center')
-    
-    ax.set_yticks(y_pos)
-    ax.set_yticklabels(tiers)
-    ax.set_xlabel('Score')
-    ax.set_title(f'Top Depth Tiers - {point_count} Points')
-    ax.set_xlim(0, 105)
-    
-    # Display the chart
-    st.pyplot(fig)
-
-def create_combined_results_chart(analyzer):
-    """Creates a chart showing the top tiers across different point counts (simplified)"""
-    # Check if we have results
-    valid_point_counts = [pc for pc in analyzer.point_counts if analyzer.results[pc] is not None]
-    if not valid_point_counts:
-        return None
-    
-    # Create simplified chart
-    fig, ax = plt.subplots(figsize=(8, 5))
-    
-    # Only show top 1 tier per point count for fastest rendering
-    top_tiers = {}
-    for pc in valid_point_counts:
-        if analyzer.results[pc] is not None and not analyzer.results[pc].empty:
-            tier = analyzer.results[pc].iloc[0]['Tier']
-            score = analyzer.results[pc].iloc[0]['Overall Score']
-            top_tiers[pc] = (tier, score)
-    
-    if not top_tiers:
-        return None
-    
-    # Plot as bar chart
-    points = list(top_tiers.keys())
-    tiers = [top_tiers[p][0] for p in points]
-    scores = [top_tiers[p][1] for p in points]
-    
-    # Convert point counts to readable labels
-    x_labels = [f"{p} pts" for p in points]
-    
-    # Plot bars
-    bars = ax.bar(x_labels, scores, color='#3498db')
-    
-    # Add tier labels on top of bars
-    for i, bar in enumerate(bars):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 2,
-                tiers[i], ha='center', va='bottom', rotation=0,
-                fontsize=10)
-    
-    ax.set_ylabel('Score')
-    ax.set_title('Best Depth Tier by Point Count')
-    ax.set_ylim(0, 105)
-    ax.grid(axis='y', alpha=0.2)
-    
-    return fig
+    # Add recommendations below
+    st.markdown(f"### Recommendation")
+    st.markdown(f"**Best depth tier for {point_count} points**: **{df.iloc[0]['Tier']}** with score {df.iloc[0]['Overall Score']:.1f}")
 
 def main():
     # Main layout - super streamlined
-    st.markdown("<h1 style='text-align: center; font-size:1.5em;'>Liquidity Depth Tier Analyzer</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center; font-size:24px;'>Liquidity Depth Tier Analyzer</h1>", unsafe_allow_html=True)
     
     # Main selection area
-    selected_pair = st.selectbox(
-        "Select Pair",
-        PREDEFINED_PAIRS,
-        index=0
-    )
+    col1, col2, col3 = st.columns([1, 1, 1])
     
-    # Run button
-    col1, col2, col3 = st.columns([0.2, 0.6, 0.2])
+    with col1:
+        selected_pair = st.selectbox(
+            "Select Pair",
+            PREDEFINED_PAIRS,
+            index=0
+        )
+    
     with col2:
-        run_analysis = st.button("Analyze", use_container_width=True)
+        run_analysis = st.button("ANALYZE", use_container_width=True)
     
     # Main content
     if run_analysis and selected_pair:
-        # Set up tabs for results - added 50000 Points tab
-        tabs = st.tabs(["Summary", "500 Points", "5000 Points", "10000 Points", "50000 Points"])
+        # Set up tabs for results - removed summary tab, made tabs bigger
+        tabs = st.tabs(["500 POINTS", "5,000 POINTS", "10,000 POINTS", "50,000 POINTS"])
         
         # Create progress bar
         progress_bar = st.progress(0, text="Starting analysis...")
@@ -486,95 +490,18 @@ def main():
         success = analyzer.fetch_and_analyze(selected_pair, 24, progress_bar)
         
         if success:
-            # Show summary in first tab
-            with tabs[0]:
-                # Create metrics for each point count
-                valid_points = [pc for pc in analyzer.point_counts if analyzer.results[pc] is not None]
-                
-                if valid_points:
-                    # Create one column per valid point count
-                    cols = st.columns(len(valid_points))
-                    
-                    # Get best tiers for each point count
-                    best_tiers = {}
-                    for i, point_count in enumerate(valid_points):
-                        if analyzer.results[point_count] is not None and not analyzer.results[point_count].empty:
-                            best_tier = analyzer.results[point_count].iloc[0]['Tier']
-                            best_score = analyzer.results[point_count].iloc[0]['Overall Score']
-                            best_tiers[point_count] = (best_tier, best_score)
-                            
-                            # Display metric in its column
-                            with cols[i]:
-                                st.metric(f"Best ({point_count})", best_tier, f"Score: {best_score:.1f}")
-                
-                # Show combined chart
-                combined_fig = create_combined_results_chart(analyzer)
-                if combined_fig:
-                    st.pyplot(combined_fig)
-                    
-                # Add key insights
-                st.subheader("Key Insights")
-                
-                # Generate insights
-                insights = []
-                
-                # Find the overall best tier
-                if best_tiers:
-                    avg_scores = {}
-                    for point_count, (tier, score) in best_tiers.items():
-                        if tier not in avg_scores:
-                            avg_scores[tier] = []
-                        avg_scores[tier].append(score)
-                    
-                    avg_scores = {tier: sum(scores)/len(scores) for tier, scores in avg_scores.items()}
-                    best_overall = max(avg_scores.items(), key=lambda x: x[1])
-                    
-                    insights.append(f"The {best_overall[0]} depth tier has the best overall performance with an average score of {best_overall[1]:.1f}.")
-                
-                if len(best_tiers) > 1:
-                    # Check if the best tier is consistent
-                    best_tier_values = [t[0] for t in best_tiers.values()]
-                    if len(set(best_tier_values)) == 1:
-                        insights.append(f"The {best_tier_values[0]} depth tier is consistently optimal across all analyzed time frames.")
-                
-                # Display insights
-                for insight in insights:
-                    st.markdown(f"• {insight}")
-                
-                # Add recommendations
-                st.subheader("Recommendations")
-                
-                if best_tiers:
-                    if 500 in best_tiers:
-                        st.markdown(f"• For short-term trading, use the **{best_tiers[500][0]}** depth tier.")
-                    
-                    if 5000 in best_tiers:
-                        st.markdown(f"• For medium-term trading, use the **{best_tiers[5000][0]}** depth tier.")
-                    
-                    if 10000 in best_tiers:
-                        st.markdown(f"• For long-term trading, use the **{best_tiers[10000][0]}** depth tier.")
-                        
-                    if 50000 in best_tiers:
-                        st.markdown(f"• For very long-term trading, use the **{best_tiers[50000][0]}** depth tier.")
-                else:
-                    st.markdown("No recommendations available.")
-            
             # Display detailed results for each point count
+            with tabs[0]:
+                create_point_count_analysis(analyzer, 500)
+            
             with tabs[1]:
-                st.header(f"500 Points Analysis")
-                create_tables_for_point_count(analyzer, 500)
+                create_point_count_analysis(analyzer, 5000)
             
             with tabs[2]:
-                st.header(f"5000 Points Analysis")
-                create_tables_for_point_count(analyzer, 5000)
-            
-            with tabs[3]:
-                st.header(f"10000 Points Analysis")
-                create_tables_for_point_count(analyzer, 10000)
+                create_point_count_analysis(analyzer, 10000)
                 
-            with tabs[4]:
-                st.header(f"50000 Points Analysis")
-                create_tables_for_point_count(analyzer, 50000)
+            with tabs[3]:
+                create_point_count_analysis(analyzer, 50000)
                 
         else:
             progress_bar.empty()
@@ -582,7 +509,7 @@ def main():
             
     else:
         # Minimal welcome message
-        st.info("Select a pair and click Analyze to find the optimal depth tier.")
+        st.info("Select a pair and click ANALYZE to find the optimal depth tier.")
 
 if __name__ == "__main__":
     main()
