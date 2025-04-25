@@ -86,6 +86,21 @@ def get_connection_pool():
         st.error(f"Error creating connection pool: {e}")
         return None
 
+# Function to get a connection to the replication database
+def get_replication_conn():
+    try:
+        conn = psycopg2.connect(
+            host="aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com",
+            port=5432,
+            database="replication_report",  # Replication database
+            user="public_replication",  # User for replication database
+            password="866^FKC4hllk"  # Password for replication database
+        )
+        return conn
+    except Exception as e:
+        st.error(f"Error connecting to replication database: {e}")
+        return None
+
 # Get a connection from the pool
 def get_conn():
     pool = get_connection_pool()
@@ -115,11 +130,12 @@ PREDEFINED_PAIRS = [
     "AVAX/USDT", "DOGE/USDT", "ADA/USDT", "TRX/USDT", "DOT/USDT"
 ]
 
-# Get available pairs from the database
-@st.cache_data(ttl=300)  # Cache for 5 minutes to avoid repeated queries
+# Get available pairs from the replication database
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def get_available_pairs():
     try:
-        conn = get_conn()
+        # Connect to the replication database
+        conn = get_replication_conn()
         if not conn:
             return PREDEFINED_PAIRS  # Fallback to predefined pairs
         
@@ -132,7 +148,7 @@ def get_available_pairs():
         pairs = [row[0] for row in cursor.fetchall()]
         
         cursor.close()
-        release_conn(conn)
+        conn.close()
         
         # Return sorted pairs or fallback to predefined list if empty
         return sorted(pairs) if pairs else PREDEFINED_PAIRS
