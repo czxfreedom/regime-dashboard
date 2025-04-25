@@ -194,6 +194,26 @@ def get_current_bid_ask(pair_name):
 
 # Fast version of the depth tier analyzer
 class FastDepthTierAnalyzer:
+    """
+    Specialized analyzer for evaluating different liquidity depth tiers 
+    to find the optimal depth based on trading characteristics.
+    
+    Overall Score Formula:
+    ---------------------
+    The overall score is calculated as a weighted average of the normalized metric scores:
+    
+    Overall Score = (Direction Changes Score * 0.25) + 
+                   (Choppiness Score * 0.25) + 
+                   (Tick ATR % Score * 0.25) + 
+                   (Trend Strength Score * 0.25)
+                   
+    Where each metric score is normalized to a 0-100 scale based on:
+    - Direction Changes: Higher is better (100 = highest value, 0 = lowest value)
+    - Choppiness: Higher is better (100 = highest value, 0 = lowest value)
+    - Tick ATR %: Higher is better (100 = highest value, 0 = lowest value)
+    - Trend Strength: Lower is better (100 = lowest value, 0 = highest value)
+    """
+    
     def __init__(self):
         self.point_counts = [500, 5000, 10000, 50000]
         
@@ -506,9 +526,14 @@ def create_point_count_table(analyzer, point_count):
     # Format numeric columns for display
     for col in display_df.columns:
         if col not in ['Rank', 'Tier']:
-            display_df[col] = display_df[col].apply(
-                lambda x: f"{x:.1f}" if not pd.isna(x) else "N/A"
-            )
+            if 'Tick ATR %' in col or col == 'tick_atr_pct':
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
+                )
+            else:
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:.1f}" if not pd.isna(x) else "N/A"
+                )
     
     # Get best tier
     best_tier = df.iloc[0]['Tier']
@@ -561,6 +586,18 @@ def main():
                 <p style="margin: 5px 0;"><strong>Total Ask:</strong> {format_number(bid_ask_data['all_ask'])}</p>
             </div>
             """, unsafe_allow_html=True)
+        
+        # Display the overall score formula explanation
+        st.markdown("""
+        ### Overall Score Formula
+        The overall score is a weighted average of four metrics, each contributing 25%:
+        - **Direction Changes (%)**: Higher values are better (more trading opportunities)
+        - **Choppiness**: Higher values are better (more oscillation)
+        - **Tick ATR %**: Higher values are better (more volatility)
+        - **Trend Strength**: Lower values are better (more reversal opportunities)
+        
+        Each metric is normalized to a 0-100 scale, then weighted and combined for the final score.
+        """)
         
         # Set up tabs for results - removed summary tab, made tabs bigger
         tabs = st.tabs(["500 POINTS", "5,000 POINTS", "10,000 POINTS", "50,000 POINTS"])
