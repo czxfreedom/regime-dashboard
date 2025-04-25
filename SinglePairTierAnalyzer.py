@@ -1,13 +1,9 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
-import os
-import io
-import base64
 
 # Page configuration - absolute minimum for speed
 st.set_page_config(
@@ -26,7 +22,6 @@ st.markdown("""
     .stButton > button {width: 100%;}
     div.stProgress > div > div {height: 5px !important;}
     div.row-widget.stRadio > div {flex-direction: row;}
-    div.stDataFrame {margin: 0 !important; padding: 0 !important;}
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
@@ -53,6 +48,17 @@ st.markdown("""
     .stTabs [aria-selected="true"] {
         background-color: #1f77b4 !important;
         color: white !important;
+    }
+    
+    /* Larger tables with no scrollbar */
+    .dataframe {
+        font-size: 16px !important;
+        width: 100% !important;
+    }
+    
+    /* Highlight recommended tier */
+    .highlight-row {
+        background-color: #d4f1f9 !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -92,6 +98,89 @@ PREDEFINED_PAIRS = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", 
     "AVAX/USDT", "DOGE/USDT", "ADA/USDT", "TRX/USDT", "DOT/USDT"
 ]
+
+# Get current bid/ask data
+def get_current_bid_ask(pair_name):
+    try:
+        conn = get_conn()
+        if not conn:
+            return None
+        
+        cursor = conn.cursor()
+        
+        # Get the most recent partition table
+        today = datetime.now().strftime("%Y%m%d")
+        table_name = f'oracle_order_book_level_price_data_partition_v3_{today}'
+        
+        # Check if table exists
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = %s
+            );
+        """, (table_name,))
+        
+        if not cursor.fetchone()[0]:
+            # Try yesterday if today doesn't exist
+            yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+            table_name = f'oracle_order_book_level_price_data_partition_v3_{yesterday}'
+            
+            # Check if yesterday's table exists
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = %s
+                );
+            """, (table_name,))
+            
+            if not cursor.fetchone()[0]:
+                cursor.close()
+                release_conn(conn)
+                return None
+        
+        # Use the exact SQL you provided
+        query = f"""
+        SELECT DISTINCT ON (p.pair_name)
+          p.pair_name,
+          TO_CHAR(p.utc8, 'YYYY-MM-DD HH24:MI:SS.MS') AS "UTC+8",
+          p.all_bid,
+          p.all_ask
+        FROM (
+          SELECT
+            pair_name,
+            (created_at + INTERVAL '8 hour') AS utc8,
+            all_bid,
+            all_ask
+          FROM
+            public."{table_name}"
+          WHERE
+            pair_name = %s
+        ) AS p
+        ORDER BY
+          p.pair_name ASC,
+          p.utc8 DESC
+        """
+        
+        cursor.execute(query, (pair_name,))
+        result = cursor.fetchone()
+        
+        cursor.close()
+        release_conn(conn)
+        
+        if result:
+            return {
+                "pair": result[0],
+                "time": result[1],
+                "all_bid": result[2],
+                "all_ask": result[3]
+            }
+        return None
+        
+    except Exception as e:
+        st.error(f"Error getting bid/ask data: {e}")
+        return None
 
 # Fast version of the depth tier analyzer
 class FastDepthTierAnalyzer:
@@ -240,14 +329,17 @@ class FastDepthTierAnalyzer:
                     if len(all_df) >= point_count:
                         df = all_df.iloc[:point_count].copy()
                         
-                        # Process each depth tier
+                        # Process each depth tier independently
                         tier_results = {}
                         
                         for column in self.depth_tier_columns:
-                            metrics = self._calculate_metrics(df, column, point_count)
-                            if metrics:
-                                tier = self.depth_tier_values[column]
-                                tier_results[tier] = metrics
+                            if column in df.columns:
+                                # Make sure each column is processed independently
+                                price_data = df[[column]].copy()
+                                metrics = self._calculate_metrics(price_data, column, point_count)
+                                if metrics:
+                                    tier = self.depth_tier_values[column]
+                                    tier_results[tier] = metrics
                         
                         # Calculate scores and ranking
                         self.results[point_count] = self._calculate_scores(tier_results)
@@ -276,56 +368,58 @@ class FastDepthTierAnalyzer:
             return False
     
     def _calculate_metrics(self, df, price_col, point_count):
-        """Calculate metrics using the original methodology but fixing the choppiness issue"""
+        """Calculate metrics completely independently for each tier"""
         try:
             # Convert to numeric 
             prices = pd.to_numeric(df[price_col], errors='coerce').dropna()
             
             if len(prices) < point_count * 0.8:  # Allow some flexibility for missing data
                 return None
-                
-            # Take the last n points for analysis
-            prices = prices.iloc[-int(point_count * 0.8):]
             
-            # Calculate metrics with vectorized operations for speed
-            mean_price = prices.mean()
+            # Calculate window size based on point count
+            window = min(20, max(5, point_count // 100))
             
-            # Direction changes (vectorized)
+            # Direction changes
             price_changes = prices.diff().dropna()
             signs = np.sign(price_changes)
-            direction_changes = (signs.shift(1) != signs).sum()
+            sign_changes = (signs != signs.shift(1)).astype(int)
+            direction_changes = sign_changes.sum()
             direction_change_pct = (direction_changes / (len(signs) - 1)) * 100 if len(signs) > 1 else 0
             
-            # Fix for choppiness calculation - ensure it's calculated per tier
-            # Use appropriate window size based on point count
-            window = min(20, max(5, point_count // 50))
-            
-            # Calculate absolute price changes
+            # Fixed choppiness calculation - completely independent for each tier
+            # Calculate choppiness using original logic
             diff = prices.diff().abs()
             
-            # Calculate sum of absolute changes over the window
-            sum_abs_changes = diff.rolling(window, min_periods=1).sum()
+            # Ensure window is appropriate for the data size
+            window = min(window, len(diff) // 10) if len(diff) > 20 else 5
             
-            # Calculate price range (high - low) over the window
-            price_range = prices.rolling(window, min_periods=1).max() - prices.rolling(window, min_periods=1).min()
+            # Apply rolling calculations
+            sum_abs_changes = diff.rolling(window).sum()
+            rolling_high = prices.rolling(window).max()
+            rolling_low = prices.rolling(window).min()
+            rolling_range = rolling_high - rolling_low
             
-            # Add small epsilon to prevent division by zero
+            # Small epsilon to prevent division by zero
             epsilon = 1e-10
             
-            # Calculate choppiness as ratio of sum of changes to range, multiplied by 100
-            # Higher values indicate more choppy price action (better for market making)
-            chop_values = 100 * sum_abs_changes / (price_range + epsilon)
+            # Calculate choppiness for each point where range is not zero
+            # Higher value = more choppy = better for market making
+            choppiness_series = 100 * sum_abs_changes / (rolling_range + epsilon)
             
-            # Take mean and cap extreme values
-            choppiness = min(chop_values.mean(), 1000)
+            # Now take the average, capping extreme values
+            choppiness = min(choppiness_series.mean(), 1000)
             
             # Tick ATR
             tick_atr = price_changes.abs().mean()
-            tick_atr_pct = (tick_atr / mean_price) * 100
+            tick_atr_pct = (tick_atr / prices.mean()) * 100 if prices.mean() > 0 else 0
             
-            # Trend strength - use original calculation
+            # Trend strength
             net_change = (prices - prices.shift(window)).abs()
-            trend_strength = (net_change / (sum_abs_changes + epsilon)).dropna().mean()
+            sums = sum_abs_changes.dropna()
+            if len(sums) > 0 and sums.mean() > 0:
+                trend_strength = (net_change / (sum_abs_changes + epsilon)).dropna().mean()
+            else:
+                trend_strength = 0.5  # Default if we can't calculate
             
             return {
                 'direction_changes': direction_change_pct,
@@ -335,7 +429,7 @@ class FastDepthTierAnalyzer:
             }
             
         except Exception as e:
-            # Don't display error to keep UI clean
+            # Don't show error to keep UI clean
             return None
     
     def _calculate_scores(self, tier_results):
@@ -396,87 +490,43 @@ class FastDepthTierAnalyzer:
             
         return df
 
-# Balanced table and chart creation
-def create_point_count_analysis(analyzer, point_count):
-    """Creates tables and charts with balanced sizes"""
+# Table-only display function
+def create_point_count_table(analyzer, point_count):
+    """Creates large table without scrolling"""
     if analyzer.results[point_count] is None:
         st.info(f"No data available for {point_count} points analysis.")
         return
     
     df = analyzer.results[point_count]
     
-    # Create two columns with balanced sizes
-    col1, col2 = st.columns([2, 1])  # Give the table more space
+    # Full results with all metrics
+    display_df = df.copy()
     
-    with col1:  # Table column - now wider
-        # Show full rankings table
-        st.markdown(f"### Rankings Table")
-        
-        # Full results with all metrics
-        display_df = df.copy()
-        # Format numeric columns for display
-        for col in display_df.columns:
-            if col not in ['Rank', 'Tier']:
-                display_df[col] = display_df[col].apply(
-                    lambda x: f"{x:.1f}" if not pd.isna(x) else "N/A"
-                )
-        
-        # Use bigger text for the table
-        st.markdown("""
-        <style>
-        .dataframe {
-            font-size: 16px !important;
-        }
-        </style>
-        """, unsafe_allow_html=True)
-        
-        # Show all tiers with formatted numbers
-        st.dataframe(display_df, use_container_width=True, height=400)
+    # Format numeric columns for display
+    for col in display_df.columns:
+        if col not in ['Rank', 'Tier']:
+            display_df[col] = display_df[col].apply(
+                lambda x: f"{x:.1f}" if not pd.isna(x) else "N/A"
+            )
     
-    with col2:  # Chart column
-        # Create compact chart
-        fig, ax = plt.subplots(figsize=(5, 7))  # Taller, narrower chart
-        
-        # Extract data - show more tiers
-        max_tiers = min(10, len(df))
-        tiers = df['Tier'].iloc[:max_tiers]
-        scores = df['Overall Score'].iloc[:max_tiers]
-        
-        # Plot horizontal bars with clearer colors
-        y_pos = range(len(tiers))
-        
-        # Define colors based on score
-        colors = []
-        for score in scores:
-            if score >= 90:
-                colors.append('#2ecc71')  # Green
-            elif score >= 75:
-                colors.append('#f1c40f')  # Yellow
-            elif score >= 60:
-                colors.append('#e67e22')  # Orange
-            else:
-                colors.append('#e74c3c')  # Red
-        
-        bars = ax.barh(y_pos, scores, color=colors)
-        
-        # Add value labels to the bars
-        for i, bar in enumerate(bars):
-            ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height()/2, 
-                    f'{scores.iloc[i]:.1f}', va='center', fontsize=12)
-        
-        ax.set_yticks(y_pos)
-        ax.set_yticklabels(tiers, fontsize=14)  # Larger font for tier labels
-        ax.set_xlabel('Score', fontsize=12)
-        ax.set_title(f'Top Depth Tiers', fontsize=16)
-        ax.set_xlim(0, 105)
-        plt.tight_layout()
-        
-        # Display the chart
-        st.pyplot(fig)
+    # Get best tier
+    best_tier = df.iloc[0]['Tier']
+    best_score = df.iloc[0]['Overall Score']
     
-    # Add recommendations below
-    st.markdown(f"### Recommendation")
-    st.markdown(f"**Best depth tier for {point_count} points**: **{df.iloc[0]['Tier']}** with score {df.iloc[0]['Overall Score']:.1f}")
+    # Display recommendation
+    st.markdown(f"### Recommendation: **{best_tier}** (Score: {best_score:.1f})")
+    
+    # Show the table with large font
+    st.markdown("""
+    <style>
+    .dataframe {
+        font-size: 18px !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Show the full table
+    st.dataframe(display_df, use_container_width=True, height=800)
 
 def main():
     # Main layout - super streamlined
@@ -497,6 +547,20 @@ def main():
     
     # Main content
     if run_analysis and selected_pair:
+        # Get current bid/ask data
+        bid_ask_data = get_current_bid_ask(selected_pair)
+        
+        if bid_ask_data:
+            # Display in a box at the top
+            st.markdown(f"""
+            <div style="background-color: #f0f2f6; padding: 10px; border-radius: 5px; margin-bottom: 20px;">
+                <h3 style="margin: 0;">Current Market Data: {selected_pair}</h3>
+                <p style="margin: 5px 0;"><strong>UTC+8:</strong> {bid_ask_data['time']}</p>
+                <p style="margin: 5px 0;"><strong>Total Bid:</strong> {bid_ask_data['all_bid']}</p>
+                <p style="margin: 5px 0;"><strong>Total Ask:</strong> {bid_ask_data['all_ask']}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
         # Set up tabs for results - removed summary tab, made tabs bigger
         tabs = st.tabs(["500 POINTS", "5,000 POINTS", "10,000 POINTS", "50,000 POINTS"])
         
@@ -508,18 +572,18 @@ def main():
         success = analyzer.fetch_and_analyze(selected_pair, 24, progress_bar)
         
         if success:
-            # Display detailed results for each point count
+            # Display detailed results for each point count - table only
             with tabs[0]:
-                create_point_count_analysis(analyzer, 500)
+                create_point_count_table(analyzer, 500)
             
             with tabs[1]:
-                create_point_count_analysis(analyzer, 5000)
+                create_point_count_table(analyzer, 5000)
             
             with tabs[2]:
-                create_point_count_analysis(analyzer, 10000)
+                create_point_count_table(analyzer, 10000)
                 
             with tabs[3]:
-                create_point_count_analysis(analyzer, 50000)
+                create_point_count_table(analyzer, 50000)
                 
         else:
             progress_bar.empty()
