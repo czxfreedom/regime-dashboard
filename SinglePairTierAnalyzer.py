@@ -115,6 +115,32 @@ PREDEFINED_PAIRS = [
     "AVAX/USDT", "DOGE/USDT", "ADA/USDT", "TRX/USDT", "DOT/USDT"
 ]
 
+# Get available pairs from the database
+@st.cache_data(ttl=300)  # Cache for 5 minutes to avoid repeated queries
+def get_available_pairs():
+    try:
+        conn = get_conn()
+        if not conn:
+            return PREDEFINED_PAIRS  # Fallback to predefined pairs
+        
+        cursor = conn.cursor()
+        
+        # Query to get active pairs
+        query = "SELECT pair_name FROM trade_pool_pairs WHERE status = 1"
+        
+        cursor.execute(query)
+        pairs = [row[0] for row in cursor.fetchall()]
+        
+        cursor.close()
+        release_conn(conn)
+        
+        # Return sorted pairs or fallback to predefined list if empty
+        return sorted(pairs) if pairs else PREDEFINED_PAIRS
+    
+    except Exception as e:
+        st.error(f"Error fetching available pairs: {e}")
+        return PREDEFINED_PAIRS  # Fallback to predefined pairs
+
 # Get current bid/ask data
 def get_current_bid_ask(pair_name):
     try:
@@ -508,14 +534,17 @@ def main():
     # Main layout - super streamlined
     st.markdown("<h1 style='text-align: center; font-size:28px; margin-bottom: 10px;'>Liquidity Depth Tier Analyzer</h1>", unsafe_allow_html=True)
     
+    # Get available pairs from the database
+    available_pairs = get_available_pairs()
+    
     # Main selection area
     col1, col2, col3 = st.columns([1, 1, 1])
     
     with col1:
         selected_pair = st.selectbox(
             "Select Pair",
-            PREDEFINED_PAIRS,
-            index=0
+            available_pairs,
+            index=0 if available_pairs else None
         )
     
     with col2:
