@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
 import plotly.express as px
 from sqlalchemy import create_engine, text
 from datetime import datetime, timedelta
@@ -35,49 +34,6 @@ st.markdown("""
         margin-bottom: 15px;
         border: 1px solid #e9ecef;
     }
-    .param-group {
-        border: 2px solid #1976D2;
-        border-radius: 5px;
-        margin-bottom: 15px;
-        overflow: hidden;
-    }
-    .param-header {
-        background-color: #1976D2;
-        color: white;
-        padding: 8px;
-        font-weight: bold;
-        text-align: center;
-    }
-    .formula-box {
-        background-color: #f1f8e9;
-        border-radius: 5px;
-        padding: 15px;
-        margin: 15px 0;
-        border-left: 5px solid #7cb342;
-        overflow-x: auto;
-    }
-    .formula {
-        font-family: 'Courier New', monospace;
-        font-size: 14px;
-    }
-    /* Parameter card styles */
-    .param-card {
-        border: 1px solid #e0e0e0;
-        border-radius: 10px;
-        overflow: hidden;
-        margin-bottom: 20px;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-    }
-    .param-card-header {
-        background-color: #1976D2;
-        color: white;
-        padding: 10px 15px;
-        font-weight: bold;
-    }
-    .param-card-body {
-        padding: 15px;
-    }
-    /* Error/warning message */
     .error-message {
         color: #d32f2f;
         background-color: #ffebee;
@@ -85,38 +41,6 @@ st.markdown("""
         border-radius: 5px;
         margin: 10px 0;
         border-left: 4px solid #d32f2f;
-    }
-    /* Navigation bar styling */
-    .nav-bar {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-        margin-bottom: 20px;
-    }
-    .nav-item {
-        background-color: #f5f5f5;
-        padding: 8px 15px;
-        border-radius: 5px;
-        cursor: pointer;
-        border: 1px solid #e0e0e0;
-        transition: all 0.3s;
-    }
-    .nav-item:hover, .nav-item.active {
-        background-color: #1976D2;
-        color: white;
-    }
-    /* Range indicator styling */
-    .range-indicator {
-        margin-top: 10px;
-        padding: 5px;
-        border-radius: 5px;
-        background-color: #e3f2fd;
-        border: 1px solid #bbdefb;
-    }
-    /* Highlight for current value in range */
-    .current-in-range {
-        font-weight: bold;
-        color: #1976D2;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -150,12 +74,6 @@ def format_number(value):
         return "N/A"
     return f"{value:,.0f}"
 
-def format_float(value, decimals=2):
-    """Format a float with specified decimal places"""
-    if pd.isna(value) or value is None:
-        return "N/A"
-    return f"{value:.{decimals}f}"
-
 def is_major(token):
     """Determine if a token is a major token"""
     majors = ["BTC", "ETH", "SOL", "XRP", "BNB"]
@@ -176,52 +94,6 @@ def check_null_or_zero(value):
         return True
     return False
 
-def compute_weekly_spread_range(token, engine):
-    """Compute the weekly spread range for a specific token"""
-    try:
-        # Get Singapore timezone for consistent time handling
-        singapore_timezone = pytz.timezone('Asia/Singapore')
-        now_utc = datetime.now(pytz.utc)
-        now_sg = now_utc.astimezone(singapore_timezone)
-        
-        # Get start of previous week (7 days ago)
-        start_time_sg = now_sg - timedelta(days=7)
-        
-        # Convert back to UTC for database query
-        start_time_utc = start_time_sg.astimezone(pytz.utc)
-        end_time_utc = now_sg.astimezone(pytz.utc)
-        
-        # Query to get all spread values from the past week
-        query = f"""
-        SELECT 
-            time_group,
-            fee1
-        FROM 
-            oracle_exchange_fee
-        WHERE 
-            pair_name = '{token}'
-            AND source IN ('binanceFuture', 'gateFuture', 'hyperliquidFuture')
-            AND time_group BETWEEN '{start_time_utc}' AND '{end_time_utc}'
-        ORDER BY 
-            time_group ASC
-        """
-        
-        df = pd.read_sql(query, engine)
-        
-        if df.empty:
-            return None, None, None
-        
-        # Calculate min, max and average spread
-        min_spread = df['fee1'].min()
-        max_spread = df['fee1'].max()
-        avg_spread = df['fee1'].mean()
-        
-        return min_spread, max_spread, avg_spread
-    
-    except Exception as e:
-        print(f"Error computing weekly spread range for {token}: {e}")
-        return None, None, None
-
 # --- Data Fetching Functions ---
 @st.cache_data(ttl=600)
 def fetch_current_parameters():
@@ -236,8 +108,6 @@ def fetch_current_parameters():
             pair_name,
             buffer_rate,
             position_multiplier,
-            rate_multiplier,
-            rate_exponent,
             max_leverage
         FROM
             public.trade_pool_pairs
@@ -251,8 +121,6 @@ def fetch_current_parameters():
         
         # Fill NaN values with reasonable defaults
         if not df.empty:
-            df['rate_multiplier'] = df['rate_multiplier'].fillna(6.0)
-            df['rate_exponent'] = df['rate_exponent'].fillna(2.0)
             df['max_leverage'] = df['max_leverage'].fillna(100)
             
             # Ensure buffer_rate has no zeros (replace with NaN for "N/A" display)
@@ -265,13 +133,12 @@ def fetch_current_parameters():
 
 @st.cache_data(ttl=600)
 def fetch_rollbit_parameters():
-    """Fetch Rollbit parameters for comparison using the exact SQL provided"""
+    """Fetch Rollbit parameters for comparison"""
     try:
         engine = init_connection()
         if not engine:
             return None
             
-        # Using exactly the SQL query specified
         query = """
         SELECT * 
         FROM rollbit_pair_config 
@@ -285,10 +152,6 @@ def fetch_rollbit_parameters():
             # Ensure we have bust_buffer to use as buffer_rate
             if 'bust_buffer' in df.columns and 'buffer_rate' not in df.columns:
                 df['buffer_rate'] = df['bust_buffer']
-            
-            # Fill NaN values with reasonable defaults
-            df['rate_multiplier'] = df['rate_multiplier'].fillna(6.0)
-            df['rate_exponent'] = df['rate_exponent'].fillna(2.0)
             
             # Ensure buffer_rate has no zeros (replace with NaN for "N/A" display)
             if 'buffer_rate' in df.columns:
@@ -340,59 +203,6 @@ def fetch_market_spread_data():
         return None
 
 @st.cache_data(ttl=600)
-def fetch_weekly_spread_data():
-    """Fetch weekly spread data for all tokens"""
-    try:
-        engine = init_connection()
-        if not engine:
-            return None
-            
-        # Get current time in Singapore timezone
-        singapore_timezone = pytz.timezone('Asia/Singapore')
-        now_utc = datetime.now(pytz.utc)
-        now_sg = now_utc.astimezone(singapore_timezone)
-        start_time_sg = now_sg - timedelta(days=7)
-        
-        # Convert back to UTC for database query
-        start_time_utc = start_time_sg.astimezone(pytz.utc)
-        end_time_utc = now_sg.astimezone(pytz.utc)
-        
-        query = f"""
-        SELECT 
-            pair_name,
-            source,
-            MIN(fee1) as min_fee1,
-            MAX(fee1) as max_fee1,
-            AVG(fee1) as avg_fee1
-        FROM 
-            oracle_exchange_fee
-        WHERE 
-            source IN ('binanceFuture', 'gateFuture', 'hyperliquidFuture')
-            AND time_group BETWEEN '{start_time_utc}' AND '{end_time_utc}'
-        GROUP BY 
-            pair_name, source
-        ORDER BY 
-            pair_name, source
-        """
-        
-        df = pd.read_sql(query, engine)
-        
-        # Aggregate across exchanges to get overall min/max/avg
-        if not df.empty:
-            aggregated = df.groupby('pair_name').agg({
-                'min_fee1': 'min',
-                'max_fee1': 'max',
-                'avg_fee1': 'mean'
-            }).reset_index()
-            
-            return aggregated
-        
-        return None
-    except Exception as e:
-        st.error(f"Error fetching weekly spread data: {e}")
-        return None
-
-@st.cache_data(ttl=600)
 def fetch_spread_baselines():
     """Fetch spread baselines for comparison"""
     try:
@@ -417,7 +227,6 @@ def fetch_spread_baselines():
         st.error(f"Error fetching spread baselines: {e}")
         return None
 
-# FIXED FUNCTION - using SQLAlchemy text() for safer parameter binding
 def save_spread_baseline(pair_name, baseline_spread):
     """Save a new spread baseline to the database"""
     try:
@@ -480,9 +289,9 @@ def calculate_current_spreads(market_data):
     
     return current_spreads
 
-def calculate_recommended_params(current_params, current_spread, baseline_spread, weekly_data,
-                              sensitivities, significant_change_threshold=0.05):
-    """Calculate recommended parameter values based on spread change ratio and weekly range"""
+def calculate_recommended_params(current_params, current_spread, baseline_spread, 
+                                sensitivities, significant_change_threshold=0.05):
+    """Calculate recommended parameter values based on spread change ratio"""
     
     # Handle cases with missing data
     if current_spread is None or baseline_spread is None or baseline_spread <= 0:
@@ -497,37 +306,13 @@ def calculate_recommended_params(current_params, current_spread, baseline_spread
     if check_null_or_zero(current_position_multiplier):
         current_position_multiplier = 1000000  # Default if zero or null
         
-    current_rate_multiplier = current_params.get('rate_multiplier')
-    if check_null_or_zero(current_rate_multiplier):
-        current_rate_multiplier = 6.0  # Default if zero or null
-        
-    current_rate_exponent = current_params.get('rate_exponent')
-    if check_null_or_zero(current_rate_exponent):
-        current_rate_exponent = 2.0  # Default if zero or null
-        
     max_leverage = current_params.get('max_leverage')
     if check_null_or_zero(max_leverage):
         max_leverage = 100  # Default if zero or null
     
-    # Get weekly min/max spread if available
-    min_weekly_spread = weekly_data.get('min_fee1')
-    max_weekly_spread = weekly_data.get('max_fee1')
-    avg_weekly_spread = weekly_data.get('avg_fee1')
-    
-    # Calculate weekly range ratio (how far current spread is within the weekly range)
-    weekly_range_ratio = 0.5  # Default to middle of the range
-    if not check_null_or_zero(min_weekly_spread) and not check_null_or_zero(max_weekly_spread):
-        if max_weekly_spread > min_weekly_spread:
-            # Normalize current_spread to [0,1] within the weekly range
-            weekly_range_ratio = (current_spread - min_weekly_spread) / (max_weekly_spread - min_weekly_spread)
-            # Clamp to [0,1]
-            weekly_range_ratio = max(0, min(1, weekly_range_ratio))
-    
     # Get sensitivity parameters
     buffer_sensitivity = sensitivities.get('buffer_sensitivity', 0.5)
     position_sensitivity = sensitivities.get('position_sensitivity', 0.5)
-    rate_multiplier_sensitivity = sensitivities.get('rate_multiplier_sensitivity', 0.5)
-    rate_exponent_sensitivity = sensitivities.get('rate_exponent_sensitivity', 0.5)
     
     # Calculate spread change ratio (how current spread compares to baseline)
     spread_change_ratio = current_spread / baseline_spread
@@ -546,31 +331,18 @@ def calculate_recommended_params(current_params, current_spread, baseline_spread
     # When spreads increase, position multiplier decreases
     recommended_position_multiplier = current_position_multiplier / (spread_change_ratio ** position_sensitivity)
     
-    # 3. Rate Multiplier (inverse relationship):
-    # When spreads increase, rate multiplier decreases
-    recommended_rate_multiplier = current_rate_multiplier / (spread_change_ratio ** rate_multiplier_sensitivity)
-    
-    # 4. Rate Exponent (direct relationship):
-    # When spreads increase, rate exponent increases
-    recommended_rate_exponent = current_rate_exponent * (spread_change_ratio ** rate_exponent_sensitivity)
-    
     # Apply bounds to keep values in reasonable ranges
     max_buffer_rate = 0.9 / max_leverage if max_leverage > 0 else 0.009
     recommended_buffer_rate = max(0.001, min(max_buffer_rate, recommended_buffer_rate))
     recommended_position_multiplier = max(100000, min(10000000, recommended_position_multiplier))
-    recommended_rate_multiplier = max(1.0, min(15.0, recommended_rate_multiplier))
-    recommended_rate_exponent = max(1.0, min(5.0, recommended_rate_exponent))
     
     return {
         'buffer_rate': recommended_buffer_rate,
-        'position_multiplier': recommended_position_multiplier,
-        'rate_multiplier': recommended_rate_multiplier,
-        'rate_exponent': recommended_rate_exponent,
-        'weekly_range_ratio': weekly_range_ratio
+        'position_multiplier': recommended_position_multiplier
     }
 
-def generate_recommendations(current_params_df, market_data_df, weekly_data_df, baselines_df, sensitivities):
-    """Generate parameter recommendations based on market data and weekly range"""
+def generate_recommendations(current_params_df, market_data_df, baselines_df, sensitivities):
+    """Generate parameter recommendations based on market data"""
     if current_params_df is None or market_data_df is None or baselines_df is None:
         return None
     
@@ -581,8 +353,6 @@ def generate_recommendations(current_params_df, market_data_df, weekly_data_df, 
         current_params[pair_name] = {
             'buffer_rate': row['buffer_rate'],
             'position_multiplier': row['position_multiplier'],
-            'rate_multiplier': row.get('rate_multiplier', 6.0),
-            'rate_exponent': row.get('rate_exponent', 2.0),
             'max_leverage': row.get('max_leverage', 100)
         }
     
@@ -594,16 +364,6 @@ def generate_recommendations(current_params_df, market_data_df, weekly_data_df, 
     for _, row in baselines_df.iterrows():
         baselines[row['pair_name']] = row['baseline_spread']
     
-    # Create weekly data dictionary
-    weekly_data = {}
-    if weekly_data_df is not None:
-        for _, row in weekly_data_df.iterrows():
-            weekly_data[row['pair_name']] = {
-                'min_fee1': row['min_fee1'],
-                'max_fee1': row['max_fee1'],
-                'avg_fee1': row['avg_fee1']
-            }
-    
     # Create recommendations DataFrame
     recommendations = []
     
@@ -614,14 +374,10 @@ def generate_recommendations(current_params_df, market_data_df, weekly_data_df, 
             current_spread = current_spreads[pair]
             baseline_spread = baselines[pair]
             
-            # Get weekly data for this pair or empty dict if not available
-            token_weekly_data = weekly_data.get(pair, {})
-            
             recommended = calculate_recommended_params(
                 params, 
                 current_spread, 
                 baseline_spread,
-                token_weekly_data,
                 sensitivities,
                 significant_change_threshold
             )
@@ -635,20 +391,6 @@ def generate_recommendations(current_params_df, market_data_df, weekly_data_df, 
             if not check_null_or_zero(params['position_multiplier']) and not check_null_or_zero(recommended['position_multiplier']):
                 position_change = ((recommended['position_multiplier'] - params['position_multiplier']) / params['position_multiplier']) * 100
             
-            rate_mult_change = 0
-            if not check_null_or_zero(params['rate_multiplier']) and not check_null_or_zero(recommended['rate_multiplier']):
-                rate_mult_change = ((recommended['rate_multiplier'] - params['rate_multiplier']) / params['rate_multiplier']) * 100
-            
-            rate_exp_change = 0
-            if not check_null_or_zero(params['rate_exponent']) and not check_null_or_zero(recommended['rate_exponent']):
-                rate_exp_change = ((recommended['rate_exponent'] - params['rate_exponent']) / params['rate_exponent']) * 100
-            
-            # Add weekly data to the recommendations
-            min_weekly_spread = token_weekly_data.get('min_fee1', None)
-            max_weekly_spread = token_weekly_data.get('max_fee1', None)
-            avg_weekly_spread = token_weekly_data.get('avg_fee1', None)
-            weekly_range_ratio = recommended.get('weekly_range_ratio', 0.5)
-            
             recommendations.append({
                 'pair_name': pair,
                 'token_type': 'Major' if is_major(pair) else 'Altcoin',
@@ -658,19 +400,9 @@ def generate_recommendations(current_params_df, market_data_df, weekly_data_df, 
                 'current_position_multiplier': params['position_multiplier'],
                 'recommended_position_multiplier': recommended['position_multiplier'],
                 'position_change': position_change,
-                'current_rate_multiplier': params['rate_multiplier'],
-                'recommended_rate_multiplier': recommended['rate_multiplier'],
-                'rate_multiplier_change': rate_mult_change,
-                'current_rate_exponent': params['rate_exponent'],
-                'recommended_rate_exponent': recommended['rate_exponent'],
-                'rate_exponent_change': rate_exp_change,
                 'current_spread': current_spread,
                 'baseline_spread': baseline_spread,
-                'spread_change_ratio': safe_division(current_spread, baseline_spread, 1.0),
-                'min_weekly_spread': min_weekly_spread,
-                'max_weekly_spread': max_weekly_spread,
-                'avg_weekly_spread': avg_weekly_spread,
-                'weekly_range_ratio': weekly_range_ratio
+                'spread_change_ratio': safe_division(current_spread, baseline_spread, 1.0)
             })
     
     return pd.DataFrame(recommendations)
@@ -688,14 +420,10 @@ def add_rollbit_comparison(rec_df, rollbit_df):
         # Extract the parameters, handling potential column name differences
         buffer_rate = row.get('buffer_rate', row.get('bust_buffer', np.nan))
         position_multiplier = row.get('position_multiplier', np.nan)
-        rate_multiplier = row.get('rate_multiplier', 6.0)
-        rate_exponent = row.get('rate_exponent', 2.0)
         
         rollbit_params[pair_name] = {
             'buffer_rate': buffer_rate,
-            'position_multiplier': position_multiplier,
-            'rate_multiplier': rate_multiplier,
-            'rate_exponent': rate_exponent,
+            'position_multiplier': position_multiplier
         }
     
     # Add Rollbit parameters to recommendations DataFrame
@@ -706,65 +434,76 @@ def add_rollbit_comparison(rec_df, rollbit_df):
             # Safely add Rollbit parameters (handling NULL/zero values)
             rec_df.at[i, 'rollbit_buffer_rate'] = rollbit_params[pair_name]['buffer_rate']
             rec_df.at[i, 'rollbit_position_multiplier'] = rollbit_params[pair_name]['position_multiplier']
-            rec_df.at[i, 'rollbit_rate_multiplier'] = rollbit_params[pair_name]['rate_multiplier']
-            rec_df.at[i, 'rollbit_rate_exponent'] = rollbit_params[pair_name]['rate_exponent']
     
     return rec_df
 
-# FIXED: Render Excel-style table using Streamlit's built-in styling
-def render_excel_style_table(display_df):
-    """Render a simplified Excel-style parameter table that works with Streamlit"""
+def render_complete_parameter_table(rec_df, sort_by="pair_name"):
+    """Render the complete parameter table with all pairs"""
     
-    # Create a more Streamlit-friendly version with highlighting
-    st.markdown("### Parameter Comparison Table")
+    if rec_df is None or rec_df.empty:
+        st.warning("No parameter data available.")
+        return
     
-    # Create a styled dataframe that Streamlit can render
-    def highlight_significant_changes(val, threshold=5.0, warning_threshold=2.0):
-        """Highlight significant changes in the dataframe"""
-        try:
-            # Extract numeric value from formatted string if needed
-            if isinstance(val, str) and '%' in val:
-                if '+' in val or '-' in val:  # It's a change percentage
-                    num_val = float(val.replace('%', '').replace('+', '').replace('-', ''))
-                    if abs(num_val) > threshold:
-                        return 'background-color: #ffcccc'  # Red for major changes
-                    elif abs(num_val) > warning_threshold:
-                        return 'background-color: #ffffcc'  # Yellow for moderate changes
-        except:
-            pass
+    # Sort the DataFrame based on sort option
+    if sort_by == "pair_name":
+        sorted_df = rec_df.sort_values("pair_name")
+    elif sort_by == "buffer_change":
+        sorted_df = rec_df.sort_values("buffer_change", ascending=False)
+    elif sort_by == "position_change":
+        sorted_df = rec_df.sort_values("position_change", ascending=False)
+    elif sort_by == "spread_change_ratio":
+        sorted_df = rec_df.sort_values("spread_change_ratio", ascending=False)
+    else:
+        sorted_df = rec_df
+    
+    # Highlight significant changes
+    def highlight_changes(val):
+        """Highlight significant changes in the parameters"""
+        if isinstance(val, str) and "%" in val:
+            try:
+                num_val = float(val.strip('%').replace('+', '').replace('-', ''))
+                if num_val > 5.0:
+                    return 'background-color: #ffcccc'  # Red for significant changes
+                elif num_val > 2.0:
+                    return 'background-color: #ffffcc'  # Yellow for moderate changes
+            except:
+                pass
         return ''
     
-    # Prepare simplified dataframe for display
-    simple_df = pd.DataFrame({
-        'Token': display_df['pair_name'],
-        'Type': display_df['token_type'],
-        'Current Spread': display_df['current_spread'].apply(lambda x: f"{x*10000:.2f}" if not pd.isna(x) else "N/A"),
-        'Baseline Spread': display_df['baseline_spread'].apply(lambda x: f"{x*10000:.2f}" if not pd.isna(x) else "N/A"),
-        'Spread Change': display_df['spread_change_ratio'].apply(
+    # Create a formatted DataFrame for display
+    display_df = pd.DataFrame({
+        'Pair': sorted_df['pair_name'],
+        'Type': sorted_df['token_type'],
+        'Current Spread': sorted_df['current_spread'].apply(lambda x: f"{x*10000:.2f}" if not pd.isna(x) else "N/A"),
+        'Baseline Spread': sorted_df['baseline_spread'].apply(lambda x: f"{x*10000:.2f}" if not pd.isna(x) else "N/A"),
+        'Spread Change': sorted_df['spread_change_ratio'].apply(
             lambda x: f"{(x-1)*100:+.2f}%" if not pd.isna(x) else "N/A"
         ),
-        'Buffer Rate': display_df['current_buffer_rate'].apply(
+        'Current Buffer': sorted_df['current_buffer_rate'].apply(
             lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"
         ),
-        'Rec. Buffer': display_df['recommended_buffer_rate'].apply(
+        'Recommended Buffer': sorted_df['recommended_buffer_rate'].apply(
             lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"
         ),
-        'Buffer Δ': display_df['buffer_change'].apply(
+        'Buffer Change': sorted_df['buffer_change'].apply(
             lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
         ),
-        'Position Mult.': display_df['current_position_multiplier'].apply(
+        'Current Position': sorted_df['current_position_multiplier'].apply(
             lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
         ),
-        'Rec. Position': display_df['recommended_position_multiplier'].apply(
+        'Recommended Position': sorted_df['recommended_position_multiplier'].apply(
             lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
         ),
-        'Position Δ': display_df['position_change'].apply(
+        'Position Change': sorted_df['position_change'].apply(
             lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
         )
     })
     
     # Display with highlighting
-    st.dataframe(simple_df.style.applymap(highlight_significant_changes, subset=['Buffer Δ', 'Position Δ']), use_container_width=True)
+    st.dataframe(
+        display_df.style.applymap(highlight_changes, subset=['Buffer Change', 'Position Change', 'Spread Change']),
+        use_container_width=True
+    )
     
     # Add a color legend below the table
     st.markdown("""
@@ -774,55 +513,109 @@ def render_excel_style_table(display_df):
     </div>
     """, unsafe_allow_html=True)
 
-# FIXED: Simplified display of parameter adjustment equations
-def display_parameter_equations_fixed():
-    """Display the parameter adjustment equations with simpler HTML that Streamlit can render"""
-    st.markdown("### Parameter Adjustment Equations")
+def render_significant_changes_summary(rec_df):
+    """Render a summary of pairs with significant parameter changes"""
     
-    st.markdown("These are the equations used to adjust parameters based on spread changes:")
+    if rec_df is None or rec_df.empty:
+        return
     
-    st.markdown("**Buffer Rate** = Current Buffer Rate × (Spread Change Ratio ^ Buffer Sensitivity)")
-    st.markdown("**Position Multiplier** = Current Position Multiplier ÷ (Spread Change Ratio ^ Position Sensitivity)")
-    st.markdown("**Rate Multiplier** = Current Rate Multiplier ÷ (Spread Change Ratio ^ Rate Multiplier Sensitivity)")
-    st.markdown("**Rate Exponent** = Current Rate Exponent × (Spread Change Ratio ^ Rate Exponent Sensitivity)")
+    # Filter pairs with significant changes
+    significant_df = rec_df[
+        (abs(rec_df['buffer_change']) > 2.0) | 
+        (abs(rec_df['position_change']) > 2.0)
+    ]
     
-    st.markdown("Where **Spread Change Ratio** = Current Spread ÷ Baseline Spread")
+    if significant_df.empty:
+        st.info("No pairs have significant parameter changes at this time.")
+        return
     
-    st.markdown("These equations ensure that:")
-    st.markdown("- When spreads increase, buffer rates increase")
-    st.markdown("- When spreads increase, position multipliers decrease")
-    st.markdown("- When spreads increase, rate multipliers decrease")
-    st.markdown("- When spreads increase, rate exponents increase")
+    # Sort by most significant changes (using absolute buffer change as primary sort)
+    significant_df['abs_buffer_change'] = significant_df['buffer_change'].abs()
+    significant_df = significant_df.sort_values('abs_buffer_change', ascending=False)
+    
+    # Display summary table
+    st.markdown("### Pairs Requiring Adjustment")
+    
+    # Create a formatted DataFrame for display
+    display_df = pd.DataFrame({
+        'Pair': significant_df['pair_name'],
+        'Current Spread': significant_df['current_spread'].apply(lambda x: f"{x*10000:.2f}" if not pd.isna(x) else "N/A"),
+        'Spread Change': significant_df['spread_change_ratio'].apply(
+            lambda x: f"{(x-1)*100:+.2f}%" if not pd.isna(x) else "N/A"
+        ),
+        'Current Buffer': significant_df['current_buffer_rate'].apply(
+            lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"
+        ),
+        'Recommended Buffer': significant_df['recommended_buffer_rate'].apply(
+            lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"
+        ),
+        'Buffer Change': significant_df['buffer_change'].apply(
+            lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
+        ),
+        'Current Position': significant_df['current_position_multiplier'].apply(
+            lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
+        ),
+        'Recommended Position': significant_df['recommended_position_multiplier'].apply(
+            lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
+        ),
+        'Position Change': significant_df['position_change'].apply(
+            lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
+        )
+    })
+    
+    st.dataframe(display_df, use_container_width=True)
+    
+    # Display summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        total_significant = len(significant_df)
+        st.metric("Pairs Needing Adjustment", total_significant)
+    
+    with col2:
+        buffer_increases = len(significant_df[significant_df['buffer_change'] > 2.0])
+        st.metric("Buffer Increases", buffer_increases)
+    
+    with col3:
+        buffer_decreases = len(significant_df[significant_df['buffer_change'] < -2.0])
+        st.metric("Buffer Decreases", buffer_decreases)
+    
+    with col4:
+        position_changes = len(significant_df[abs(significant_df['position_change']) > 2.0])
+        st.metric("Position Changes", position_changes)
 
-# FIXED: Rollbit comparison with Streamlit's native components
-def render_rollbit_comparison_fixed(rollbit_comparison_df):
-    """Render the Rollbit comparison using Streamlit's native components"""
+def render_rollbit_comparison(comparison_df):
+    """Render the Rollbit comparison tab"""
     
-    if rollbit_comparison_df is None or rollbit_comparison_df.empty:
+    if comparison_df is None or comparison_df.empty:
         st.info("No matching pairs found with Rollbit data for comparison.")
         return
     
-    # Display the parameter adjustment equations
-    display_parameter_equations_fixed()
+    # Filter to pairs that have Rollbit data
+    rollbit_df = comparison_df.dropna(subset=['rollbit_buffer_rate', 'rollbit_position_multiplier'])
     
-    # Buffer Rate Comparison
+    if rollbit_df.empty:
+        st.info("No matching pairs found with Rollbit data for comparison.")
+        return
+    
+    # Display parameter comparison
     st.markdown("### Buffer Rate Comparison")
     
-    # Create a dataframe for buffer rate comparison
+    # Create buffer rate comparison table
     buffer_df = pd.DataFrame({
-        'Pair': rollbit_comparison_df['pair_name'],
-        'Type': rollbit_comparison_df['token_type'],
-        'SURF Buffer': rollbit_comparison_df['current_buffer_rate'].apply(
+        'Pair': rollbit_df['pair_name'],
+        'Type': rollbit_df['token_type'],
+        'SURF Buffer': rollbit_df['current_buffer_rate'].apply(
             lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"
         ),
-        'Rollbit Buffer': rollbit_comparison_df['rollbit_buffer_rate'].apply(
+        'Rollbit Buffer': rollbit_df['rollbit_buffer_rate'].apply(
             lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"
         )
     })
     
     # Add buffer ratio column
     buffer_ratio = []
-    for _, row in rollbit_comparison_df.iterrows():
+    for _, row in rollbit_df.iterrows():
         if (not check_null_or_zero(row.get('current_buffer_rate')) and 
             not check_null_or_zero(row.get('rollbit_buffer_rate'))):
             buffer_ratio.append(f"{row['current_buffer_rate']/row['rollbit_buffer_rate']:.2f}x")
@@ -837,21 +630,21 @@ def render_rollbit_comparison_fixed(rollbit_comparison_df):
     # Position Multiplier Comparison
     st.markdown("### Position Multiplier Comparison")
     
-    # Create a dataframe for position multiplier comparison
+    # Create position multiplier comparison table
     position_df = pd.DataFrame({
-        'Pair': rollbit_comparison_df['pair_name'],
-        'Type': rollbit_comparison_df['token_type'],
-        'SURF Position Mult.': rollbit_comparison_df['current_position_multiplier'].apply(
+        'Pair': rollbit_df['pair_name'],
+        'Type': rollbit_df['token_type'],
+        'SURF Position Mult.': rollbit_df['current_position_multiplier'].apply(
             lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
         ),
-        'Rollbit Position Mult.': rollbit_comparison_df['rollbit_position_multiplier'].apply(
+        'Rollbit Position Mult.': rollbit_df['rollbit_position_multiplier'].apply(
             lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
         )
     })
     
     # Add position ratio column
     position_ratio = []
-    for _, row in rollbit_comparison_df.iterrows():
+    for _, row in rollbit_df.iterrows():
         if (not check_null_or_zero(row.get('current_position_multiplier')) and 
             not check_null_or_zero(row.get('rollbit_position_multiplier'))):
             position_ratio.append(f"{row['current_position_multiplier']/row['rollbit_position_multiplier']:.2f}x")
@@ -875,244 +668,51 @@ def render_rollbit_comparison_fixed(rollbit_comparison_df):
     *Note: "N/A" is displayed when either SURF or Rollbit has null, zero, or missing values for comparison.*
     """)
 
-# FIXED: Weekly spread range visualization
-def render_weekly_spread_range_fixed(pair_name, min_spread, max_spread, current_spread, avg_spread=None):
-    """Render a simplified visual representation of where the current spread is within weekly range"""
+def render_overview():
+    """Render the overview tab with explanations"""
     
-    # Check if we have all the data needed
-    if (check_null_or_zero(min_spread) or check_null_or_zero(max_spread) or 
-        check_null_or_zero(current_spread)):
-        st.info(f"Weekly spread range data is not available for {pair_name}")
-        return
-    
-    # Calculate position as percentage
-    if max_spread > min_spread:
-        position_pct = (current_spread - min_spread) / (max_spread - min_spread) * 100
-        position_pct = max(0, min(100, position_pct))  # Clamp to [0,100]
-    else:
-        position_pct = 50  # Default to middle if min==max
-    
-    # Format the spreads for display (multiplied by 10000 for readability)
-    min_spread_fmt = f"{min_spread*10000:.2f}"
-    max_spread_fmt = f"{max_spread*10000:.2f}"
-    current_spread_fmt = f"{current_spread*10000:.2f}"
-    avg_spread_fmt = f"{avg_spread*10000:.2f}" if avg_spread is not None else "N/A"
-    
-    # Display header
-    st.markdown(f"### Weekly Spread Range for {pair_name}")
-    
-    # Create a simple progress bar for the range position
-    st.progress(position_pct/100)
-    
-    # Display values in columns
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown(f"**Min:** {min_spread_fmt}")
-    
-    with col2:
-        st.markdown(f"**Current:** {current_spread_fmt} ({position_pct:.1f}% of range)")
-    
-    with col3:
-        st.markdown(f"**Max:** {max_spread_fmt}")
-    
-    st.markdown(f"**Average Spread:** {avg_spread_fmt}")
-    
-    # Add explanation
-    st.markdown("""
-    *The position in the weekly range helps contextualize how the current spread compares 
-    to recent market conditions. Values near the maximum suggest temporary volatility.*
-    """)
-
-def render_market_impact_formula():
-    """Display the market impact formula with explanation"""
-    st.markdown("### Market Impact Formula")
+    st.markdown("### Dashboard Overview")
     
     st.markdown("""
-    When users trade on our exchange, large orders impact the closing price for winning trades. 
-    This formula replicates the market impact of large taking orders in a consistent and predictable way.
-    """)
+    This dashboard helps optimize trading parameters based on market conditions:
     
-    st.code("""
+    ### Key Parameters
+    
+    - **Buffer Rate**: Percentage of the position that must be maintained as margin for safety.
+      - When spreads increase, buffer rate should increase to account for higher volatility risk.
+      
+    - **Position Multiplier**: Factor that determines the maximum position size per unit of margin.
+      - When spreads increase, position multiplier should decrease to limit exposure.
+    
+    ### Parameter Adjustment Equations
+    
+    - Buffer Rate = Current Buffer Rate × (Spread Change Ratio ^ Buffer Sensitivity)
+    - Position Multiplier = Current Position Multiplier ÷ (Spread Change Ratio ^ Position Sensitivity)
+    
+    Where Spread Change Ratio = Current Spread ÷ Baseline Spread
+    
+    ### Methodology
+    
+    1. The dashboard compares current market spreads with stored baseline spreads
+    2. Parameter adjustments are proportional to the relative change in spread
+    3. Sensitivity controls adjust how aggressively parameters respond to spread changes
+    4. Rollbit parameters are shown for comparison with a major competitor
+    
+    ### Market Impact Formula
+    
+    ```
     P_close(T) = P(t) + ((1 - base_rate) / (1 + 1/abs((P(T)/P(t) - 1)*rate_multiplier)^rate_exponent + bet_amount*bet_multiplier/(10^6*abs(P(T)/P(t) - 1)*position_multiplier)))*(P(T) - P(t))
-    """)
+    ```
     
-    st.markdown("#### Parameter Effects:")
-    st.markdown("""
-    - **Buffer Rate**: Controls the safety margin for positions. Higher values reduce leverage but increase stability.
-    - **Position Multiplier**: Controls maximum position size. Higher values allow larger positions with less impact.
-    - **Rate Multiplier**: Controls market impact sensitivity. Lower values increase the market impact.
-    - **Rate Exponent**: Controls how steeply market impact increases with size. Higher values mean more aggressive scaling.
+    Where:
+    - P(t) is the opening price
+    - P(T) is the market price at close time
+    - position_multiplier is the parameter we optimize
     
-    These parameters work together to create a fair and sustainable fee model that accurately represents market conditions.
-    """)
-
-def render_parameter_simulation():
-    """Render interactive parameter simulation"""
-    st.markdown("### Parameter Impact Simulation")
+    ### Interpretation
     
-    st.markdown("""
-    This simulator helps visualize how parameter changes affect market impact and closing prices for trades.
-    """)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Parameter inputs
-        buffer_rate = st.slider("Buffer Rate (%)", min_value=0.1, max_value=5.0, value=1.0, step=0.1) / 100
-        position_multiplier = st.slider("Position Multiplier", min_value=100000, max_value=10000000, value=1000000, step=100000)
-    
-    with col2:
-        rate_multiplier = st.slider("Rate Multiplier", min_value=1.0, max_value=15.0, value=6.0, step=0.5)
-        rate_exponent = st.slider("Rate Exponent", min_value=1.0, max_value=5.0, value=2.0, step=0.1)
-    
-    # Additional parameters for simulation
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        initial_price = st.number_input("Initial Price (P(t))", min_value=100.0, max_value=100000.0, value=50000.0, step=1000.0)
-    
-    with col2:
-        final_price = st.number_input("Final Price (P(T))", min_value=100.0, max_value=100000.0, value=55000.0, step=1000.0)
-    
-    with col3:
-        bet_amount = st.number_input("Bet Amount", min_value=100, max_value=1000000, value=10000, step=1000)
-    
-    # Fixed parameters
-    base_rate = 0.01  # 1% base rate
-    bet_multiplier = 1.0  # Default bet multiplier
-    
-    # Calculate market impact for different position sizes
-    position_sizes = [1000, 5000, 10000, 50000, 100000, 500000]
-    impacts = []
-    
-    for amount in position_sizes:
-        # Calculate price change percentage
-        price_change_pct = abs(final_price/initial_price - 1)
-        
-        # Calculate denominator parts
-        exponent_part = (1/abs(price_change_pct * rate_multiplier))**rate_exponent
-        size_part = amount * bet_multiplier / (10**6 * abs(price_change_pct) * position_multiplier)
-        
-        # Calculate market impact factor
-        impact_factor = (1 - base_rate) / (1 + exponent_part + size_part)
-        
-        # Calculate effective price and impact percentage
-        if final_price > initial_price:  # Long position
-            effective_price = initial_price + impact_factor * (final_price - initial_price)
-            raw_profit_pct = (final_price - initial_price) / initial_price * 100
-            effective_profit_pct = (effective_price - initial_price) / initial_price * 100
-            impact_pct = (raw_profit_pct - effective_profit_pct) / raw_profit_pct * 100 if raw_profit_pct != 0 else 0
-        else:  # Short position
-            effective_price = initial_price + impact_factor * (final_price - initial_price)
-            raw_profit_pct = (initial_price - final_price) / initial_price * 100
-            effective_profit_pct = (initial_price - effective_price) / initial_price * 100
-            impact_pct = (raw_profit_pct - effective_profit_pct) / raw_profit_pct * 100 if raw_profit_pct != 0 else 0
-        
-        impacts.append({
-            'Position Size': amount,
-            'Effective Price': effective_price,
-            'Market Impact': impact_pct,
-            'Raw P&L %': raw_profit_pct,
-            'Effective P&L %': effective_profit_pct
-        })
-    
-    # Convert to DataFrame for display
-    impact_df = pd.DataFrame(impacts)
-    
-    # Display results
-    st.markdown("#### Market Impact Simulation Results")
-    
-    # Format the DataFrame for display
-    formatted_df = pd.DataFrame({
-        'Position Size': impact_df['Position Size'].apply(lambda x: f"${x:,}"),
-        'Raw P&L %': impact_df['Raw P&L %'].apply(lambda x: f"{x:.2f}%"),
-        'Effective P&L %': impact_df['Effective P&L %'].apply(lambda x: f"{x:.2f}%"),
-        'Impact %': impact_df['Market Impact'].apply(lambda x: f"{x:.2f}%"),
-        'Effective Price': impact_df['Effective Price'].apply(lambda x: f"${x:,.2f}")
-    })
-    
-    st.dataframe(formatted_df, use_container_width=True)
-    
-    # Create visualization of market impact
-    try:
-        # Debug plot data
-        st.write(f"Impact DataFrame shape: {impact_df.shape}")
-        
-        fig = go.Figure()
-        
-        # Add bar chart for market impact percentage
-        fig.add_trace(go.Bar(
-            x=[f"${size:,}" for size in impact_df['Position Size']],
-            y=impact_df['Market Impact'],
-            name='Market Impact %',
-            marker_color='red'
-        ))
-        
-        # Add line chart for effective P&L percentage
-        fig.add_trace(go.Scatter(
-            x=[f"${size:,}" for size in impact_df['Position Size']],
-            y=impact_df['Effective P&L %'],
-            name='Effective P&L %',
-            mode='lines+markers',
-            marker=dict(size=8, color='blue'),
-            yaxis='y2'
-        ))
-        
-        # Update layout with two y-axes
-        fig.update_layout(
-            title="Market Impact vs. Position Size",
-            xaxis_title="Position Size (USD)",
-            yaxis=dict(
-                title="Market Impact %",
-                titlefont=dict(color="red"),
-                tickfont=dict(color="red")
-            ),
-            yaxis2=dict(
-                title="Effective P&L %",
-                titlefont=dict(color="blue"),
-                tickfont=dict(color="blue"),
-                overlaying="y",
-                side="right"
-            ),
-            barmode='group',
-            height=500,
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="right",
-                x=1
-            )
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-    except Exception as e:
-        st.error(f"Error creating plot: {e}")
-        
-        # Fallback to simpler chart
-        st.write("Fallback chart:")
-        
-        chart_data = pd.DataFrame({
-            'Position Size': impact_df['Position Size'],
-            'Market Impact %': impact_df['Market Impact'],
-            'Effective P&L %': impact_df['Effective P&L %']
-        })
-        
-        st.bar_chart(chart_data.set_index('Position Size')['Market Impact %'])
-    
-    # Explanation of results
-    st.markdown("""
-    #### How to Interpret Results
-    
-    This simulation shows how different position sizes affect market impact and effective P&L:
-    
-    - **Raw P&L %:** The unrealized profit percentage without market impact.
-    - **Effective P&L %:** The realized profit percentage after market impact.
-    - **Impact %:** The percentage of potential profit reduced by market impact.
-    - **Effective Price:** The actual closing price after market impact.
-    
-    Adjusting the parameters above will show how they influence market impact across different position sizes.
+    - Parameters with significant recommended changes may need manual adjustment
+    - Consider both market conditions and competitor settings when finalizing parameters
     """)
 
 # --- Main Application ---
@@ -1145,583 +745,60 @@ def main():
     st.sidebar.header("Adjustment Sensitivity")
     buffer_sensitivity = st.sidebar.slider("Buffer Rate Sensitivity", 0.1, 1.0, 0.5, 0.1)
     position_sensitivity = st.sidebar.slider("Position Multiplier Sensitivity", 0.1, 1.0, 0.5, 0.1)
-    rate_multiplier_sensitivity = st.sidebar.slider("Rate Multiplier Sensitivity", 0.1, 1.0, 0.5, 0.1)
-    rate_exponent_sensitivity = st.sidebar.slider("Rate Exponent Sensitivity", 0.1, 1.0, 0.5, 0.1)
 
     # Set sensitivities
     sensitivities = {
         'buffer_sensitivity': buffer_sensitivity,
-        'position_sensitivity': position_sensitivity,
-        'rate_multiplier_sensitivity': rate_multiplier_sensitivity,
-        'rate_exponent_sensitivity': rate_exponent_sensitivity
+        'position_sensitivity': position_sensitivity
     }
 
-    # Create simple tab navigation
-    tab_options = ["Overview", "Parameter Recommendations", "Rollbit Comparison", "Impact Simulation", "Formula Explanation"]
-    tab_cols = st.columns(len(tab_options))
-    selected_tab = None
-
-    for i, tab in enumerate(tab_options):
-        with tab_cols[i]:
-            if st.button(tab, key=f"tab_{i}", use_container_width=True):
-                selected_tab = tab
-
-    # Default tab if none selected
-    if selected_tab is None:
-        selected_tab = "Overview"
-
-    st.markdown(f"### {selected_tab}", unsafe_allow_html=True)
-    st.markdown("---")
-
-    # Fetch current data
+    # Create simplified tab navigation
+    tabs = st.tabs(["Complete Parameter Table", "Rollbit Comparison", "Overview"])
+    
+    # Fetch data
     current_params_df = fetch_current_parameters()
     market_data_df = fetch_market_spread_data()
-    weekly_data_df = fetch_weekly_spread_data()
     baselines_df = fetch_spread_baselines()
     rollbit_df = fetch_rollbit_parameters()
 
     # Generate recommendations
     if current_params_df is not None and market_data_df is not None and baselines_df is not None:
-        # Generate recommendations with updated sensitivities and weekly data
-        rec_df = generate_recommendations(current_params_df, market_data_df, weekly_data_df, baselines_df, sensitivities)
+        # Generate recommendations with the selected sensitivities
+        rec_df = generate_recommendations(current_params_df, market_data_df, baselines_df, sensitivities)
         
         # Add Rollbit comparison data if available
         if rollbit_df is not None:
             rec_df = add_rollbit_comparison(rec_df, rollbit_df)
         
-        # Render the selected tab content
-        if selected_tab == "Overview":
-            # Display the parameter adjustment equations
-            display_parameter_equations_fixed()
+        # Render the appropriate tab content
+        with tabs[0]:  # Complete Parameter Table
+            # Add sort options
+            sort_by = st.selectbox(
+                "Sort by:",
+                options=[
+                    "Pair Name", 
+                    "Buffer Change", 
+                    "Position Change", 
+                    "Spread Change Ratio"
+                ],
+                index=0
+            )
             
-            st.markdown("""
-            #### Dashboard Overview
+            # Show pairs requiring adjustment first
+            render_significant_changes_summary(rec_df)
             
-            This dashboard helps optimize trading parameters based on market conditions. Key features:
+            # Show complete parameter comparison table
+            st.markdown("### Complete Parameter Comparison Table")
+            render_complete_parameter_table(rec_df, sort_by)
             
-            - **Parameter Recommendations**: Auto-generated recommendations based on market spread changes and weekly ranges
-            - **Rollbit Comparison**: Compare your parameters with Rollbit's settings
-            - **Impact Simulation**: Visualize how parameters affect market impact and P&L
-            - **Reset Baselines**: Set current market spreads as new baselines (sidebar)
+        with tabs[1]:  # Rollbit Comparison
+            render_rollbit_comparison(rec_df)
             
-            Use the sensitivity sliders in the sidebar to control how aggressively parameters adapt to market changes.
-            """)
-            
-            # Display current status metrics
-            if rec_df is not None and not rec_df.empty:
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    total_pairs = len(rec_df)
-                    st.metric("Total Trading Pairs", total_pairs)
-                
-                with col2:
-                    significant_changes = len(rec_df[(abs(rec_df['buffer_change']) > 1.0) | 
-                                               (abs(rec_df['position_change']) > 1.0)])
-                    st.metric("Pairs Needing Adjustment", significant_changes)
-                
-                with col3:
-                    avg_spread_change = rec_df['spread_change_ratio'].mean()
-                    spread_direction = "↑" if avg_spread_change > 1.0 else "↓"
-                    st.metric("Avg Spread Change", f"{spread_direction} {abs(avg_spread_change-1)*100:.2f}%")
-            
-            # Show current parameters for major pairs
-            st.markdown("### Current Parameters for Major Tokens")
-            
-            if current_params_df is not None and not current_params_df.empty:
-                major_pairs = current_params_df[current_params_df['pair_name'].apply(is_major)]
-                
-                if not major_pairs.empty:
-                    # Format for display
-                    display_df = pd.DataFrame({
-                        'Token': major_pairs['pair_name'],
-                        'Buffer Rate': major_pairs['buffer_rate'].apply(lambda x: format_percent(x)),
-                        'Position Multiplier': major_pairs['position_multiplier'].apply(lambda x: format_number(x)),
-                        'Rate Multiplier': major_pairs['rate_multiplier'].apply(lambda x: format_float(x)),
-                        'Rate Exponent': major_pairs['rate_exponent'].apply(lambda x: format_float(x))
-                    })
-                    
-                    st.dataframe(display_df, use_container_width=True)
-                else:
-                    st.info("No major tokens configured")
-            
-            # Show baseline vs current spreads
-            st.markdown("### Market Spread Analysis")
-            
-            if baselines_df is not None and market_data_df is not None:
-                # Create spread comparison table
-                current_spreads = calculate_current_spreads(market_data_df)
-                
-                spread_data = []
-                for _, row in baselines_df.iterrows():
-                    pair = row['pair_name']
-                    if pair in current_spreads:
-                        # Get weekly range data if available
-                        min_weekly = None
-                        max_weekly = None
-                        avg_weekly = None
-                        
-                        if weekly_data_df is not None and not weekly_data_df.empty:
-                            weekly_row = weekly_data_df[weekly_data_df['pair_name'] == pair]
-                            if not weekly_row.empty:
-                                min_weekly = weekly_row.iloc[0]['min_fee1']
-                                max_weekly = weekly_row.iloc[0]['max_fee1']
-                                avg_weekly = weekly_row.iloc[0]['avg_fee1']
-                        
-                        # Calculate position in range
-                        range_position = None
-                        if min_weekly is not None and max_weekly is not None and min_weekly < max_weekly:
-                            range_position = (current_spreads[pair] - min_weekly) / (max_weekly - min_weekly)
-                            range_position = max(0, min(1, range_position))  # Clamp to [0,1]
-                        
-                        spread_data.append({
-                            'Token': pair,
-                            'Type': 'Major' if is_major(pair) else 'Altcoin',
-                            'Baseline Spread': row['baseline_spread'],
-                            'Current Spread': current_spreads[pair],
-                            'Change Ratio': safe_division(current_spreads[pair], row['baseline_spread'], 1.0),
-                            'Change %': (safe_division(current_spreads[pair], row['baseline_spread'], 1.0) - 1) * 100,
-                            'Min Weekly': min_weekly,
-                            'Max Weekly': max_weekly,
-                            'Avg Weekly': avg_weekly,
-                            'Range Position': range_position
-                        })
-                
-                if spread_data:
-                    spread_df = pd.DataFrame(spread_data)
-                    spread_df = spread_df.sort_values('Change %', ascending=False)
-                    
-                    # Format for display
-                    display_df = pd.DataFrame({
-                        'Token': spread_df['Token'],
-                        'Type': spread_df['Type'],
-                        'Baseline Spread': spread_df['Baseline Spread'].apply(lambda x: f"{x*10000:.2f}"),
-                        'Current Spread': spread_df['Current Spread'].apply(lambda x: f"{x*10000:.2f}"),
-                        'Change': spread_df['Change %'].apply(lambda x: f"{x:+.2f}%"),
-                        'Range Position': spread_df['Range Position'].apply(
-                            lambda x: f"{x*100:.0f}%" if x is not None else "N/A"
-                        )
-                    })
-                    
-                    st.dataframe(display_df, use_container_width=True)
-                    
-                    # Show weekly range for a selected token
-                    if len(spread_df) > 0:
-                        st.markdown("### Weekly Spread Range Analysis")
-                        
-                        # Token selector
-                        selected_token = st.selectbox(
-                            "Select a token to view its weekly spread range:",
-                            spread_df['Token'].tolist()
-                        )
-                        
-                        # Find the selected token in the data
-                        token_data = spread_df[spread_df['Token'] == selected_token].iloc[0]
-                        
-                        # Render the weekly range visualization
-                        render_weekly_spread_range_fixed(
-                            token_data['Token'],
-                            token_data['Min Weekly'],
-                            token_data['Max Weekly'],
-                            token_data['Current Spread'],
-                            token_data['Avg Weekly']
-                        )
-                    
-                    # Create visualization of spread changes
-                    try:
-                        # Prepare the data for plotting
-                        plot_data = spread_df.head(15).copy()  # Top 15 for readability
-                        
-                        # Check if we have data
-                        if not plot_data.empty:
-                            fig = px.bar(
-                                plot_data,
-                                x='Token',
-                                y='Change %',
-                                color='Type',
-                                title="Biggest Spread Changes (Baseline vs Current)",
-                                color_discrete_map={
-                                    'Major': '#1976D2',
-                                    'Altcoin': '#FFA000'
-                                }
-                            )
-                            
-                            # Add reference line at 0
-                            fig.add_shape(
-                                type="line",
-                                x0=-0.5, y0=0,
-                                x1=len(plot_data)-0.5, y1=0,
-                                line=dict(color="red", width=2, dash="dash")
-                            )
-                            
-                            # Update layout
-                            fig.update_layout(
-                                height=400,
-                                xaxis_tickangle=-45,
-                                yaxis_title="Spread Change %"
-                            )
-                            
-                            st.plotly_chart(fig, use_container_width=True)
-                        else:
-                            st.warning("Not enough data to create a plot")
-                    except Exception as e:
-                        st.error(f"Error creating plot: {e}")
-                        
-                        # Fallback to a simpler chart
-                        st.write("Showing alternative chart:")
-                        if not spread_df.empty:
-                            simple_df = spread_df.head(15).sort_values('Change %', ascending=False)
-                            st.bar_chart(data=simple_df.set_index('Token')['Change %'])
-                else:
-                    st.info("No spread comparison data available")
-            
-        elif selected_tab == "Parameter Recommendations":
-            if rec_df is not None and not rec_df.empty:
-                # Create summary cards
-                st.markdown("#### Recommended Parameter Changes")
-                
-                # Get counts for significant changes
-                buffer_increases = len(rec_df[rec_df['buffer_change'] > 1.0])
-                buffer_decreases = len(rec_df[rec_df['buffer_change'] < -1.0])
-                position_increases = len(rec_df[rec_df['position_change'] > 1.0])
-                position_decreases = len(rec_df[rec_df['position_change'] < -1.0])
-                
-                col1, col2, col3, col4 = st.columns(4)
-                
-                with col1:
-                    st.metric("Buffer Increases", buffer_increases)
-                with col2:
-                    st.metric("Buffer Decreases", buffer_decreases)
-                with col3:
-                    st.metric("Position Increases", position_increases)
-                with col4:
-                    st.metric("Position Decreases", position_decreases)
-                
-                # Display pairs with significant changes
-                st.markdown("#### Pairs with Significant Parameter Changes")
-                
-                significant_changes = rec_df[
-                    (abs(rec_df['buffer_change']) > 1.0) | 
-                    (abs(rec_df['position_change']) > 1.0) |
-                    (abs(rec_df['rate_multiplier_change']) > 1.0) |
-                    (abs(rec_df['rate_exponent_change']) > 1.0)
-                ].copy()
-                
-                if not significant_changes.empty:
-                    # Format for display
-                    display_df = pd.DataFrame({
-                        'Pair': significant_changes['pair_name'],
-                        'Type': significant_changes['token_type'],
-                        'Current Buffer': significant_changes['current_buffer_rate'].apply(lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"),
-                        'Rec. Buffer': significant_changes['recommended_buffer_rate'].apply(lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"),
-                        'Buffer Δ': significant_changes['buffer_change'].apply(lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"),
-                        'Current Pos.': significant_changes['current_position_multiplier'].apply(lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"),
-                        'Rec. Pos.': significant_changes['recommended_position_multiplier'].apply(lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"),
-                        'Pos. Δ': significant_changes['position_change'].apply(lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A")
-                    })
-                    
-                    st.dataframe(display_df, use_container_width=True)
-                    
-                    # Show weekly range context for selected pair
-                    if len(significant_changes) > 0:
-                        selected_pair = st.selectbox(
-                            "Select a pair to view its weekly spread context:",
-                            significant_changes['pair_name'].tolist()
-                        )
-                        
-                        pair_data = significant_changes[significant_changes['pair_name'] == selected_pair].iloc[0]
-                        
-                        # Render the weekly range visualization
-                        render_weekly_spread_range_fixed(
-                            pair_data['pair_name'],
-                            pair_data['min_weekly_spread'],
-                            pair_data['max_weekly_spread'],
-                            pair_data['current_spread'],
-                            pair_data['avg_weekly_spread']
-                        )
-                        
-                        # Explain how this affects the recommendation
-                        st.markdown("""
-                        #### How Weekly Range Affects Recommendations
-                        
-                        When current spread is near the top of the weekly range, parameter changes are amplified because high spreads are more likely temporary market conditions.
-                        
-                        When current spread is near the bottom of the range, parameter changes are more conservative because low spreads might not persist.
-                        """)
-                else:
-                    st.info("No significant parameter changes recommended.")
-                    
-                # Create visualizations
-                st.markdown("#### Parameter Change Distribution")
-                
-                try:
-                    # Create a histogram for buffer rate and position multiplier changes
-                    buffer_changes = rec_df['buffer_change'].dropna().tolist()
-                    position_changes = rec_df['position_change'].dropna().tolist()
-                    
-                    if buffer_changes and position_changes:
-                        fig = go.Figure()
-                        
-                        # Add histogram for buffer rate changes
-                        fig.add_trace(go.Histogram(
-                            x=buffer_changes,
-                            name='Buffer Rate Changes',
-                            nbinsx=20,
-                            marker_color='blue',
-                            opacity=0.7
-                        ))
-                        
-                        # Add histogram for position multiplier changes
-                        fig.add_trace(go.Histogram(
-                            x=position_changes,
-                            name='Position Multiplier Changes',
-                            nbinsx=20,
-                            marker_color='green',
-                            opacity=0.7
-                        ))
-                        
-                        # Add reference line at 0
-                        fig.add_shape(
-                            type="line",
-                            x0=0, y0=0,
-                            x1=0, y1=1,
-                            yref="paper",
-                            line=dict(color="red", width=2, dash="dash")
-                        )
-                        
-                        # Update layout
-                        fig.update_layout(
-                            title="Distribution of Parameter Changes",
-                            xaxis_title="Percent Change (%)",
-                            yaxis_title="Number of Tokens",
-                            barmode='overlay',
-                            height=400
-                        )
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.warning("Not enough data to create a histogram")
-                except Exception as e:
-                    st.error(f"Error creating histogram: {e}")
-                    
-                    # Fallback to simple text statistics
-                    st.write("Summary statistics:")
-                    st.write(f"Buffer change average: {rec_df['buffer_change'].mean():.2f}%")
-                    st.write(f"Position change average: {rec_df['position_change'].mean():.2f}%")
-                
-                # Show detailed parameter table
-                st.markdown("#### Complete Parameter Recommendations")
-                
-                # Sort by absolute buffer change (descending)
-                rec_df['abs_buffer_change'] = rec_df['buffer_change'].abs()
-                sorted_df = rec_df.sort_values(by='abs_buffer_change', ascending=False)
-                
-                # Display detailed table
-                display_df = pd.DataFrame({
-                    'Pair': sorted_df['pair_name'],
-                    'Type': sorted_df['token_type'],
-                    'Current Buffer': sorted_df['current_buffer_rate'].apply(lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"),
-                    'Rec. Buffer': sorted_df['recommended_buffer_rate'].apply(lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"),
-                    'Buffer Δ': sorted_df['buffer_change'].apply(lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"),
-                    'Current Pos.': sorted_df['current_position_multiplier'].apply(lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"),
-                    'Rec. Pos.': sorted_df['recommended_position_multiplier'].apply(lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"),
-                    'Pos. Δ': sorted_df['position_change'].apply(lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"),
-                    'Rate Mult.': sorted_df['current_rate_multiplier'].apply(lambda x: f"{x:.2f}" if not pd.isna(x) else "N/A"),
-                    'Rec. Rate Mult.': sorted_df['recommended_rate_multiplier'].apply(lambda x: f"{x:.2f}" if not pd.isna(x) else "N/A"),
-                    'Rate Exp.': sorted_df['current_rate_exponent'].apply(lambda x: f"{x:.2f}" if not pd.isna(x) else "N/A"),
-                    'Rec. Rate Exp.': sorted_df['recommended_rate_exponent'].apply(lambda x: f"{x:.2f}" if not pd.isna(x) else "N/A")
-                })
-                
-                st.dataframe(display_df, use_container_width=True)
-                
-                # Create scatter plot of spread change ratio vs parameter changes
-                st.markdown("#### Spread Change Impact on Parameters")
-                
-                try:
-                    # Gather data for the scatter plot
-                    plot_data = sorted_df[['pair_name', 'spread_change_ratio', 'buffer_change', 'position_change']].dropna()
-                    
-                    if not plot_data.empty:
-                        fig = go.Figure()
-                        
-                        # Add scatter plot for buffer rate changes
-                        fig.add_trace(go.Scatter(
-                            x=plot_data['spread_change_ratio'],
-                            y=plot_data['buffer_change'],
-                            mode='markers',
-                            name='Buffer Rate Change',
-                            marker=dict(size=8, color='blue', opacity=0.7),
-                            text=plot_data['pair_name']  # Add token names for hover
-                        ))
-                        
-                        # Add scatter plot for position multiplier changes
-                        fig.add_trace(go.Scatter(
-                            x=plot_data['spread_change_ratio'],
-                            y=plot_data['position_change'],
-                            mode='markers',
-                            name='Position Multiplier Change',
-                            marker=dict(size=8, color='green', opacity=0.7),
-                            text=plot_data['pair_name']  # Add token names for hover
-                        ))
-                        
-                        # Add reference lines
-                        fig.add_shape(
-                            type="line",
-                            x0=0.5, y0=0,
-                            x1=2.0, y1=0,
-                            line=dict(color="red", width=2, dash="dash")
-                        )
-                        
-                        fig.add_shape(
-                            type="line",
-                            x0=1.0, y0=-50,
-                            x1=1.0, y1=50,
-                            line=dict(color="red", width=2, dash="dash")
-                        )
-                        
-                        # Update layout
-                        fig.update_layout(
-                            title="Parameter Changes vs Spread Change Ratio",
-                            xaxis_title="Spread Change Ratio (Current/Baseline)",
-                            yaxis_title="Parameter Change (%)",
-                            height=500,
-                            xaxis=dict(range=[0.5, 2.0]),
-                            yaxis=dict(range=[-50, 50]),
-                            hovermode="closest"
-                        )
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.warning("Not enough data to create a scatter plot")
-                except Exception as e:
-                    st.error(f"Error creating scatter plot: {e}")
-                    
-                    # Fallback to simpler visualization
-                    st.write("Alternative visualization (spread change vs parameter change):")
-                    alt_data = sorted_df[['pair_name', 'spread_change_ratio', 'buffer_change']].head(10)
-                    st.write(alt_data)
-            else:
-                st.warning("No recommendation data available. Please check database connection and try refreshing.")
-                
-        elif selected_tab == "Rollbit Comparison":
-            # Use the fixed render function for Rollbit comparison
-            render_rollbit_comparison_fixed(rec_df)
-                
-        elif selected_tab == "Impact Simulation":
-            render_parameter_simulation()
-            
-        elif selected_tab == "Formula Explanation":
-            render_market_impact_formula()
-            
-        # Add Excel-style parameter table
-        if selected_tab in ["Overview", "Parameter Recommendations"]:
-            st.markdown("## Parameter Table")
-            
-            # Filter to only show major tokens for a cleaner initial view
-            col1, col2 = st.columns(2)
-            with col1:
-                view_option = st.selectbox(
-                    "View tokens:",
-                    ["Major Tokens Only", "All Tokens", "Tokens Needing Adjustment"]
-                )
-            
-            with col2:
-                sort_by = st.selectbox(
-                    "Sort by:",
-                    ["Pair Name", "Buffer Change (%)", "Position Change (%)", "Spread Change Ratio"]
-                )
-            
-            # Filter based on view option
-            if view_option == "Major Tokens Only":
-                display_df = rec_df[rec_df['token_type'] == 'Major'].copy()
-            elif view_option == "Tokens Needing Adjustment":
-                display_df = rec_df[
-                    (abs(rec_df['buffer_change']) > 1.0) | 
-                    (abs(rec_df['position_change']) > 1.0)
-                ].copy()
-            else:
-                display_df = rec_df.copy()
-            
-            # Sort based on selection
-            if sort_by == "Pair Name":
-                display_df = display_df.sort_values("pair_name")
-            elif sort_by == "Buffer Change (%)":
-                display_df = display_df.sort_values("buffer_change", ascending=False)
-            elif sort_by == "Position Change (%)":
-                display_df = display_df.sort_values("position_change", ascending=False)
-            elif sort_by == "Spread Change Ratio":
-                display_df = display_df.sort_values("spread_change_ratio", ascending=False)
-            
-            # Render the table using the fixed function
-            render_excel_style_table(display_df)
+        with tabs[2]:  # Overview
+            render_overview()
             
     else:
         st.error("Failed to load required data. Please check database connection and try refreshing.")
-
-    # Add footer with explanatory information
-    with st.expander("Understanding Parameter Optimization"):
-        st.markdown("""
-        ### About This Dashboard
-        
-        This dashboard helps optimize trading parameters based on market conditions:
-        
-        ### Key Parameters
-        
-        - **Buffer Rate**: Percentage of the position that must be maintained as margin for safety.
-          - When spreads increase, buffer rate should increase to account for higher volatility risk.
-          
-        - **Position Multiplier**: Factor that determines the maximum position size per unit of margin.
-          - When spreads increase, position multiplier should decrease to limit exposure.
-          
-        - **Rate Multiplier**: Factor that affects the market impact (funding rate) for position sizes.
-          - When spreads increase, rate multiplier typically decreases to avoid excessive funding rates.
-          
-        - **Rate Exponent**: Exponent that determines how quickly market impact increases with position size.
-          - When spreads increase, rate exponent typically increases to more aggressively limit large positions.
-        
-        ### Parameter Adjustment Equations
-        
-        - Buffer Rate = Current Buffer Rate × (Spread Change Ratio ^ Buffer Sensitivity)
-        - Position Multiplier = Current Position Multiplier ÷ (Spread Change Ratio ^ Position Sensitivity)
-        - Rate Multiplier = Current Rate Multiplier ÷ (Spread Change Ratio ^ Rate Multiplier Sensitivity)
-        - Rate Exponent = Current Rate Exponent × (Spread Change Ratio ^ Rate Exponent Sensitivity)
-        
-        Where Spread Change Ratio = Current Spread ÷ Baseline Spread
-        
-        ### Methodology
-        
-        1. The dashboard compares current market spreads with stored baseline spreads
-        2. Weekly spread ranges are used to contextualize how significant current spreads are
-        3. Parameter adjustments are proportional to the relative change in spread
-        4. Sensitivity controls adjust how aggressively parameters respond to spread changes
-        5. Rollbit parameters are shown for comparison with a major competitor
-        
-        ### Weekly Spread Range
-        
-        The dashboard now shows where the current spread falls within the weekly range (min to max):
-        - If current spread is near the weekly maximum, parameter changes are amplified
-        - If current spread is near the weekly minimum, parameter changes are more conservative
-        - This helps avoid overreacting to temporary market conditions
-        
-        ### Market Impact Formula
-        
-        ```
-        P_close(T) = P(t) + ((1 - base_rate) / (1 + 1/abs((P(T)/P(t) - 1)*rate_multiplier)^rate_exponent + bet_amount*bet_multiplier/(10^6*abs(P(T)/P(t) - 1)*position_multiplier)))*(P(T) - P(t))
-        ```
-        
-        Where:
-        - P(t) is the opening price
-        - P(T) is the market price at close time
-        - rate_multiplier, rate_exponent, and position_multiplier are the parameters we optimize
-        
-        ### Interpretation
-        
-        - Parameters with significant recommended changes may need manual adjustment
-        - The scatter plot shows how spread changes correlate with parameter recommendations
-        - Consider weekly spread range context when evaluating parameter changes
-        - Consider both market conditions and competitor settings when finalizing parameters
-        - Use the Impact Simulation to visualize exactly how your settings affect winning trade prices
-        """)
 
 if __name__ == "__main__":
     main()
