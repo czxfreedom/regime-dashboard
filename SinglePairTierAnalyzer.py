@@ -86,19 +86,25 @@ def get_connection_pool():
         st.error(f"Error creating connection pool: {e}")
         return None
 
-
 # Get a connection from the pool
 def get_conn():
-    pool = get_connection_pool()
-    if pool:
-        return pool.getconn()
-    return None
+    try:
+        pool = get_connection_pool()
+        if pool:
+            return pool.getconn()
+        return None
+    except Exception as e:
+        st.error(f"Error getting connection: {e}")
+        return None
 
 # Return a connection to the pool
 def release_conn(conn):
-    pool = get_connection_pool()
-    if pool and conn:
-        pool.putconn(conn)
+    try:
+        pool = get_connection_pool()
+        if pool and conn:
+            pool.putconn(conn)
+    except Exception as e:
+        st.error(f"Error releasing connection: {e}")
 
 # Format number with commas (e.g., 1,234,567)
 def format_number(num):
@@ -134,7 +140,7 @@ def get_available_pairs():
         pairs = [row[0] for row in cursor.fetchall()]
 
         cursor.close()
-        conn.close()
+        release_conn(conn)
 
         # Return sorted pairs or fallback to predefined list if empty
         return sorted(pairs) if pairs else PREDEFINED_PAIRS
