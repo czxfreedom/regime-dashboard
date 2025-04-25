@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 import pytz
 import traceback
 import json
-import os
 import math
 
 # Page configuration
@@ -646,7 +645,8 @@ def calculate_recommended_params(current_params, current_spread, baseline_spread
     z_score = (current_spread - baseline_spread) / weekly_std_dev if weekly_std_dev > 0 else 0
     
     # Check if change is significant based on z-score magnitude
-    if abs(z_score) < significant_change_threshold:
+    # Avoid using abs() directly on z_score
+    if -significant_change_threshold < z_score < significant_change_threshold:
         return {
             'buffer_rate': current_buffer_rate,
             'position_multiplier': current_position_multiplier
@@ -657,9 +657,9 @@ def calculate_recommended_params(current_params, current_spread, baseline_spread
     position_sensitivity = sensitivities.get('position_sensitivity', 0.5)
     
     # Calculate change factor based on z-score
-    # Use tanh to create a bounded factor (between 0.5 and 2.0 for typical z-scores)
+    # Use math.fabs() instead of abs() on the z_score value
     change_direction = 1 if z_score > 0 else -1
-    z_factor = 1.0 + (change_direction * min(abs(z_score) / 5.0, 0.5))
+    z_factor = 1.0 + (change_direction * min(abs(float(z_score)) / 5.0, 0.5))
     
     # Calculate new parameters
     recommended_buffer_rate = current_buffer_rate * (z_factor ** buffer_sensitivity)
@@ -740,7 +740,8 @@ def generate_recommendations(current_params_df, market_data_df, baselines_df, we
             if (not check_null_or_zero(params['position_multiplier']) and 
                 not check_null_or_zero(recommended['position_multiplier']) and
                 not pd.isna(params['position_multiplier']) and 
-                not pd.isna(recommended['position_multiplier'])):
+                not pd.isna(recommended['position_multiplier'])
+               ):
                 # Only show position change if the rounded values are different
                 if round(recommended['position_multiplier']) != round(params['position_multiplier']):
                     position_change = ((recommended['position_multiplier'] - params['position_multiplier']) / params['position_multiplier']) * 100
@@ -750,7 +751,7 @@ def generate_recommendations(current_params_df, market_data_df, baselines_df, we
             if current_spread > 0 and baseline_spread > 0:
                 spread_change_pct = ((current_spread / baseline_spread) - 1) * 100
             
-            # Calculate z-score if possible
+            # Calculate z-score if possible, using standard formula not .abs()
             z_score = None
             if pair in weekly_stats and 'std_dev' in weekly_stats[pair] and weekly_stats[pair]['std_dev'] > 0:
                 z_score = (current_spread - baseline_spread) / weekly_stats[pair]['std_dev']
@@ -827,12 +828,14 @@ def render_complete_parameter_table(rec_df, sort_by="Pair Name"):
     sort_column = sort_map.get(sort_by, "pair_name")
     
     if sort_column == "z_score":
-        # Handle NaN values in z_score before sorting
+        # Handle NaN values in z_score without using .abs() directly
         sorted_df = rec_df.copy()
-        # Fill NaN z_scores with 0 for sorting purposes only
-        sorted_df['z_score_for_sort'] = sorted_df['z_score'].fillna(0).abs()
-        sorted_df = sorted_df.sort_values('z_score_for_sort', ascending=False)
-        sorted_df = sorted_df.drop('z_score_for_sort', axis=1)
+        # Create custom sort column that handles NaN values properly
+        sorted_df['z_score_sort'] = sorted_df['z_score'].apply(
+            lambda x: abs(float(x)) if pd.notna(x) else 0
+        )
+        sorted_df = sorted_df.sort_values('z_score_sort', ascending=False)
+        sorted_df = sorted_df.drop('z_score_sort', axis=1)
     elif sort_column in ["buffer_change", "position_change", "spread_change_pct"]:
         sorted_df = rec_df.sort_values(sort_column, ascending=False)
     else:
@@ -929,20 +932,25 @@ def render_significant_changes_summary(rec_df):
         return
     
     # Filter pairs with significant changes (either buffer or position)
-    # Use a safer approach for z-score filtering that handles NaN values
+    # Avoid using abs() operation directly on dataframe columns
     significant_df = rec_df[
-        (abs(rec_df['buffer_change']) > 2.0) | 
-        (abs(rec_df['position_change']) > 2.0) |
-        (rec_df['z_score'].notna() & (rec_df['z_score'].abs() > 1.5))  # Safely handle z-score
+        (rec_df['buffer_change'] > 2.0) | 
+        (rec_df['buffer_change'] < -2.0) | 
+        (rec_df['position_change'] > 2.0) |
+        (rec_df['position_change'] < -2.0) |
+        ((rec_df['z_score'] > 1.5) | (rec_df['z_score'] < -1.5)) & rec_df['z_score'].notna()
     ].copy()
     
     if significant_df.empty:
         st.info("No pairs have significant parameter changes at this time.")
         return
     
-    # Sort by Z-score (absolute value) as primary sort, safely handling NaN values
-    significant_df['abs_z_score'] = significant_df['z_score'].fillna(0).abs()
-    significant_df = significant_df.sort_values('abs_z_score', ascending=False)
+    # Sort by absolute z-score value as primary sort
+    # Custom function to avoid direct .abs() on dataframe column
+    significant_df['z_score_sort'] = significant_df['z_score'].apply(
+        lambda x: abs(float(x)) if pd.notna(x) else 0
+    )
+    significant_df = significant_df.sort_values('z_score_sort', ascending=False)
     
     # Display summary table
     st.markdown("### Pairs Requiring Adjustment")
@@ -986,6 +994,9 @@ def render_significant_changes_summary(rec_df):
         )
     })
     
+    # Drop the temporary sorting column
+    significant_df = significant_df.drop('z_score_sort', axis=1)
+    
     st.dataframe(display_df, use_container_width=True)
     
     # Display summary metrics
@@ -1004,7 +1015,9 @@ def render_significant_changes_summary(rec_df):
         st.metric("Buffer Decreases", buffer_decreases)
     
     with col4:
-        position_changes = len(significant_df[abs(significant_df['position_change']) > 2.0])
+        # Count position changes without using abs()
+        position_changes = len(significant_df[(significant_df['position_change'] > 2.0) | 
+                                            (significant_df['position_change'] < -2.0)])
         st.metric("Position Changes", position_changes)
 
 def render_rollbit_comparison(comparison_df):
@@ -1036,12 +1049,13 @@ def render_rollbit_comparison(comparison_df):
         )
     })
     
-    # Add buffer ratio column
+    # Add buffer ratio column - use safer calculation
     buffer_ratio = []
     for _, row in rollbit_df.iterrows():
         if (not check_null_or_zero(row.get('current_buffer_rate')) and 
             not check_null_or_zero(row.get('rollbit_buffer_rate'))):
-            buffer_ratio.append(f"{row['current_buffer_rate']/row['rollbit_buffer_rate']:.2f}x")
+            ratio = safe_division(row['current_buffer_rate'], row['rollbit_buffer_rate'], None)
+            buffer_ratio.append(f"{ratio:.2f}x" if ratio is not None else "N/A")
         else:
             buffer_ratio.append("N/A")
     
@@ -1070,7 +1084,8 @@ def render_rollbit_comparison(comparison_df):
     for _, row in rollbit_df.iterrows():
         if (not check_null_or_zero(row.get('current_position_multiplier')) and 
             not check_null_or_zero(row.get('rollbit_position_multiplier'))):
-            position_ratio.append(f"{row['current_position_multiplier']/row['rollbit_position_multiplier']:.2f}x")
+            ratio = safe_division(row['current_position_multiplier'], row['rollbit_position_multiplier'], None)
+            position_ratio.append(f"{ratio:.2f}x" if ratio is not None else "N/A")
         else:
             position_ratio.append("N/A")
     
@@ -1124,7 +1139,7 @@ def render_overview():
     - **Reset Baselines**: Sets current market spreads as new baselines
     - **Update Weekly Stats**: Updates the weekly spread range statistics used for Z-score calculation
     - **Apply Recommendations**: Updates database with recommended parameters
-    - **Undo Latest Changes**: Reverts parameters to values before last applied recommendations
+    - **Undo Latest Changes**: Reverts parameters to values before last applied changes
     
     ### Market Impact Formula
     
