@@ -6,10 +6,12 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
-import psycopg2
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
 import pytz
 import warnings
 import time
+from contextlib import contextmanager
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -42,18 +44,58 @@ st.markdown("""
 # Top trading pairs (for quick load)
 TOP_PAIRS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "XRP/USDT"]
 
-# All available pairs
-ALL_PAIRS = [
-    "PEPE/USDT", "PAXG/USDT", "DOGE/USDT", "BTC/USDT", "EOS/USDT",
-    "BNB/USDT", "MERL/USDT", "FHE/USDT", "IP/USDT", "ORCA/USDT",
-    "TRUMP/USDT", "LIBRA/USDT", "AI16Z/USDT", "OM/USDT", "TRX/USDT",
-    "S/USDT", "PI/USDT", "JUP/USDT", "BABY/USDT", "PARTI/USDT",
-    "ADA/USDT", "HYPE/USDT", "VIRTUAL/USDT", "SUI/USDT", "SATS/USDT",
-    "XRP/USDT", "ORDI/USDT", "WIF/USDT", "VANA/USDT", "PENGU/USDT",
-    "VINE/USDT", "GRIFFAIN/USDT", "MEW/USDT", "POPCAT/USDT", "FARTCOIN/USDT",
-    "TON/USDT", "MELANIA/USDT", "SOL/USDT", "PNUT/USDT", "CAKE/USDT",
-    "TST/USDT", "ETH/USDT"
-]
+# --- DB CONNECTION ---
+# 数据库配置
+DB_URL = "postgresql://public_replication:866^FKC4hllk@aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com:5432/replication_report"
+
+@st.cache_resource
+def get_engine():
+    """创建数据库引擎"""
+    try:
+        return create_engine(DB_URL)
+    except Exception as e:
+        st.error(f"Error creating database engine: {e}")
+        return None
+
+@contextmanager
+def get_session():
+    """数据库会话上下文管理器"""
+    engine = get_engine()
+    if not engine:
+        yield None
+        return
+        
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        yield session
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        st.error(f"Database error: {e}")
+        yield None
+    finally:
+        session.close()
+
+# Get available pairs from the replication database
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def get_available_pairs():
+    """从数据库获取可用的交易对"""
+    try:
+        with get_session() as session:
+            if not session:
+                return TOP_PAIRS  # Fallback to top pairs
+            
+            query = text("SELECT pair_name FROM trade_pool_pairs WHERE status = 1")
+            result = session.execute(query)
+            pairs = [row[0] for row in result]
+            
+            # Return sorted pairs or fallback to predefined list if empty
+            return sorted(pairs) if pairs else TOP_PAIRS
+    
+    except Exception as e:
+        st.error(f"Error fetching available pairs: {e}")
+        return TOP_PAIRS  # Fallback to top pairs
 
 # --- APP TITLE ---
 st.title("Tick-Based Choppiness: Surf vs Rollbit")
@@ -63,32 +105,10 @@ sg_timezone = pytz.timezone('Asia/Singapore')
 now_utc = datetime.now(pytz.utc)
 now_sg = now_utc.astimezone(sg_timezone)
 
-# --- DB CONNECTION ---
-@st.cache_resource
-def get_db_connection():
-    """Create a cached DB connection"""
-    try:
-        conn = psycopg2.connect(
-            host="aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com",
-            port=5432,
-            database="replication_report",
-            user="public_replication",
-            password="866^FKC4hllk",
-            connect_timeout=30  # Increased timeout
-        )
-        return conn
-    except Exception as e:
-        st.error(f"Database connection error: {e}")
-        return None
-
 # --- DIRECT DATA QUERY ---
 def fetch_data_simple(pair, hours=3, exchange='surf'):
     """Fetch data with a simple, direct query approach"""
     try:
-        conn = get_db_connection()
-        if not conn:
-            return None
-        
         # Calculate time range
         end_time = now_sg
         start_time = end_time - timedelta(hours=hours)
@@ -103,11 +123,8 @@ def fetch_data_simple(pair, hours=3, exchange='surf'):
         # Use date parts to identify potential partition tables
         start_date = start_time_utc.strftime("%Y%m%d")
         end_date = end_time_utc.strftime("%Y%m%d")
-
-        # Create cursor
-        cursor = conn.cursor()
         
-        # Identify available partition tables
+        # Identify date range
         date_range = []
         current_date = datetime.strptime(start_date, "%Y%m%d")
         end_date_dt = datetime.strptime(end_date, "%Y%m%d")
@@ -116,43 +133,59 @@ def fetch_data_simple(pair, hours=3, exchange='surf'):
             date_str = current_date.strftime("%Y%m%d")
             date_range.append(date_str)
             current_date += timedelta(days=1)
-        
-        # Find available tables
-        available_tables = []
-        for date_str in date_range:
-            table_name = f"oracle_price_log_partition_{date_str}"
-            cursor.execute(f"SELECT to_regclass('public.{table_name}')")
-            if cursor.fetchone()[0] is not None:
-                available_tables.append(table_name)
-        
-        if not available_tables:
-            st.warning(f"No tables found for dates between {start_date} and {end_date}")
-            return None
+
+        with get_session() as session:
+            if not session:
+                return None
             
-        # Debug info
-        st.write(f"Using tables: {', '.join(available_tables)}")
-        
-        # Select source type based on exchange
-        source_type = 0 if exchange == 'surf' else 1
-        
-        # Create queries for each table
-        all_data = []
-        for table in available_tables:
-            query = f"""
-            SELECT created_at + INTERVAL '8 hour' AS timestamp, final_price AS price
-            FROM public.{table}
-            WHERE created_at >= '{start_time_str}'
-              AND created_at <= '{end_time_str}'
-              AND source_type = {source_type}
-              AND pair_name = '{pair}'
-            ORDER BY created_at
-            LIMIT 10000
-            """
+            # Find available tables
+            available_tables = []
+            for date_str in date_range:
+                table_name = f"oracle_price_log_partition_{date_str}"
+                result = session.execute(
+                    text("SELECT to_regclass(:table_name)"),
+                    {"table_name": f"public.{table_name}"}
+                )
+                if result.scalar() is not None:
+                    available_tables.append(table_name)
             
-            df = pd.read_sql_query(query, conn)
-            all_data.append(df)
+            if not available_tables:
+                st.warning(f"No tables found for dates between {start_date} and {end_date}")
+                return None
+                
+            # Debug info
+            st.write(f"Using tables: {', '.join(available_tables)}")
             
-        # Combine all results
+            # Select source type based on exchange
+            source_type = 0 if exchange == 'surf' else 1
+            
+            # Create queries for each table
+            all_data = []
+            for table in available_tables:
+                query = text(f"""
+                SELECT created_at + INTERVAL '8 hour' AS timestamp, final_price AS price
+                FROM public."{table}"
+                WHERE created_at >= :start_time
+                  AND created_at <= :end_time
+                  AND source_type = :source_type
+                  AND pair_name = :pair_name
+                ORDER BY created_at
+                LIMIT 10000
+                """)
+                
+                df = pd.read_sql_query(
+                    query,
+                    session.connection(),
+                    params={
+                        "start_time": start_time_str,
+                        "end_time": end_time_str,
+                        "source_type": source_type,
+                        "pair_name": pair
+                    }
+                )
+                all_data.append(df)
+        
+        # Process data outside of database connection
         if not all_data:
             return None
             
@@ -254,11 +287,11 @@ with st.container():
         else:  # Custom Selection
             select_all = st.checkbox("Select All", value=False)
             if select_all:
-                selected_tokens = ALL_PAIRS
+                selected_tokens = get_available_pairs()
             else:
                 selected_tokens = st.multiselect(
                     "Select Tokens",
-                    options=ALL_PAIRS,
+                    options=get_available_pairs(),
                     default=TOP_PAIRS
                 )
     
