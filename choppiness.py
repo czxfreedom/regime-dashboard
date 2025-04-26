@@ -10,7 +10,6 @@ import psycopg2
 import pytz
 import warnings
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -18,7 +17,7 @@ warnings.filterwarnings('ignore')
 # Performance monitoring
 start_time = time.time()
 
-# Page configuration - optimized for speed
+# Page configuration
 st.set_page_config(
     page_title="Tick Choppiness",
     page_icon="📈",
@@ -56,25 +55,7 @@ ALL_PAIRS = [
     "TST/USDT", "ETH/USDT"
 ]
 
-# --- DB CONNECTION OPTIMIZATION ---
-@st.cache_resource
-def get_db_connection():
-    """Create a cached DB connection to avoid reconnecting repeatedly"""
-    try:
-        conn = psycopg2.connect(
-            host="aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com",
-            port=5432,
-            database="replication_report",
-            user="public_replication",
-            password="866^FKC4hllk",
-            connect_timeout=10  # Add connection timeout
-        )
-        return conn
-    except Exception as e:
-        st.error(f"Database connection error: {e}")
-        return None
-
-# --- MAIN APP TITLE ---
+# --- APP TITLE ---
 st.title("Tick-Based Choppiness: Surf vs Rollbit")
 
 # Get Singapore time
@@ -82,161 +63,148 @@ sg_timezone = pytz.timezone('Asia/Singapore')
 now_utc = datetime.now(pytz.utc)
 now_sg = now_utc.astimezone(sg_timezone)
 
-# --- DATABASE UTILITY FUNCTIONS ---
-def get_partition_tables(start_date, end_date):
-    """Get efficiently list of partition tables"""
+# --- DB CONNECTION ---
+@st.cache_resource
+def get_db_connection():
+    """Create a cached DB connection"""
     try:
-        conn = get_db_connection()
-        if not conn:
-            return []
-        
-        cursor = conn.cursor()
-        
-        # Generate list of possible table names
-        current_date = start_date
-        table_names = []
-        
-        while current_date <= end_date:
-            table_names.append(f"oracle_price_log_partition_{current_date.strftime('%Y%m%d')}")
-            current_date += timedelta(days=1)
-        
-        # Check which tables exist in one query (more efficient)
-        table_placeholders = ', '.join(['%s'] * len(table_names))
-        cursor.execute(f"""
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_schema = 'public' 
-            AND table_name IN ({table_placeholders})
-        """, tuple(table_names))
-        
-        existing_tables = [row[0] for row in cursor.fetchall()]
-        cursor.close()
-        
-        return existing_tables
-        
+        conn = psycopg2.connect(
+            host="aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com",
+            port=5432,
+            database="replication_report",
+            user="public_replication",
+            password="866^FKC4hllk",
+            connect_timeout=30  # Increased timeout
+        )
+        return conn
     except Exception as e:
-        st.error(f"Error getting tables: {e}")
-        return []
+        st.error(f"Database connection error: {e}")
+        return None
 
-def build_optimized_query(tables, pair_name, start_time, end_time, exchange, max_rows_per_table=10000):
-    """Build an optimized query with row limits"""
-    if not tables:
-        return ""
-        
-    source_type = 0 if exchange == 'surf' else 1
-    
-    # Use UNION ALL (faster than UNION as it skips duplicate checking)
-    queries = []
-    
-    for table in tables:
-        # Optimized query with LIMIT
-        query = f"""
-        (SELECT created_at + INTERVAL '8 hour' AS timestamp, final_price AS price
-         FROM public.{table}
-         WHERE created_at >= '{start_time}'::timestamp - INTERVAL '8 hour'
-           AND created_at <= '{end_time}'::timestamp - INTERVAL '8 hour'
-           AND source_type = {source_type}
-           AND pair_name = '{pair_name}'
-         ORDER BY created_at
-         LIMIT {max_rows_per_table})
-        """
-        queries.append(query)
-    
-    full_query = " UNION ALL ".join(queries) + " ORDER BY timestamp"
-    return full_query
-
-@st.cache_data(ttl=300)  # 5-minute cache
-def fetch_price_data(pair_name, hours=3, exchange='surf', quick_mode=False):
-    """Fetch price data with optimized queries and limits"""
+# --- DIRECT DATA QUERY ---
+def fetch_data_simple(pair, hours=3, exchange='surf'):
+    """Fetch data with a simple, direct query approach"""
     try:
         conn = get_db_connection()
         if not conn:
             return None
         
-        # Set query timeout
-        cursor = conn.cursor()
-        cursor.execute("SET statement_timeout = 30000;")  # 30 seconds timeout
-        
-        # Time range calculation
+        # Calculate time range
         end_time = now_sg
         start_time = end_time - timedelta(hours=hours)
         
-        # Convert to string format
-        start_time_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
-        end_time_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
+        # Convert to UTC for database query (8 hour offset)
+        end_time_utc = end_time - timedelta(hours=8)
+        start_time_utc = start_time - timedelta(hours=8)
         
-        # Get table names (more efficient with dates)
-        start_date = start_time.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_date = end_time.replace(hour=23, minute=59, second=59, microsecond=999999)
+        end_time_str = end_time_utc.strftime("%Y-%m-%d %H:%M:%S")
+        start_time_str = start_time_utc.strftime("%Y-%m-%d %H:%M:%S")
         
-        tables = get_partition_tables(start_date, end_date)
-        if not tables:
-            return None
+        # Use date parts to identify potential partition tables
+        start_date = start_time_utc.strftime("%Y%m%d")
+        end_date = end_time_utc.strftime("%Y%m%d")
+
+        # Create cursor
+        cursor = conn.cursor()
         
-        # Row limit per table (use smaller limit in quick mode)
-        max_rows = 2000 if quick_mode else 10000
+        # Identify available partition tables
+        date_range = []
+        current_date = datetime.strptime(start_date, "%Y%m%d")
+        end_date_dt = datetime.strptime(end_date, "%Y%m%d")
         
-        # Build and execute optimized query
-        query = build_optimized_query(tables, pair_name, start_time_str, end_time_str, exchange, max_rows)
+        while current_date <= end_date_dt:
+            date_str = current_date.strftime("%Y%m%d")
+            date_range.append(date_str)
+            current_date += timedelta(days=1)
         
-        if not query:
+        # Find available tables
+        available_tables = []
+        for date_str in date_range:
+            table_name = f"oracle_price_log_partition_{date_str}"
+            cursor.execute(f"SELECT to_regclass('public.{table_name}')")
+            if cursor.fetchone()[0] is not None:
+                available_tables.append(table_name)
+        
+        if not available_tables:
+            st.warning(f"No tables found for dates between {start_date} and {end_date}")
             return None
             
-        # Execute with timeout
-        df = pd.read_sql_query(query, conn)
+        # Debug info
+        st.write(f"Using tables: {', '.join(available_tables)}")
         
-        # Close cursor to free resources
-        cursor.close()
+        # Select source type based on exchange
+        source_type = 0 if exchange == 'surf' else 1
         
-        if df.empty:
+        # Create queries for each table
+        all_data = []
+        for table in available_tables:
+            query = f"""
+            SELECT created_at + INTERVAL '8 hour' AS timestamp, final_price AS price
+            FROM public.{table}
+            WHERE created_at >= '{start_time_str}'
+              AND created_at <= '{end_time_str}'
+              AND source_type = {source_type}
+              AND pair_name = '{pair}'
+            ORDER BY created_at
+            LIMIT 10000
+            """
+            
+            df = pd.read_sql_query(query, conn)
+            all_data.append(df)
+            
+        # Combine all results
+        if not all_data:
             return None
             
-        # Process data
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df['price'] = pd.to_numeric(df['price'], errors='coerce')
-        df = df.dropna().sort_values('timestamp')
+        combined_df = pd.concat(all_data)
         
-        return df
+        # Clean up data
+        if combined_df.empty:
+            return None
+            
+        combined_df['timestamp'] = pd.to_datetime(combined_df['timestamp'])
+        combined_df['price'] = pd.to_numeric(combined_df['price'], errors='coerce')
+        combined_df = combined_df.dropna().sort_values('timestamp')
+        
+        return combined_df
         
     except Exception as e:
-        st.error(f"Error fetching {exchange} data for {pair_name}: {e}")
+        st.error(f"Error fetching {exchange} data for {pair}: {e}")
+        import traceback
+        st.write(traceback.format_exc())
         return None
 
-def calculate_tick_choppiness(prices):
-    """Optimized choppiness calculation with vectorized operations"""
+def calculate_choppiness(prices):
+    """Calculate choppiness"""
     # Ensure we have enough data
     if len(prices) < 20:
         return None
     
-    # Calculate window size (smaller for quicker processing)
+    # Basic window size
     window = min(20, len(prices) // 10)
     
-    # Vectorized calculations
+    # Calculate diff and rolling values
     diff = prices.diff().abs()
     sum_abs_changes = diff.rolling(window, min_periods=1).sum()
     
-    # Calculate min and max in one pass
-    roll = prices.rolling(window, min_periods=1)
-    price_range = roll.max() - roll.min()
+    # Calculate range in one pass
+    price_max = prices.rolling(window, min_periods=1).max()
+    price_min = prices.rolling(window, min_periods=1).min()
+    price_range = price_max - price_min
     
     # Avoid division by zero
-    price_range = np.maximum(price_range, 1e-10)
+    epsilon = 1e-10
+    choppiness = 100 * sum_abs_changes / (price_range + epsilon)
     
-    # Calculate and cap choppiness
-    choppiness = 100 * sum_abs_changes / price_range
+    # Cap extreme values
     choppiness = np.minimum(choppiness, 1000)
     
     return float(choppiness.mean())
 
-def process_5min_blocks(df, quick_mode=False):
-    """Process data into 5-minute blocks with performance optimizations"""
+def process_5min_blocks(df):
+    """Process data into 5-minute blocks"""
     if df is None or len(df) < 20:
         return None
-    
-    # Sample data in quick mode to process fewer points
-    if quick_mode and len(df) > 1000:
-        sample_size = min(1000, int(len(df) * 0.5))  # Sample at most 1000 points or 50%
-        df = df.sample(n=sample_size).sort_values('timestamp')
     
     # Floor timestamps to 5-min intervals
     df['block'] = df['timestamp'].dt.floor('5min')
@@ -244,10 +212,9 @@ def process_5min_blocks(df, quick_mode=False):
     # Group by 5-minute blocks
     result = []
     
-    # Process in chunks - using a more efficient approach
     for name, group in df.groupby('block'):
         if len(group) >= 20:  # Only process if enough data points
-            choppiness = calculate_tick_choppiness(group['price'])
+            choppiness = calculate_choppiness(group['price'])
             if choppiness is not None:
                 result.append({
                     'timestamp': name,
@@ -260,92 +227,13 @@ def process_5min_blocks(df, quick_mode=False):
         
     return pd.DataFrame(result).sort_values('timestamp')
 
-# --- OPTIMIZED PARALLEL PROCESSING ---
-def fetch_data_parallel(pairs, hours, quick_mode=False):
-    """Fetch data in parallel with optimized thread management"""
-    results = {'surf': {}, 'rollbit': {}}
-    status_text = st.empty()
-    
-    if not pairs:
-        return results
-    
-    # Show progress without using st.progress (faster)
-    status_text.text(f"Fetching data for {len(pairs)} pairs...")
-    
-    # Prioritize loading to get some results quickly
-    processed_pairs = 0
-    
-    # Use a smaller thread pool to avoid overwhelming the database
-    max_workers = 3 if quick_mode else 5
-    
-    # Process in smaller batches to show progress faster
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for exchange in ['surf', 'rollbit']:
-            futures = {}
-            
-            for pair in pairs:
-                # Submit the task
-                future = executor.submit(
-                    fetch_price_data, 
-                    pair, 
-                    hours, 
-                    exchange,
-                    quick_mode
-                )
-                futures[future] = pair
-            
-            # Process completed tasks
-            for future in as_completed(futures):
-                pair = futures[future]
-                processed_pairs += 1
-                
-                try:
-                    data = future.result()
-                    if data is not None and not data.empty:
-                        results[exchange][pair] = data
-                    
-                    # Update status occasionally (not every pair)
-                    if processed_pairs % 3 == 0:
-                        status_text.text(f"Processed {processed_pairs}/{len(pairs)*2} items...")
-                except Exception as e:
-                    st.error(f"Error with {pair}: {e}")
-    
-    status_text.empty()
-    return results
-
-def calculate_choppiness_parallel(pair_data, quick_mode=False):
-    """Calculate choppiness in parallel for all pairs"""
-    results = {'surf': {}, 'rollbit': {}}
-    
-    # Use a ThreadPoolExecutor for parallel processing
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {}
-        
-        # Submit all tasks
-        for exchange in ['surf', 'rollbit']:
-            for pair, df in pair_data[exchange].items():
-                future = executor.submit(process_5min_blocks, df, quick_mode)
-                futures[future] = (exchange, pair)
-        
-        # Process completed tasks
-        for future in as_completed(futures):
-            exchange, pair = futures[future]
-            try:
-                result_df = future.result()
-                if result_df is not None and not result_df.empty:
-                    results[exchange][pair] = result_df
-            except Exception as e:
-                st.error(f"Error processing {exchange} {pair}: {e}")
-    
-    return results
-
 # --- INITIALIZE SESSION STATE ---
 if 'results' not in st.session_state:
     st.session_state.results = None
 if 'last_update' not in st.session_state:
     st.session_state.last_update = None
 
-# --- UI CONTROLS (OPTIMIZED FOR SPEED) ---
+# --- UI CONTROLS ---
 with st.container():
     col1, col2, col3 = st.columns([2, 1, 1])
     
@@ -355,18 +243,15 @@ with st.container():
             "Analysis Mode",
             ["Quick (Top 5)", "Standard", "Custom Selection"],
             horizontal=True,
-            help="Quick mode analyzes only top coins with optimized performance."
+            index=0  # Default to quick mode
         )
         
         # Token selection based on mode
         if mode == "Quick (Top 5)":
             selected_tokens = TOP_PAIRS
-            quick_mode = True
         elif mode == "Standard":
             selected_tokens = TOP_PAIRS + ["ADA/USDT", "BNB/USDT", "PEPE/USDT"]
-            quick_mode = False
         else:  # Custom Selection
-            quick_mode = False
             select_all = st.checkbox("Select All", value=False)
             if select_all:
                 selected_tokens = ALL_PAIRS
@@ -397,35 +282,54 @@ st.write(f"Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 # --- CORE PROCESSING LOGIC ---
 if refresh:
     # Start with a clean slate
-    st.cache_data.clear()
-    
-    # Show note about quick mode if enabled
-    if quick_mode:
-        st.info("⚡ Quick mode enabled: Using data sampling for faster results")
+    st.session_state.results = None
     
     # Load time tracking
     load_start = time.time()
     
-    # Fetch data with optimized settings
-    with st.spinner("Fetching data..."):
-        pair_data = fetch_data_parallel(selected_tokens, hours, quick_mode)
+    # Use simpler approach
+    results = {'surf': {}, 'rollbit': {}}
+    success = False
     
-    # Check if we got any data
-    if not any(pair_data[exchange] for exchange in ['surf', 'rollbit']):
+    # Process each pair
+    progress_text = st.empty()
+    progress_bar = st.progress(0)
+    
+    total_tasks = len(selected_tokens) * 2  # Each pair for two exchanges
+    completed = 0
+    
+    for pair in selected_tokens:
+        for exchange in ['surf', 'rollbit']:
+            progress_text.text(f"Processing {exchange} {pair}...")
+            
+            # Fetch data
+            df = fetch_data_simple(pair, hours, exchange)
+            
+            if df is not None and not df.empty:
+                # Calculate choppiness
+                result_df = process_5min_blocks(df)
+                if result_df is not None and not result_df.empty:
+                    results[exchange][pair] = result_df
+                    success = True
+            
+            # Update progress
+            completed += 1
+            progress_bar.progress(completed / total_tasks)
+    
+    # Clear progress indicators
+    progress_text.empty()
+    progress_bar.empty()
+    
+    if not success:
         st.error("No data available. Try selecting different pairs or time range.")
-        st.stop()
-    
-    # Calculate choppiness
-    with st.spinner("Calculating choppiness..."):
-        results = calculate_choppiness_parallel(pair_data, quick_mode)
-    
-    # Store in session state
-    st.session_state.results = results
-    st.session_state.last_update = now_sg
-    
-    # Show performance stats (only in developer mode)
-    load_time = time.time() - load_start
-    st.success(f"Data loaded in {load_time:.2f} seconds")
+    else:
+        # Store in session state
+        st.session_state.results = results
+        st.session_state.last_update = now_sg
+        
+        # Show performance stats
+        load_time = time.time() - load_start
+        st.success(f"Data loaded in {load_time:.2f} seconds")
 
 # --- VISUALIZATION ---
 if st.session_state.results:
@@ -585,13 +489,9 @@ st.markdown("""
 - Choppiness Formula: 100 * (sum of absolute changes) / (price range)
 - Higher values = more oscillation, Lower values = more directional movement
 
-**Optimization Tips:**
+**Performance Tips:**
 - Use "Quick Mode" for faster analysis
 - Select fewer pairs for better performance
 - Lower "Hours to Analyze" for faster loading
 - Data refreshes only when requested
 """)
-
-# Show elapsed time at the bottom
-total_time = time.time() - start_time
-st.write(f"Page load time: {total_time:.2f} seconds")
