@@ -392,7 +392,7 @@ class SimplifiedDepthTierAnalyzer:
         try:
             # Convert to numeric and drop any NaN values
             prices = pd.to_numeric(df[price_col], errors='coerce').dropna()
-
+            prices = prices[prices>0]
             if len(prices) < point_count * 0.8:  # Allow some flexibility for missing data
                 return None
 
