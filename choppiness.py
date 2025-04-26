@@ -19,6 +19,9 @@ warnings.filterwarnings('ignore')
 # Performance monitoring
 start_time = time.time()
 
+# Constants
+POINTS_PER_HOUR = 10000
+
 # Page configuration
 st.set_page_config(
     page_title="Tick Choppiness",
@@ -109,6 +112,9 @@ now_sg = now_utc.astimezone(sg_timezone)
 def fetch_data_simple(pair, hours=3, exchange='surf'):
     """Fetch data with a simple, direct query approach"""
     try:
+        # Calculate points needed based on hours
+        estimated_points = int(hours * POINTS_PER_HOUR)
+        
         # Calculate time range
         end_time = now_sg
         start_time = end_time - timedelta(hours=hours)
@@ -169,8 +175,8 @@ def fetch_data_simple(pair, hours=3, exchange='surf'):
                   AND created_at <= :end_time
                   AND source_type = :source_type
                   AND pair_name = :pair_name
-                ORDER BY created_at
-                LIMIT 10000
+                ORDER BY created_at desc
+                LIMIT {estimated_points}
                 """)
                 
                 df = pd.read_sql_query(
@@ -180,7 +186,7 @@ def fetch_data_simple(pair, hours=3, exchange='surf'):
                         "start_time": start_time_str,
                         "end_time": end_time_str,
                         "source_type": source_type,
-                        "pair_name": pair
+                        "pair_name": pair,
                     }
                 )
                 all_data.append(df)
