@@ -153,7 +153,7 @@ def get_current_bid_ask(pair_name, use_replication=True):
             
             # Get the most recent partition table
             today = datetime.now().strftime("%Y%m%d")
-            table_name = f'oracle_order_book_level_price_data_partition_v3_{today}'
+            table_name = f'oracle_order_book_level_price_data_partition_v4_{today}'
             
             # Check if table exists
             check_table = text("""
@@ -167,7 +167,7 @@ def get_current_bid_ask(pair_name, use_replication=True):
             if not session.execute(check_table, {"table_name": table_name}).scalar():
                 # Try yesterday if today doesn't exist
                 yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-                table_name = f'oracle_order_book_level_price_data_partition_v3_{yesterday}'
+                table_name = f'oracle_order_book_level_price_data_partition_v4_{yesterday}'
                 
                 # Check if yesterday's table exists
                 if not session.execute(check_table, {"table_name": table_name}).scalar():
