@@ -175,25 +175,18 @@ def get_current_bid_ask(pair_name, use_replication=True):
             
             # Use the exact SQL you provided
             query = text(f"""
-            SELECT DISTINCT ON (p.pair_name)
-              p.pair_name,
-              TO_CHAR(p.utc8, 'YYYY-MM-DD HH24:MI:SS.MS') AS "UTC+8",
-              p.all_bid,
-              p.all_ask
-            FROM (
-              SELECT
+            SELECT 
                 pair_name,
-                (created_at + INTERVAL '8 hour') AS utc8,
+                TO_CHAR(created_at + INTERVAL '8 hour', 'YYYY-MM-DD HH24:MI:SS.MS') AS "UTC+8",
                 all_bid,
                 all_ask
-              FROM
+            FROM 
                 public."{table_name}"
-              WHERE
+            WHERE 
                 pair_name = :pair_name
-            ) AS p
-            ORDER BY
-              p.pair_name ASC,
-              p.utc8 DESC
+            ORDER BY 
+                created_at DESC
+            LIMIT 1
             """)
             
             result = session.execute(query, {"pair_name": pair_name}).fetchone()
