@@ -107,59 +107,32 @@ class ExchangeAnalyzer:
 
     def _get_partition_tables(self, conn, start_date, end_date):
         """
-        Get list of partition tables that need to be queried based on date range.
-        Returns a list of table names (oracle_price_log_partition_YYYYMMDD)
+        获取当前日期的分区表名
+        返回: 当天的oracle_price_log_partition_YYYYMMDD格式表名
         """
-        # Convert to datetime objects if they're strings
-        if isinstance(start_date, str):
-            start_date = pd.to_datetime(start_date)
-        if isinstance(end_date, str) and end_date:
-            end_date = pd.to_datetime(end_date)
-        elif end_date is None:
-            end_date = datetime.now()
-            
-        # Ensure timezone is removed
-        start_date = start_date.replace(tzinfo=None)
-        end_date = end_date.replace(tzinfo=None)
-            
-        # Generate list of dates between start and end
-        current_date = start_date
-        dates = []
-        
-        while current_date <= end_date:
-            dates.append(current_date.strftime("%Y%m%d"))
-            current_date += timedelta(days=1)
-        
-        # Create table names from dates
-        table_names = [f"oracle_price_log_partition_{date}" for date in dates]
-        
-        # Verify which tables actually exist in the database
+        # 获取当前日期并格式化为YYYYMMDD
+        current_date = datetime.now().strftime("%Y%m%d")
+
+        # 生成表名
+        table_name = f"oracle_price_log_partition_{current_date}"
+
+        # 检查表是否存在
         cursor = conn.cursor()
-        existing_tables = []
-        
-        check_table_sql = """
+        cursor.execute("""
             SELECT EXISTS (
                 SELECT FROM information_schema.tables 
                 WHERE table_schema = 'public' 
                 AND table_name = %s
             );
-        """
-        
-        # 显示检查表是否存在的SQL
-        st.write("### 检查分区表SQL")
-        st.code(check_table_sql, language="sql")
-        
-        for table in table_names:
-            cursor.execute(check_table_sql, (table,))
-            if cursor.fetchone()[0]:
-                existing_tables.append(table)
-        
+        """, (table_name,))
+
+        if cursor.fetchone()[0]:
+            cursor.close()
+            return [table_name]
+
         cursor.close()
-        
-        if not existing_tables:
-            st.warning(f"No partition tables found for the date range {start_date.date()} to {end_date.date()}")
-        
-        return existing_tables
+        st.warning(f"当前日期的分区表 {table_name} 不存在")
+        return []
 
     def _build_query_for_partition_tables(self, tables, pair_name, start_time, end_time, exchange):
         """
@@ -175,7 +148,7 @@ class ExchangeAnalyzer:
             # For Surf data (production)
             if exchange == 'surf':
                 query = f"""
-                SELECT 
+                SELECT id,
                     pair_name,
                     created_at + INTERVAL '8 hour' AS timestamp,
                     final_price AS price
@@ -190,7 +163,7 @@ class ExchangeAnalyzer:
             else:
                 # For Rollbit data
                 query = f"""
-                SELECT 
+                SELECT id,
                     pair_name,
                     created_at + INTERVAL '8 hour' AS timestamp,
                     final_price AS price
