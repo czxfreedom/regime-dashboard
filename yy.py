@@ -1,1024 +1,731 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
 from datetime import datetime, timedelta
-import psycopg2
-import warnings
 import pytz
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
+from contextlib import contextmanager
 
-# Suppress warnings
-warnings.filterwarnings('ignore')
-
-# Set page config
-st.set_page_config(
-    page_title="Crypto Exchange Analysis Dashboard",
-    page_icon="📊",
-    layout="wide"
-)
-
-# Always clear cache at startup to ensure fresh data
+# Clear cache at startup to ensure fresh data
 st.cache_data.clear()
 
-# Configure database
-def init_db_connection():
-    # DB parameters - these should be stored in Streamlit secrets in production
-    db_params = {
-        'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
-        'port': 5432,
-        'database': 'replication_report',
-        'user': 'public_replication',
-        'password': '866^FKC4hllk'
+# Page configuration - absolute minimum for speed
+st.set_page_config(
+    page_title="Depth Tier Analyzer",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="collapsed"  # Start with sidebar collapsed for speed
+)
+
+# Enhanced CSS for better table readability
+st.markdown("""
+<style>
+    .block-container {padding: 0 !important;}
+    .main .block-container {max-width: 98% !important;}
+    h1, h2, h3 {margin: 0 !important; padding: 0 !important;}
+    .stButton > button {width: 100%; font-weight: bold; height: 46px; font-size: 18px;}
+    div.stProgress > div > div {height: 5px !important;}
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+
+    /* Make tabs much bigger and more prominent */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
     }
-    
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        white-space: pre-wrap;
+        background-color: #f0f2f6;
+        border-radius: 4px;
+        color: #000000;
+        font-size: 18px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 20px;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #1f77b4 !important;
+        color: white !important;
+    }
+
+    /* Improved table styling */
+    .dataframe {
+        font-size: 18px !important;
+        width: 100% !important;
+    }
+
+    .dataframe th {
+        font-weight: 700 !important;
+        background-color: #f0f2f6 !important;
+    }
+
+    .dataframe td {
+        font-weight: 500 !important;
+    }
+
+    /* Highlight top tier */
+    .dataframe tr:first-child {
+        background-color: #e6f7ff !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Database configuration
+DB_CONFIG = {
+    'main': {
+        'url': "postgresql://public_rw:aTJ92^kl04hllk@aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com:5432/report_dev"
+    },
+    'replication': {
+        'url': "postgresql://public_replication:866^FKC4hllk@aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com:5432/replication_report"
+    }
+}
+
+# Create database engine
+@st.cache_resource
+def get_engine(use_replication=True):
+    """Create database engine
+    Args:
+        use_replication (bool): Whether to use replication database connection, default is True (use replication database)
+    Returns:
+        engine: SQLAlchemy engine
+    """
     try:
-        conn = psycopg2.connect(
-            host=db_params['host'],
-            port=db_params['port'],
-            database=db_params['database'],
-            user=db_params['user'],
-            password=db_params['password']
-        )
-        return conn, db_params
+        config = DB_CONFIG['replication' if use_replication else 'main']
+        return create_engine(config['url'], pool_size=5, max_overflow=10)
     except Exception as e:
-        st.error(f"Database connection error: {e}")
-        return None, db_params
+        st.error(f"Error creating database engine: {e}")
+        return None
 
-# Initialize connection
-conn, db_params = init_db_connection()
+@contextmanager
+def get_session(use_replication=True):
+    """Database session context manager
+    Args:
+        use_replication (bool): Whether to use replication database connection, default is True (use replication database)
+    Yields:
+        session: SQLAlchemy session
+    """
+    engine = get_engine(use_replication)
+    if not engine:
+        yield None
+        return
 
-# Main title
-st.title("Crypto Exchange Analysis Dashboard")
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        yield session
+    except Exception as e:
+        st.error(f"Database error: {e}")
+        session.rollback()
+    finally:
+        session.close()
 
-# Create tabs
-tab1, tab2 = st.tabs(["Parameter Comparison", "Rankings & Analysis"])
+# Pre-defined pairs as a fast fallback
+PREDEFINED_PAIRS = [
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
+    "AVAX/USDT", "DOGE/USDT", "ADA/USDT", "TRX/USDT", "DOT/USDT"
+]
 
-# Set up the timezone
-singapore_timezone = pytz.timezone('Asia/Singapore')
-now_utc = datetime.now(pytz.utc)
-now_sg = now_utc.astimezone(singapore_timezone)
-st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
+# Get available pairs from the replication database
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def get_available_pairs():
+    try:
+        with get_session() as session:
+            if not session:
+                return PREDEFINED_PAIRS  # Fallback to predefined pairs
 
-# Exchange comparison class
-class ExchangeAnalyzer:
-    """Specialized analyzer for comparing metrics between Surf and Rollbit"""
-    
+            query = text("SELECT pair_name FROM trade_pool_pairs WHERE status = 1")
+            result = session.execute(query)
+            pairs = [row[0] for row in result]
+
+            # Return sorted pairs or fallback to predefined list if empty
+            return sorted(pairs) if pairs else PREDEFINED_PAIRS
+
+    except Exception as e:
+        st.error(f"Error fetching available pairs: {e}")
+        return PREDEFINED_PAIRS  # Fallback to predefined pairs
+
+# Get current bid/ask data
+def get_current_bid_ask(pair_name, use_replication=True):
+    try:
+        with get_session(use_replication=use_replication) as session:
+            if not session:
+                return None
+
+            # Get the most recent partition table
+            today = datetime.now().strftime("%Y%m%d")
+            table_name = f'oracle_order_book_level_price_data_partition_v4_{today}'
+
+            # Check if table exists
+            check_table = text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = :table_name
+                );
+            """)
+
+            if not session.execute(check_table, {"table_name": table_name}).scalar():
+                # Try yesterday if today doesn't exist
+                yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+                table_name = f'oracle_order_book_level_price_data_partition_v4_{yesterday}'
+
+                # Check if yesterday's table exists
+                if not session.execute(check_table, {"table_name": table_name}).scalar():
+                    return None
+
+            # Use the exact SQL you provided
+            query = text(f"""
+            SELECT 
+                pair_name,
+                TO_CHAR(created_at + INTERVAL '8 hour', 'YYYY-MM-DD HH24:MI:SS.MS') AS "UTC+8",
+                all_bid,
+                all_ask
+            FROM 
+                public."{table_name}"
+            WHERE 
+                pair_name = :pair_name
+            ORDER BY 
+                created_at DESC
+            LIMIT 1
+            """)
+
+            result = session.execute(query, {"pair_name": pair_name}).fetchone()
+
+            if result:
+                return {
+                    "pair": result[0],
+                    "time": result[1],
+                    "all_bid": result[2],
+                    "all_ask": result[3]
+                }
+            return None
+
+    except Exception as e:
+        st.error(f"Error getting bid/ask data: {e}")
+        return None
+
+# Simplified version of the depth tier analyzer
+class SimplifiedDepthTierAnalyzer:
+    """
+    Simplified analyzer for liquidity depth tiers - raw metrics only, no scoring
+    """
+
     def __init__(self):
-        self.exchange_data = {}  # Will store data from different exchanges
-        self.all_exchanges = ['rollbit', 'surf']  # Only Rollbit and Surf
-        
-        # Metrics to calculate and compare
+        # Update point counts to match the other file
+        self.point_counts = [500, 1500, 2500, 5000]
+
+        # Initialize analysis time range
+        self.analysis_time_range = None
+
+        # Initialize time ranges for each point count
+        self.point_time_ranges = {point: None for point in self.point_counts}
+
+        # Define depth tiers
+        self.depth_tier_columns = [
+            'price_1', 'price_2', 'price_3', 'price_4', 'price_5',
+            'price_6', 'price_7', 'price_8', 'price_9', 'price_10',
+            'price_11', 'price_12', 'price_13', 'price_14', 'price_15',
+            'price_16','price_17','price_18','price_19','price_20','price_21',
+            'price_22','price_23','price_24','price_25','price_26','price_27','price_28','price_29'
+        ]
+
+        # Map column names to actual depth values
+        self.depth_tier_values = {
+            'price_26':'1k',
+            'price_27':'3k',
+            'price_28':'5k',
+            'price_29':'7k',
+            'price_1': '10k',
+            'price_2': '50k',
+            'price_3': '100k',
+            'price_4': '200k',
+            'price_5': '300k',
+            'price_6': '400k',
+            'price_7': '500k',
+            'price_8': '600k',
+            'price_9': '700k',
+            'price_10': '800k',
+            'price_11': '900k',
+            'price_12': '1000k',
+            'price_13': '2000k',
+            'price_14': '3000k',
+            'price_15': '4000k',
+            'price_16':'5000k',
+            'price_17':'6000k',
+            'price_18':'7000k',
+            'price_19': '8000k',
+            'price_20':'9000k',
+            'price_21':'10000k',
+            'price_22':'11000k',
+            'price_23':'12000k',
+            'price_24':'13000k',
+            'price_25':'14000k',
+
+        }
+
+        # Metrics to calculate
         self.metrics = [
             'direction_changes',   # Frequency of price direction reversals (%)
             'choppiness',          # Measures price oscillation within a range
-            'tick_atr_pct',        # ATR % (Average True Range as percentage of mean price)
+            'tick_atr_pct',        # ATR %
             'trend_strength'       # Measures directional strength
         ]
-        
-        # Display names for metrics (for printing)
+
+        # Display names for metrics
         self.metric_display_names = {
             'direction_changes': 'Direction Changes (%)',
             'choppiness': 'Choppiness',
             'tick_atr_pct': 'Tick ATR %',
             'trend_strength': 'Trend Strength'
         }
-        
-        # Short names for metrics (for tables to avoid overflow)
-        self.metric_short_names = {
-            'direction_changes': 'Dir Chg',
-            'choppiness': 'Chop',
-            'tick_atr_pct': 'ATR%',
-            'trend_strength': 'Trend'
-        }
-        
-        # Point counts to analyze - updated to the requested values
-        self.point_counts = [500, 1500, 2500, 5000]
-        
-        # The desired direction for each metric (whether higher or lower is better)
-        self.metric_desired_direction = {
-            'direction_changes': 'lower',  
-            'choppiness': 'lower',        
-            'tick_atr_pct': 'lower',       
-            'trend_strength': 'lower'     
-        }
-        
-        # Initialize exchange_data structure
-        for metric in self.metrics:
-            self.exchange_data[metric] = {point: {} for point in self.point_counts}
-        
-        # Initialize timestamp_ranges structure
-        self.exchange_data['timestamp_ranges'] = {point: {} for point in self.point_counts}
 
-    def _get_partition_tables(self, conn, start_date, end_date):
-        """
-        Get list of partition tables that need to be queried based on date range.
-        Returns a list of table names (oracle_price_log_partition_YYYYMMDD)
-        """
-        # Convert to datetime objects if they're strings
-        if isinstance(start_date, str):
-            start_date = pd.to_datetime(start_date)
-        if isinstance(end_date, str) and end_date:
-            end_date = pd.to_datetime(end_date)
-        elif end_date is None:
-            # Use explicit Singapore timezone when getting current date
-            singapore_tz = pytz.timezone('Asia/Singapore')
-            end_date = datetime.now(singapore_tz)
-            
-        # Ensure timezone is explicitly set to Singapore
-        singapore_tz = pytz.timezone('Asia/Singapore')
-        if start_date.tzinfo is None:
-            start_date = singapore_tz.localize(start_date)
-        if end_date.tzinfo is None:
-            end_date = singapore_tz.localize(end_date)
-        
-        # Convert to Singapore time
-        start_date = start_date.astimezone(singapore_tz)
-        end_date = end_date.astimezone(singapore_tz)
-        
-        # Remove timezone after conversion for compatibility with database
-        start_date = start_date.replace(tzinfo=None)
-        end_date = end_date.replace(tzinfo=None)
-                
-        # Generate list of dates between start and end
-        current_date = start_date
-        dates = []
-        
-        while current_date <= end_date:
-            dates.append(current_date.strftime("%Y%m%d"))
-            current_date += timedelta(days=1)
-        
-        # Create table names from dates
-        table_names = [f"oracle_price_log_partition_{date}" for date in dates]
-        
-        # Debug info
-        st.write(f"Looking for tables: {table_names}")
-        
-        # Verify which tables actually exist in the database
-        cursor = conn.cursor()
-        existing_tables = []
-        
-        for table in table_names:
-            # Check if table exists
-            cursor.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_schema = 'public' 
-                    AND table_name = %s
-                );
-            """, (table,))
-            
-            if cursor.fetchone()[0]:
-                existing_tables.append(table)
-        
-        cursor.close()
-        
-        st.write(f"Found existing tables: {existing_tables}")
-        
-        if not existing_tables:
-            st.warning(f"No partition tables found for the date range {start_date.date()} to {end_date.date()}")
-        
-        return existing_tables
+        # Store results
+        self.results = {point: None for point in self.point_counts}
 
-    def _build_query_for_partition_tables(self, tables, pair_name, start_time, end_time, exchange):
-        """
-        Build a complete UNION query for multiple partition tables.
-        This creates a complete, valid SQL query with correct WHERE clauses.
-        """
-        if not tables:
-            return ""
-        
-        # Convert the times to datetime objects if they're strings
-        if isinstance(start_time, str):
-            start_time = pd.to_datetime(start_time)
-        if isinstance(end_time, str):
-            end_time = pd.to_datetime(end_time)
-        
-        # Format with timezone information explicitly
-        start_time_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
-        end_time_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
-            
-        union_parts = []
-        
-        for table in tables:
-            # For Surf data (production)
-            if exchange == 'surf':
-                query = f"""
-                SELECT 
-                    pair_name,
-                    created_at + INTERVAL '8 hour' AS timestamp,
-                    final_price AS price
-                FROM 
-                    public.{table}
-                WHERE 
-                    created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
-                    AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
-                    AND source_type = 0
-                    AND pair_name = '{pair_name}'
-                """
-            else:
-                # For Rollbit data
-                query = f"""
-                SELECT 
-                    pair_name,
-                    created_at + INTERVAL '8 hour' AS timestamp,
-                    final_price AS price
-                FROM 
-                    public.{table}
-                WHERE 
-                    created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
-                    AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
-                    AND source_type = 1
-                    AND pair_name = '{pair_name}'
-                """
-            
-            union_parts.append(query)
-        
-        # Join with UNION and add ORDER BY at the end
-        complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp DESC"
-        return complete_query
+    def fetch_and_analyze(self, pair_name, hours=3, progress_bar=None, use_replication=True):
+        """Fetch data and calculate metrics for each depth tier
 
-    def fetch_and_analyze(self, conn, pairs_to_analyze, hours=24):
-        """
-        Fetch data for Surf and Rollbit, analyze metrics, and calculate rankings.
-        
         Args:
-            conn: Database connection
-            pairs_to_analyze: List of coin pairs to analyze
-            hours: Hours to look back for data retrieval
+            pair_name: Cryptocurrency pair to analyze
+            hours: Hours of data to look back (default reduced from 24 to 3)
+            progress_bar: Optional progress bar to update
+            use_replication: Whether to use replication database
         """
-        # Always compare rollbit and surf
-        exchanges_to_compare = ['rollbit', 'surf']
-        primary_exchange = 'rollbit'
-        secondary_exchange = 'surf'
-        
-        # Use explicit Singapore timezone for all time calculations
-        singapore_tz = pytz.timezone('Asia/Singapore')
-        now = datetime.now(singapore_tz)
-        
-        # Calculate times in Singapore timezone
-        end_time = now.strftime("%Y-%m-%d %H:%M:%S")
-        start_time = (now - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
-        
-        st.info(f"Retrieving data from the last {hours} hours")
-        st.write(f"Start time: {start_time} (SGT)")
-        st.write(f"End time: {end_time} (SGT)")
-        
         try:
-            # Get relevant partition tables for this time range
-            partition_tables = self._get_partition_tables(conn, start_time, end_time)
-            
-            if not partition_tables:
-                # If no tables found, try looking one day earlier (for edge cases)
-                st.warning("No tables found for the specified range, trying to look back one more day...")
-                alt_start_time = (now - timedelta(hours=hours+24)).strftime("%Y-%m-%d %H:%M:%S")
-                partition_tables = self._get_partition_tables(conn, alt_start_time, end_time)
-                
-                if not partition_tables:
-                    st.error("No data tables available for the selected time range, even with extended lookback.")
-                    return None
-            
-            # Progress bar
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            # Build all queries first to minimize time between executions
-            all_queries = {}
-            for i, pair in enumerate(pairs_to_analyze):
-                progress_bar.progress((i) / len(pairs_to_analyze) / 3)  # First third for query building
-                status_text.text(f"Building queries for {pair} ({i+1}/{len(pairs_to_analyze)})")
-                
-                all_queries[pair] = {}
-                for exchange in exchanges_to_compare:
-                    query = self._build_query_for_partition_tables(
-                        partition_tables,
-                        pair_name=pair,
-                        start_time=start_time,
-                        end_time=end_time,
-                        exchange=exchange
-                    )
-                    all_queries[pair][exchange] = query
-            
-            # Execute all queries in quick succession
-            pair_data = {}
-            for i, pair in enumerate(pairs_to_analyze):
-                progress_bar.progress(0.33 + (i) / len(pairs_to_analyze) / 3)  # Second third for query execution
-                status_text.text(f"Executing queries for {pair} ({i+1}/{len(pairs_to_analyze)})")
-                
-                pair_data[pair] = {}
-                
-                # Execute rollbit and surf queries back-to-back for each pair
-                for exchange in exchanges_to_compare:
-                    query = all_queries[pair][exchange]
-                    if query:
-                        try:
-                            df = pd.read_sql_query(query, conn)
-                            if len(df) > 0:
-                                pair_data[pair][exchange] = df
-                            else:
-                                st.warning(f"No data found for {exchange.upper()}_{pair}")
-                        except Exception as e:
-                            st.error(f"Database query error for {exchange.upper()}_{pair}: {e}")
-            
-            # Process the data for analysis
-            for i, pair in enumerate(pairs_to_analyze):
-                progress_bar.progress(0.67 + (i) / len(pairs_to_analyze) / 3)  # Final third for processing
-                status_text.text(f"Analyzing {pair} ({i+1}/{len(pairs_to_analyze)})")
-                
-                # Skip if we don't have data for both exchanges
-                if pair not in pair_data or len(pair_data[pair]) != 2:
-                    continue
-                
-                # Process data for both exchanges
-                coin_key = pair.replace('/', '_')
-                for exchange in exchanges_to_compare:
-                    if exchange in pair_data[pair]:
-                        self._process_price_data(pair_data[pair][exchange], 'timestamp', 'price', coin_key, exchange)
-            
-            # Final progress update
-            progress_bar.progress(1.0)
-            status_text.text(f"Processing complete!")
-            
-            # Create comparison results
-            comparison_results = self._create_comparison_results(primary_exchange, secondary_exchange)
-            
-            # Create individual rankings
-            individual_rankings = {}
-            for exchange in exchanges_to_compare:
-                individual_rankings[exchange] = self._create_individual_rankings(exchange)
-            
-            return {
-                'comparison_results': comparison_results,
-                'individual_rankings': individual_rankings,
-                'raw_data': self.exchange_data
-            }
-                
-        except Exception as e:
-            st.error(f"Error fetching and processing data: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
-    def _process_price_data(self, data, timestamp_col, price_col, coin_key, exchange):
-        """Process price data for a cryptocurrency and calculate metrics for specified point counts."""
-        try:
-            # Extract price data
-            filtered_df = data.copy()
-            prices = pd.to_numeric(filtered_df[price_col], errors='coerce')
-            prices = prices.dropna()
-            
-            if len(prices) < 100:  # Minimum threshold for meaningful analysis
-                return
-            
-            # Calculate metrics for each point count
-            for point_count in self.point_counts:
-                if len(prices) >= point_count:
-                    # Use the most recent N points
-                    sample = prices.iloc[:point_count]
-                    
-                    # Get timestamp range information (first the timestamp column must exist)
-                    if timestamp_col in filtered_df.columns:
-                        sample_timestamps = filtered_df[timestamp_col].iloc[:point_count]
-                        start_time = sample_timestamps.iloc[-1] if not sample_timestamps.empty else None
-                        end_time = sample_timestamps.iloc[0] if not sample_timestamps.empty else None
-                    else:
-                        start_time, end_time = None, None
-                    
-                    # Calculate mean price for ATR percentage calculation
-                    mean_price = sample.mean()
-                    
-                    # Calculate each metric with improved error handling
-                    direction_changes = self._calculate_direction_changes(sample)
-                    choppiness = self._calculate_choppiness(sample, min(20, point_count // 10))
-                    
-                    # Calculate tick ATR
-                    true_ranges = sample.diff().abs().dropna()
-                    tick_atr = true_ranges.mean()
-                    tick_atr_pct = (tick_atr / mean_price) * 100  # Convert to percentage of mean price
-                    
-                    # Calculate trend strength
-                    trend_strength = self._calculate_trend_strength(sample, min(20, point_count // 10))
-                    
-                    # Store results in the metrics dictionary
-                    if coin_key not in self.exchange_data['direction_changes'][point_count]:
-                        self.exchange_data['direction_changes'][point_count][coin_key] = {}
-                    if coin_key not in self.exchange_data['choppiness'][point_count]:
-                        self.exchange_data['choppiness'][point_count][coin_key] = {}
-                    if coin_key not in self.exchange_data['tick_atr_pct'][point_count]:
-                        self.exchange_data['tick_atr_pct'][point_count][coin_key] = {}
-                    if coin_key not in self.exchange_data['trend_strength'][point_count]:
-                        self.exchange_data['trend_strength'][point_count][coin_key] = {}
-                    if coin_key not in self.exchange_data['timestamp_ranges'][point_count]:
-                        self.exchange_data['timestamp_ranges'][point_count][coin_key] = {}
-                    
-                    # Store metrics
-                    self.exchange_data['direction_changes'][point_count][coin_key][exchange] = direction_changes
-                    self.exchange_data['choppiness'][point_count][coin_key][exchange] = choppiness
-                    self.exchange_data['tick_atr_pct'][point_count][coin_key][exchange] = tick_atr_pct
-                    self.exchange_data['trend_strength'][point_count][coin_key][exchange] = trend_strength
-                    
-                    # Store timestamp range
-                    self.exchange_data['timestamp_ranges'][point_count][coin_key][exchange] = {
-                        'start': start_time,
-                        'end': end_time,
-                        'count': len(sample)
+            with get_session(use_replication=use_replication) as session:
+                if not session:
+                    return False
+
+                # Calculate time range in Singapore time
+                singapore_tz = pytz.timezone('Asia/Singapore')
+                now = datetime.now(singapore_tz)
+                start_time = now - timedelta(hours=hours)
+
+                # Format for display
+                start_str_display = start_time.strftime("%Y-%m-%d %H:%M:%S")
+                end_str_display = now.strftime("%Y-%m-%d %H:%M:%S")
+
+                # Store the time range for display later
+                self.analysis_time_range = {
+                    'start': start_str_display,
+                    'end': end_str_display,
+                    'timezone': 'SGT'
+                }
+
+                # Format for database query (without timezone)
+                start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+
+                # Display the exact time range being analyzed
+                if progress_bar:
+                    progress_bar.progress(0.05, text=f"Analyzing data from {start_str_display} to {end_str_display} (SGT)")
+
+                # Get current day's partition table (most likely to have data)
+                today = datetime.now().strftime("%Y%m%d")
+                table_name = f"oracle_order_book_level_price_data_partition_v4_{today}"
+
+                # Check if table exists
+                check_table = text("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = :table_name
+                    );
+                """)
+
+                # Debug information about table checking
+                if progress_bar:
+                    progress_bar.progress(0.1, text=f"Checking for table: {table_name}")
+
+                table_exists = session.execute(check_table, {"table_name": table_name}).scalar()
+
+                if not table_exists:
+                    # Try yesterday if today doesn't exist
+                    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+                    table_name = f"oracle_order_book_level_price_data_partition_v4_{yesterday}"
+
+                    if progress_bar:
+                        progress_bar.progress(0.1, text=f"Today's table not found, checking: {table_name}")
+
+                    # Check if yesterday's table exists
+                    if not session.execute(check_table, {"table_name": table_name}).scalar():
+                        if progress_bar:
+                            progress_bar.progress(0.1, text="No data tables found for analysis")
+                        return False
+
+                if progress_bar:
+                    progress_bar.progress(0.15, text=f"Fetching data from {table_name} for {pair_name}...")
+
+                # Update query to include created_at column for timestamp tracking
+                query = text(f"""
+                    SELECT
+                        pair_name,
+                        TO_CHAR(created_at + INTERVAL '8 hour', 'YYYY-MM-DD HH24:MI:SS.MS') AS timestamp_sgt,
+                        {', '.join(self.depth_tier_columns)}
+                    FROM
+                        public."{table_name}"
+                    WHERE
+                        pair_name = :pair_name
+                        AND created_at >= :start_time
+                    ORDER BY created_at DESC
+                    LIMIT :limit
+                """)
+
+                # Execute query with parameters
+                result = session.execute(
+                    query,
+                    {
+                        "pair_name": pair_name,
+                        "start_time": start_str,
+                        "limit": max(self.point_counts) + 1000
                     }
+                )
+
+                # Fetch all rows and create DataFrame
+                columns = ['pair_name', 'timestamp_sgt'] + self.depth_tier_columns
+                all_data = result.fetchall()
+
+                if not all_data:
+                    if progress_bar:
+                        progress_bar.progress(0.2, text="No data found for the specified pair")
+                    return False
+
+                if len(all_data) < min(self.point_counts):
+                    if progress_bar:
+                        progress_bar.progress(0.2, text=f"Insufficient data: found {len(all_data)} rows, need at least {min(self.point_counts)}")
+                    return False
+
+                if progress_bar:
+                    progress_bar.progress(0.3, text=f"Processing {len(all_data)} data points...")
+
+                # Convert to DataFrame for faster processing
+                all_df = pd.DataFrame(all_data, columns=columns)
+
+                # Process each point count using the pre-fetched data
+                for i, point_count in enumerate(self.point_counts):
+                    if progress_bar:
+                        progress_bar.progress((i / len(self.point_counts)) * 0.6 + 0.3,
+                                              text=f"Processing {point_count} points...")
+
+                    if len(all_df) >= point_count:
+                        # Get and store the time range for this specific point count
+                        point_df = all_df.iloc[:point_count]
+
+                        if 'timestamp_sgt' in point_df.columns:
+                            newest_time = point_df['timestamp_sgt'].iloc[0]
+                            oldest_time = point_df['timestamp_sgt'].iloc[-1]
+
+                            self.point_time_ranges[point_count] = {
+                                'newest': newest_time,
+                                'oldest': oldest_time,
+                                'count': len(point_df)
+                            }
+
+                        # Process each depth tier separately
+                        tier_results = {}
+
+                        for column in self.depth_tier_columns:
+                            # Extract price data for this tier
+                            if column in all_df.columns:
+                                # Make a clean copy of the data for this specific tier
+                                df_tier = all_df[['pair_name', column]].copy()
+
+                                # Calculate metrics using the correct method
+                                metrics = self._calculate_metrics(df_tier, column, point_count)
+                                if metrics:
+                                    tier = self.depth_tier_values[column]
+                                    tier_results[tier] = metrics
+
+                        # Convert to DataFrame and sort by a primary metric
+                        self.results[point_count] = self._create_results_table(tier_results)
+
+                if progress_bar:
+                    progress_bar.progress(1.0, text="Analysis complete!")
+
+                # Check if we got any results
+                has_results = False
+                for pc in self.point_counts:
+                    if self.results[pc] is not None:
+                        has_results = True
+                        break
+
+                return has_results
+
         except Exception as e:
-            st.error(f"Error processing {coin_key}: {e}")
-    
-    def _calculate_direction_changes(self, prices):
-        """Calculate the percentage of times the price direction changes."""
+            if progress_bar:
+                progress_bar.progress(1.0, text=f"Error: {str(e)}")
+            st.error(f"Error in analysis: {e}")
+            import traceback
+            st.error(traceback.format_exc())
+            return False
+
+    def _calculate_metrics(self, df, price_col, point_count):
+        """Calculate raw metrics without any normalization or scoring"""
         try:
+            # Convert to numeric and drop any NaN values
+            prices = pd.to_numeric(df[price_col], errors='coerce').dropna()
+            prices = prices[prices>0]
+            if len(prices) < point_count * 0.8:  # Allow some flexibility for missing data
+                return None
+
+            # Take only the needed number of points
+            prices = prices.iloc[:point_count].copy()
+
+            # Calculate mean price for ATR percentage calculation
+            mean_price = prices.mean()
+
+            # Direction changes
             price_changes = prices.diff().dropna()
             signs = np.sign(price_changes)
             direction_changes = (signs.shift(1) != signs).sum()
-            
-            total_periods = len(signs) - 1
-            if total_periods > 0:
-                direction_change_pct = (direction_changes / total_periods) * 100
-            else:
-                direction_change_pct = 0
-            
-            return direction_change_pct
-        except Exception as e:
-            return 50.0  # Return a reasonable default instead of zero
-    
-    def _calculate_choppiness(self, prices, window):
-        """Calculate average Choppiness Index with improved error handling."""
-        try:
+            direction_change_pct = (direction_changes / (len(signs) - 1)) * 100 if len(signs) > 1 else 0
+
+            # Choppiness
+            window = min(20, point_count // 10)
             diff = prices.diff().abs()
             sum_abs_changes = diff.rolling(window, min_periods=1).sum()
             price_range = prices.rolling(window, min_periods=1).max() - prices.rolling(window, min_periods=1).min()
-            
-            # Check for zero price range
-            if (price_range == 0).any():
-                # Replace zeros with a small value to avoid division by zero
-                price_range = price_range.replace(0, 1e-10)
-            
+
             # Avoid division by zero
             epsilon = 1e-10
-            choppiness = 100 * sum_abs_changes / (price_range + epsilon)
-            
-            # Cap extreme values and handle NaN
-            choppiness = np.minimum(choppiness, 1000)
-            choppiness = choppiness.fillna(200)  # Replace NaN with a reasonable default
-            
-            return choppiness.mean()
-        except Exception as e:
-            return 200.0  # Return a reasonable default value
-    
-    def _calculate_trend_strength(self, prices, window):
-        """Calculate average Trend Strength with improved error handling."""
-        try:
-            diff = prices.diff().abs()
-            sum_abs_changes = diff.rolling(window, min_periods=1).sum()
+            choppiness_values = 100 * sum_abs_changes / (price_range + epsilon)
+
+            # Cap extreme values
+            choppiness_values = np.minimum(choppiness_values, 1000)
+
+            # Calculate mean choppiness
+            choppiness = choppiness_values.mean()
+
+            # Tick ATR
+            tick_atr = price_changes.abs().mean()
+            tick_atr_pct = (tick_atr / mean_price) * 100
+
+            # Trend strength
             net_change = (prices - prices.shift(window)).abs()
-            
-            # Avoid division by zero
-            epsilon = 1e-10
-            
-            # Check if sum_abs_changes is close to zero
-            trend_strength = np.where(
-                sum_abs_changes > epsilon,
-                net_change / (sum_abs_changes + epsilon),
-                0.5  # Default value when there's no change
-            )
-            
-            # Convert to pandas Series if it's a numpy array
-            if isinstance(trend_strength, np.ndarray):
-                trend_strength = pd.Series(trend_strength, index=net_change.index)
-            
-            # Handle NaN values
-            trend_strength = pd.Series(trend_strength).fillna(0.5)
-            
-            return trend_strength.mean()
+            trend_strength = (net_change / (sum_abs_changes + epsilon)).dropna().mean()
+
+            return {
+                'direction_changes': direction_change_pct,
+                'choppiness': choppiness,
+                'tick_atr_pct': tick_atr_pct,
+                'trend_strength': trend_strength
+            }
+
         except Exception as e:
-            return 0.5  # Return a reasonable default value
-    
-    def _create_comparison_results(self, primary_exchange, secondary_exchange):
-        """Create comparison results between the two exchanges for all point counts."""
-        comparison_results = {}
-        
-        for point_count in self.point_counts:
-            comparison_data = []
-            
-            # Get all coins that have data for both exchanges for any metric
-            all_coins = set()
-            for metric in self.metrics:
-                for coin, exchanges in self.exchange_data[metric][point_count].items():
-                    if primary_exchange in exchanges and secondary_exchange in exchanges:
-                        all_coins.add(coin)
-            
-            # For each coin, calculate relative performance for each metric
-            for coin in all_coins:
-                row = {'Coin': coin.replace('_', '/')}
-                relative_scores = []
-                
-                for metric in self.metrics:
-                    # Check if we have data for both exchanges for this metric
-                    if (coin in self.exchange_data[metric][point_count] and
-                        primary_exchange in self.exchange_data[metric][point_count][coin] and
-                        secondary_exchange in self.exchange_data[metric][point_count][coin]):
-                        
-                        primary_value = self.exchange_data[metric][point_count][coin][primary_exchange]
-                        secondary_value = self.exchange_data[metric][point_count][coin][secondary_exchange]
-                        
-                        # Calculate absolute and percentage difference
-                        abs_diff = secondary_value - primary_value
-                        pct_diff = (abs_diff / primary_value * 100) if primary_value != 0 else 0
-                        
-                        # Calculate relative performance score (100 means equal to primary, >100 means better)
-                        if metric == 'trend_strength':
-                            # For trend_strength, lower is better, so inverse the ratio
-                            if secondary_value == 0:
-                                # Edge case
-                                relative_score = 100
-                            else:
-                                relative_score = (primary_value / secondary_value) * 100
-                        else:
-                            # For all other metrics, higher is better
-                            if primary_value == 0:
-                                # Edge case
-                                relative_score = 100 if secondary_value == 0 else 200
-                            else:
-                                relative_score = (secondary_value / primary_value) * 100
-                        
-                        relative_scores.append(relative_score)
-                        
-                        # Add to the row
-                        row[f'{self.metric_short_names[metric]} {primary_exchange.upper()}'] = primary_value
-                        row[f'{self.metric_short_names[metric]} {secondary_exchange.upper()}'] = secondary_value
-                        row[f'{self.metric_short_names[metric]} Diff'] = abs_diff
-                        row[f'{self.metric_short_names[metric]} Diff %'] = pct_diff
-                        row[f'{self.metric_short_names[metric]} Score'] = relative_score
-                
-                # Calculate overall relative score (average of individual scores)
-                if relative_scores:
-                    row['Overall Score'] = sum(relative_scores) / len(relative_scores)
-                else:
-                    row['Overall Score'] = 100  # Default to "equal" if no metrics
-                
-                comparison_data.append(row)
-            
-            # Create DataFrame and sort by relative score (highest first)
-            if comparison_data:
-                comparison_df = pd.DataFrame(comparison_data)
-                comparison_df = comparison_df.sort_values('Overall Score', ascending=False)
-                comparison_results[point_count] = comparison_df
+            return None
+
+    def _create_results_table(self, tier_results):
+        """Create a simple results table without scoring or normalization"""
+        if not tier_results:
+            return None
+
+        # Create DataFrame directly
+        data = []
+        for tier, metrics in tier_results.items():
+            row = {'Tier': tier}
+            row.update(metrics)
+            data.append(row)
+
+        df = pd.DataFrame(data)
+
+        # Sort by direction changes (higher is better) as the primary metric
+        # You can change this to sort by another metric if you prefer
+        if 'direction_changes' in df.columns:
+            df = df.sort_values('direction_changes', ascending=False)
+        else:
+            # If direction_changes is not available, try another metric
+            for metric in ['choppiness', 'tick_atr_pct']:
+                if metric in df.columns:
+                    df = df.sort_values(metric, ascending=False)
+                    break
+
+        return df
+
+# Table-only display function - simplified
+def create_point_count_table(analyzer, point_count):
+    """Creates a clean, readable table of raw metrics without scoring"""
+    if analyzer.results[point_count] is None:
+        st.info(f"No data available for {point_count} points analysis.")
+        return
+
+    # Display specific point count time range if available
+    if hasattr(analyzer, 'point_time_ranges') and analyzer.point_time_ranges.get(point_count):
+        point_range = analyzer.point_time_ranges[point_count]
+        st.markdown(f"""
+        <div style="background-color: #f0f7ff; padding: 8px; border-radius: 5px; margin-bottom: 15px;">
+            <h4 style="margin: 0 0 5px 0;">Specific Time Range for {point_count} Points:</h4>
+            <p style="margin: 3px 0;"><strong>Newest data point:</strong> {point_range['newest']} (SGT)</p>
+            <p style="margin: 3px 0;"><strong>Oldest data point:</strong> {point_range['oldest']} (SGT)</p>
+            <p style="margin: 3px 0;"><strong>Total data points:</strong> {point_range['count']}</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    df = analyzer.results[point_count]
+
+    # Make a clean copy for display
+    display_df = df.copy()
+
+    # Select only the columns we want to display
+    display_columns = ['Tier', 'direction_changes', 'choppiness', 'tick_atr_pct', 'trend_strength']
+    display_df = display_df[display_columns]
+
+    # Rename columns for better display
+    display_df = display_df.rename(columns={
+        'direction_changes': 'Direction Changes (%)',
+        'choppiness': 'Choppiness',
+        'tick_atr_pct': 'Tick ATR %',
+        'trend_strength': 'Trend Strength'
+    })
+
+    # Format numeric columns with appropriate decimal places
+    for col in display_df.columns:
+        if col != 'Tier':
+            if col == 'Tick ATR %':
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
+                )
+            elif col == 'Trend Strength':
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:.2f}" if not pd.isna(x) else "N/A"
+                )
             else:
-                comparison_results[point_count] = None
-        
-        return comparison_results
-    
-    def _create_individual_rankings(self, exchange):
-        """Create rankings for a specific exchange across all metrics and point counts."""
-        rankings = {}
-        
-        for point_count in self.point_counts:
-            point_rankings = {}
-            
-            for metric in self.metrics:
-                # Get all coins that have data for this exchange and metric
-                coin_data = {}
-                for coin, exchanges in self.exchange_data[metric][point_count].items():
-                    if exchange in exchanges:
-                        coin_data[coin] = exchanges[exchange]
-                
-                if coin_data:
-                    # Create DataFrame
-                    df = pd.DataFrame({
-                        'Coin': [coin.replace('_', '/') for coin in coin_data.keys()],
-                        'Value': list(coin_data.values())
-                    })
-                    
-                    # Sort based on metric (ascending or descending)
-                    # For trend_strength, lower is better
-                    # For all other metrics, higher is now better
-                    ascending = True if metric == 'trend_strength' else False
-                    
-                    df = df.sort_values('Value', ascending=ascending)
-                    
-                    # Add rank column
-                    df.insert(0, 'Rank', range(1, len(df) + 1))
-                    
-                    point_rankings[metric] = df
-            
-            rankings[point_count] = point_rankings
-        
-        return rankings
-    
-    def create_parameter_comparison_table(self):
-        """
-        Create a comprehensive table with all metrics for all pairs across all point counts.
-        This is for tab 1 to display a huge table of parameters.
-        """
-        # Always use rollbit as primary and surf as secondary
-        primary_exchange = 'rollbit'
-        secondary_exchange = 'surf'
-        
-        # First, collect all coins that have data for any metric at any point count
-        all_coins = set()
-        for metric in self.metrics:
-            for point_count in self.point_counts:
-                for coin in self.exchange_data[metric][point_count].keys():
-                    all_coins.add(coin)
-        
-        # Create a huge dataframe with all metrics
-        rows = []
-        for coin in sorted(all_coins):
-            row = {'Coin': coin.replace('_', '/')}
-            
-            # Add metrics for each point count
-            for point_count in self.point_counts:
-                for metric in self.metrics:
-                    # Check if we have primary exchange data
-                    if (coin in self.exchange_data[metric][point_count] and 
-                        primary_exchange in self.exchange_data[metric][point_count][coin]):
-                        row[f'{self.metric_short_names[metric]} {primary_exchange.upper()} ({point_count})'] = self.exchange_data[metric][point_count][coin][primary_exchange]
-                    else:
-                        row[f'{self.metric_short_names[metric]} {primary_exchange.upper()} ({point_count})'] = None
-                    
-                    # Check if we have secondary exchange data
-                    if (coin in self.exchange_data[metric][point_count] and 
-                        secondary_exchange in self.exchange_data[metric][point_count][coin]):
-                        row[f'{self.metric_short_names[metric]} {secondary_exchange.upper()} ({point_count})'] = self.exchange_data[metric][point_count][coin][secondary_exchange]
-                    else:
-                        row[f'{self.metric_short_names[metric]} {secondary_exchange.upper()} ({point_count})'] = None
-            
-            rows.append(row)
-        
-        # Create the dataframe
-        if rows:
-            comparison_df = pd.DataFrame(rows)
-            return comparison_df
-        else:
-            return None
-    
-    def create_timestamp_range_table(self, point_count, pairs):
-        """Create a table showing the time range for data collection."""
-        if point_count not in self.exchange_data['timestamp_ranges']:
-            return None
-            
-        # Collect timestamp data
-        time_data = []
-        for pair in pairs:
-            coin_key = pair.replace('/', '_')
-            if coin_key in self.exchange_data['timestamp_ranges'][point_count]:
-                row = {'Pair': pair}
-                
-                # Add rollbit data if available
-                if 'rollbit' in self.exchange_data['timestamp_ranges'][point_count][coin_key]:
-                    rollbit_range = self.exchange_data['timestamp_ranges'][point_count][coin_key]['rollbit']
-                    row['Rollbit Start'] = rollbit_range['start']
-                    row['Rollbit End'] = rollbit_range['end']
-                    row['Rollbit Count'] = rollbit_range['count']
-                
-                # Add surf data if available
-                if 'surf' in self.exchange_data['timestamp_ranges'][point_count][coin_key]:
-                    surf_range = self.exchange_data['timestamp_ranges'][point_count][coin_key]['surf']
-                    row['Surf Start'] = surf_range['start']
-                    row['Surf End'] = surf_range['end']
-                    row['Surf Count'] = surf_range['count']
-                
-                time_data.append(row)
-        
-        # Create dataframe
-        if time_data:
-            time_df = pd.DataFrame(time_data)
-            
-            # Format datetime columns to be more readable
-            for col in time_df.columns:
-                if 'Start' in col or 'End' in col:
-                    try:
-                        time_df[col] = pd.to_datetime(time_df[col]).dt.strftime('%Y-%m-%d %H:%M:%S')
-                    except:
-                        pass
-                        
-            return time_df
-        
-        return None
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:.1f}" if not pd.isna(x) else "N/A"
+                )
 
+    # Display the top tier as recommendation
+    top_tier = display_df.iloc[0]['Tier']
+    st.markdown(f"### Recommended Depth Tier: **{top_tier}**")
 
-# Setup sidebar with simplified options
-with st.sidebar:
-    st.header("Analysis Parameters")
-    all_pairs = [
-            "PEPE/USDT", "PAXG/USDT", "DOGE/USDT", "BTC/USDT", "EOS/USDT",
-            "BNB/USDT", "MERL/USDT", "FHE/USDT", "IP/USDT", "ORCA/USDT",
-            "TRUMP/USDT", "LIBRA/USDT", "AI16Z/USDT", "OM/USDT", "TRX/USDT",
-            "S/USDT", "PI/USDT", "JUP/USDT", "BABY/USDT", "PARTI/USDT",
-            "ADA/USDT", "HYPE/USDT", "VIRTUAL/USDT", "SUI/USDT", "SATS/USDT",
-            "XRP/USDT", "ORDI/USDT", "WIF/USDT", "VANA/USDT", "PENGU/USDT",
-            "VINE/USDT", "GRIFFAIN/USDT", "MEW/USDT", "POPCAT/USDT", "FARTCOIN/USDT",
-            "TON/USDT", "MELANIA/USDT", "SOL/USDT", "PNUT/USDT", "CAKE/USDT",
-            "TST/USDT", "ETH/USDT"
-        ]
-    
-    # Initialize session state for selections if not present
-    if 'selected_pairs' not in st.session_state:
-        st.session_state.selected_pairs = ["ETH/USDT", "BTC/USDT"]  # Default selection
-    
-    # Create buttons OUTSIDE the form
-    col1, col2, col3 = st.columns(3)
-    
+    # Show the full table with enhanced styling
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        height=min(800, 100 + (len(display_df) * 35))  # Adaptive height
+    )
+
+# Format number with commas (e.g., 1,234,567)
+def format_number(num):
+    """Format number with thousand separators
+    Args:
+        num: Number to format
+    Returns:
+        str: Formatted string
+    """
+    if num is None:
+        return "N/A"
+    try:
+        # Convert to int and format with commas
+        return f"{int(float(num)):,}"
+    except:
+        return str(num)
+
+def main():
+    # Get current Singapore time
+    singapore_tz = pytz.timezone('Asia/Singapore')
+    now_sg = datetime.now(singapore_tz)
+    current_time_sg = now_sg.strftime("%Y-%m-%d %H:%M:%S")
+
+    # Main layout - super streamlined
+    st.markdown("<h1 style='text-align: center; font-size:28px; margin-bottom: 10px;'>Liquidity Depth Tier Analyzer</h1>", unsafe_allow_html=True)
+
+    # Display current Singapore time to confirm updates
+    st.markdown(f"<p style='text-align: center; font-size:14px; color:gray;'>Last updated: {current_time_sg} (SGT)</p>", unsafe_allow_html=True)
+
+    # Get available pairs from the database
+    available_pairs = get_available_pairs()
+
+    # Main selection area
+    col1, col2, col3 = st.columns([1, 1, 1])
+
     with col1:
-        if st.button("Select Major Coins"):
-            st.session_state.selected_pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
-            st.rerun()
-            
+        selected_pair = st.selectbox(
+            "Select Pair",
+            available_pairs,
+            index=0 if available_pairs else None
+        )
+
     with col2:
-        if st.button("Select All"):
-            st.session_state.selected_pairs = all_pairs
-            st.rerun()
-            
-    with col3:
-        if st.button("Clear Selection"):
-            st.session_state.selected_pairs = []
-            st.rerun()
-    
-    # Then create the form without the buttons inside
-    with st.form("exchange_comparison_form"):
-        # Data retrieval window
-        hours = st.number_input(
-            "Hours to Look Back (for data retrieval)",
-            min_value=1,
-            max_value=168,
-            value=8,
-            help="How many hours of historical data to retrieve. This ensures enough data for point-based analysis."
-        )
-        
-        st.info("Analysis will be performed on the most recent data points: 500, 1500, 2500, and 5000 points regardless of time span.")
-        
-        # Create multiselect for pairs
-        selected_pairs = st.multiselect(
-            "Select Pairs to Analyze",
-            options=all_pairs,
-            default=st.session_state.selected_pairs,
-            help="Select one or more cryptocurrency pairs to analyze"
-        )
-        
-        # Update session state
-        st.session_state.selected_pairs = selected_pairs
-        
-        # Set the pairs variable for the analyzer
-        pairs = selected_pairs
-        
-        # Show a warning if no pairs are selected
-        if not pairs:
-            st.warning("Please select at least one pair to analyze.")
-        
-        # Submit button - this should be indented at the same level as other elements in the form
-        submit_button = st.form_submit_button("Analyze Exchanges")
+        run_analysis = st.button("ANALYZE", use_container_width=True)
 
-# When form is submitted
-if submit_button:
-    # Clear cache at start of analysis to ensure fresh data
-    st.cache_data.clear()
-    
-    if not conn:
-        st.error("Database connection not available.")
-    elif not pairs:
-        st.error("Please enter at least one pair to analyze.")
-    else:
-        # Initialize analyzer
-        analyzer = ExchangeAnalyzer()
-        
-        # Run analysis
-        st.header("Comparing ROLLBIT vs SURF")
-        
-        with st.spinner("Fetching and analyzing data..."):
-            results = analyzer.fetch_and_analyze(
-                conn=conn,
-                pairs_to_analyze=pairs,
-                hours=hours
-            )
-        
-        if results:
-            # Create parameter comparison table for Tab 1
-            with tab1:
-                st.header("Parameter Comparison Table")
-                st.write("This table shows all metrics for all pairs across different point counts.")
-                
-                comparison_table = analyzer.create_parameter_comparison_table()
-                
-                if comparison_table is not None:
-                    # Style the table
-                    def style_comparison_table(val):
-                        """Style cells, highlight differences."""
-                        if pd.isna(val):
-                            return 'background-color: #f2f2f2'  # Light gray for missing values
-                        return ''
-                    
-                    # Display the table with horizontal scrolling
-                    st.dataframe(
-                        comparison_table.style.applymap(style_comparison_table),
-                        height=600,
-                        use_container_width=True,
-                    )
-                    
-                    # Add download button for the table
-                    csv = comparison_table.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="Download CSV",
-                        data=csv,
-                        file_name=f"parameter_comparison_rollbit_vs_surf.csv",
-                        mime="text/csv"
-                    )
-                    
-                    # Add time range information
-                    st.subheader("Data Collection Time Ranges")
-                    st.write("This shows the exact time range for data analyzed at each point count:")
-                    
-                    for point_count in analyzer.point_counts:
-                        st.write(f"#### {point_count} Points")
-                        time_df = analyzer.create_timestamp_range_table(point_count, pairs)
-                        
-                        if time_df is not None:
-                            st.dataframe(time_df, use_container_width=True)
-                            st.info("Note: 'Start' is the oldest data point, 'End' is the most recent data point in the analysis.")
-                        else:
-                            st.warning(f"No timestamp data available for {point_count} points")
-                else:
-                    st.warning("No comparison data available.")
-            
-            # Rankings and analysis for Tab 2
-            with tab2:
-                st.header("Rankings & Analysis")
-                
-                if results['comparison_results']:
-                    # Create subtabs for different point counts
-                    point_count_tabs = st.tabs([f"{count} Points" for count in analyzer.point_counts if count in results['comparison_results']])
-                    
-                    for i, point_count in enumerate([pc for pc in analyzer.point_counts if pc in results['comparison_results']]):
-                        with point_count_tabs[i]:
-                            df = results['comparison_results'][point_count]
-                            
-                            if df is not None and not df.empty:
-                                # Style the DataFrame for relative scores
-                                def highlight_scores(val):
-                                    try:
-                                        if isinstance(val.name, str) and 'Score' in val.name:
-                                            if val > 130:
-                                                return 'background-color: #60b33c; color: white; font-weight: bold'
-                                            elif val > 110:
-                                                return 'background-color: #a0d995; color: black'
-                                            elif val > 90:
-                                                return 'background-color: #f1f1aa; color: black'
-                                            elif val > 70:
-                                                return 'background-color: #ffc299; color: black'
-                                            else:
-                                                return 'background-color: #ff8080; color: black; font-weight: bold'
-                                    except:
-                                        pass
-                                    return ''
-                                
-                                # Display data collection time range
-                                st.subheader("Data Collection Time Ranges")
-                                time_df = analyzer.create_timestamp_range_table(point_count, pairs)
-                                
-                                if time_df is not None:
-                                    st.dataframe(time_df, height=300, use_container_width=True)
-                                    st.info("Note: 'Start' is the oldest data point, 'End' is the most recent data point in the analysis.")
-                                
-                                # Display the data
-                                st.subheader(f"Relative Performance: {point_count} Points")
-                                st.dataframe(
-                                    df.style.applymap(highlight_scores),
-                                    height=400,
-                                    use_container_width=True
-                                )
-                                
-                                # Create visualization
-                                st.subheader(f"Top and Bottom Performers")
-                                
-                                # Top 10 and bottom 10 coins
-                                top_10 = df.nlargest(10, 'Overall Score')
-                                bottom_10 = df.nsmallest(10, 'Overall Score')
-                                
-                                # Combined visualization
-                                fig = go.Figure()
-                                
-                                # Add top 10
-                                fig.add_trace(go.Bar(
-                                    x=top_10['Coin'],
-                                    y=top_10['Overall Score'],
-                                    name='Top Performers',
-                                    marker_color='green'
-                                ))
-                                
-                                # Add bottom 10
-                                fig.add_trace(go.Bar(
-                                    x=bottom_10['Coin'],
-                                    y=bottom_10['Overall Score'],
-                                    name='Bottom Performers',
-                                    marker_color='red'
-                                ))
-                                
-                                # Add reference line at 100
-                                fig.add_shape(
-                                    type="line",
-                                    x0=-0.5,
-                                    y0=100,
-                                    x1=len(top_10) + len(bottom_10) - 0.5,
-                                    y1=100,
-                                    line=dict(
-                                        color="black",
-                                        width=2,
-                                        dash="dash",
-                                    )
-                                )
-                                
-                                fig.update_layout(
-                                    title=f"SURF Performance Relative to ROLLBIT (100 = Equal)",
-                                    xaxis_title="Coin",
-                                    yaxis_title="Relative Performance Score",
-                                    barmode='group',
-                                    height=500
-                                )
-                                
-                                st.plotly_chart(fig, use_container_width=True)
-                                
-                                # Add metric-by-metric analysis
-                                col1, col2 = st.columns(2)
-                                
-                                with col1:
-                                    # Individual rankings for Rollbit
-                                    st.subheader("ROLLBIT Rankings")
-                                    
-                                    if point_count in results['individual_rankings']['rollbit']:
-                                        # Create subtabs for each metric
-                                        metric_tabs_primary = st.tabs([analyzer.metric_display_names[m] for m in analyzer.metrics 
-                                                              if m in results['individual_rankings']['rollbit'][point_count]])
-                                        
-                                        for j, metric in enumerate([m for m in analyzer.metrics if m in results['individual_rankings']['rollbit'][point_count]]):
-                                            with metric_tabs_primary[j]:
-                                                metric_df = results['individual_rankings']['rollbit'][point_count][metric]
-                                                if not metric_df.empty:
-                                                    st.dataframe(metric_df, height=300, use_container_width=True)
-                                                    
-                                                    # Bar chart of top 10
-                                                    top_10_metric = metric_df.head(10)
-                                                    fig = px.bar(
-                                                        top_10_metric, 
-                                                        x='Coin', 
-                                                        y='Value',
-                                                        title=f"Top 10 by {analyzer.metric_display_names[metric]}",
-                                                        color='Rank',
-                                                        color_continuous_scale='Viridis_r'
-                                                    )
-                                                    st.plotly_chart(fig, use_container_width=True)
-                                    else:
-                                        st.warning(f"No ranking data available for ROLLBIT at {point_count} points")
-                                
-                                with col2:
-                                    # Individual rankings for Surf
-                                    st.subheader("SURF Rankings")
-                                    
-                                    if point_count in results['individual_rankings']['surf']:
-                                        # Create subtabs for each metric
-                                        metric_tabs_secondary = st.tabs([analyzer.metric_display_names[m] for m in analyzer.metrics 
-                                                              if m in results['individual_rankings']['surf'][point_count]])
-                                        
-                                        for j, metric in enumerate([m for m in analyzer.metrics if m in results['individual_rankings']['surf'][point_count]]):
-                                            with metric_tabs_secondary[j]:
-                                                metric_df = results['individual_rankings']['surf'][point_count][metric]
-                                                if not metric_df.empty:
-                                                    st.dataframe(metric_df, height=300, use_container_width=True)
-                                                    
-                                                    # Bar chart of top 10
-                                                    top_10_metric = metric_df.head(10)
-                                                    fig = px.bar(
-                                                        top_10_metric, 
-                                                        x='Coin', 
-                                                        y='Value',
-                                                        title=f"Top 10 by {analyzer.metric_display_names[metric]}",
-                                                        color='Rank',
-                                                        color_continuous_scale='Viridis_r'
-                                                    )
-                                                    st.plotly_chart(fig, use_container_width=True)
-                                    else:
-                                        st.warning(f"No ranking data available for SURF at {point_count} points")
-                            else:
-                                st.warning(f"No data available for {point_count} points")
-                else:
-                    st.warning("No comparison results available.")
+    # Main content
+    if run_analysis and selected_pair:
+        # Clear cache before analysis to ensure fresh data
+        st.cache_data.clear()
+
+        # Show analysis time in Singapore timezone
+        analysis_start_time = datetime.now(singapore_tz).strftime("%Y-%m-%d %H:%M:%S")
+        st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Analysis started at: {analysis_start_time} (SGT)</p>", unsafe_allow_html=True)
+
+        # Get current bid/ask data
+        bid_ask_data = get_current_bid_ask(selected_pair)
+
+        if bid_ask_data:
+            # Display in a box at the top
+            st.markdown(f"""
+            <div style="background-color: #f0f2f6; padding: 10px; border-radius: 5px; margin-bottom: 20px;">
+                <h3 style="margin: 0;">Current Market Data: {selected_pair}</h3>
+                <p style="margin: 5px 0;"><strong>UTC+8:</strong> {bid_ask_data['time']}</p>
+                <p style="margin: 5px 0;"><strong>Total Bid:</strong> {format_number(bid_ask_data['all_bid'])}</p>
+                <p style="margin: 5px 0;"><strong>Total Ask:</strong> {format_number(bid_ask_data['all_ask'])}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Simple explanation of metrics (much shorter)
+        st.markdown("""
+        **Metrics:** Direction Changes (%), Choppiness, Tick ATR %, and Trend Strength.
+        Higher values of the first three metrics and lower values of Trend Strength typically indicate better trading conditions.
+        """)
+
+        # Set up tabs for results - updated to match point counts
+        tabs = st.tabs(["500 POINTS", "1,500 POINTS", "2,500 POINTS", "5,000 POINTS"])
+
+        # Create progress bar
+        progress_bar = st.progress(0, text="Starting analysis...")
+
+        # Initialize analyzer and run analysis
+        analyzer = SimplifiedDepthTierAnalyzer()
+        success = analyzer.fetch_and_analyze(selected_pair, hours=3, progress_bar=progress_bar)  # Reduced from 24 to 3 hours
+
+        if success:
+            # Display the time range used for analysis
+            if hasattr(analyzer, 'analysis_time_range') and analyzer.analysis_time_range:
+                st.markdown(f"""
+                <div style="background-color: #e6f3ff; padding: 10px; border-radius: 5px; margin-bottom: 20px;">
+                    <h3 style="margin: 0;">Overall Data Time Range</h3>
+                    <p style="margin: 5px 0;"><strong>From:</strong> {analyzer.analysis_time_range['start']} ({analyzer.analysis_time_range['timezone']})</p>
+                    <p style="margin: 5px 0;"><strong>To:</strong> {analyzer.analysis_time_range['end']} ({analyzer.analysis_time_range['timezone']})</p>
+                    <p style="margin: 5px 0;"><em>Detailed time ranges for each point count are shown in individual tabs</em></p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # Display results for each point count (updated point counts)
+            with tabs[0]:
+                create_point_count_table(analyzer, 500)
+
+            with tabs[1]:
+                create_point_count_table(analyzer, 1500)
+
+            with tabs[2]:
+                create_point_count_table(analyzer, 2500)
+
+            with tabs[3]:
+                create_point_count_table(analyzer, 5000)
+
+            # Show analysis completion time in Singapore timezone
+            analysis_end_time = datetime.now(singapore_tz).strftime("%Y-%m-%d %H:%M:%S")
+            st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Analysis completed at: {analysis_end_time} (SGT)</p>", unsafe_allow_html=True)
+
         else:
-            st.error("Failed to analyze data. Please try again with different parameters.")
+            progress_bar.empty()
+            st.error(f"Failed to analyze {selected_pair}. Please try another pair.")
 
-# Add explanation in the sidebar
-st.sidebar.markdown("---")
-st.sidebar.subheader("About This Dashboard")
-st.sidebar.markdown("""
-This dashboard analyzes cryptocurrency prices between Rollbit and Surf exchanges and calculates various metrics:
+    else:
+        # Minimal welcome message
+        st.info("Select a pair and click ANALYZE to find the optimal depth tier.")
 
-- **Direction Changes (%)**: Frequency of price reversals
-- **Choppiness**: Measures price oscillation within a range
-- **Tick ATR %**: Average True Range as percentage of mean price
-- **Trend Strength**: Measures directional price strength
-
-The dashboard compares these metrics and provides rankings and visualizations for various point counts (500, 1500, 2500, and 5000).
-""")
-
-# Add footer
-st.sidebar.markdown("---")
-st.sidebar.markdown(f"*Last updated: {now_sg.strftime('%Y-%m-%d %H:%M:%S')} (SGT)*")
+if __name__ == "__main__":
+    main()
