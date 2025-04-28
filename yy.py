@@ -155,8 +155,8 @@ class ExchangeAnalyzer:
                 FROM 
                     public.{table}
                 WHERE 
-                    created_at >= '{start_time}'::timestamp 
-                    AND created_at <= '{end_time}'::timestamp 
+                    created_at >= '{start_time}'::timestamp + INTERVAL '8 hour'
+                    AND created_at <= '{end_time}'::timestamp + INTERVAL '8 hour'
                     AND source_type = 0
                     AND pair_name = '{pair_name}'
                 """
@@ -170,8 +170,8 @@ class ExchangeAnalyzer:
                 FROM 
                     public.{table}
                 WHERE 
-                    created_at >= '{start_time}'::timestamp 
-                    AND created_at <= '{end_time}'::timestamp
+                    created_at >= '{start_time}'::timestamp + INTERVAL '8 hour'
+                    AND created_at <= '{end_time}'::timestamp + INTERVAL '8 hour'
                     AND source_type = 1
                     AND pair_name = '{pair_name}'
                 """
